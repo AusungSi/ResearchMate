@@ -1,88 +1,192 @@
-# MemoMate V1
+# MemoMate
 
-MemoMate 是本地部署的企业微信智能备忘录服务。
+MemoMate 是一个本地优先（Self-hosted）的企业微信智能备忘录助手。  
+你可以像聊天一样发送文字或语音，系统自动理解意图、生成待确认操作、落库并按时提醒。
 
-## 一次性解决 URL 变化问题
+---
 
-你的痛点是 `cloudflared tunnel --url ...` 每次都会变 `trycloudflare.com` 地址。  
-正确方案是使用 **Named Tunnel + 固定域名**，只配一次企业微信回调地址。
+## 项目定位
 
-前提：你有一个接入 Cloudflare 的域名（例如 `example.com`）。
+传统备忘录的问题是“录入重、提醒被动”。MemoMate 的目标是：
+
+- 低摩擦录入：通过企业微信直接说人话，不填表单
+- 本地隐私优先：后端、数据库、模型可在本机运行
+- 可替换能力层：LLM/ASR 均预留 local / external provider 切换
+- 可演示闭环：新增 -> 确认 -> 查询 -> 删除 -> 到点提醒
+
+---
+
+## 当前能力（V1）
+
+- 企业微信双向消息：`GET /wechat` 验签，`POST /wechat` 入站处理
+- 文本提醒闭环：意图解析、二次确认、SQLite 持久化、调度推送
+- 语音转文字：优先使用企业微信 `Recognition`，否则走本地 ASR
+- 幂等去重：同一 `msg_id` 重试不会重复执行业务动作
+- Provider 抽象：Intent LLM、Reply LLM、ASR 均支持配置切换与回退
+- 可观测接口：`/api/v1/health` 与 `/api/v1/capabilities`
+
+---
+
+## 技术栈
+
+- Backend: FastAPI + Uvicorn
+- DB: SQLite + SQLAlchemy
+- Scheduler: APScheduler
+- WeCom SDK: wechatpy + 自定义 client
+- LLM: Ollama（默认 `qwen3:8b`）
+- ASR: faster-whisper + FFmpeg
+- Tunnel: Cloudflare Tunnel（quick 或 named）
+
+---
+
+## 核心流程
+
+1. 企业微信回调进入 `/wechat`
+2. 服务快速 ACK（200），后台异步处理消息
+3. 入站消息按 `msg_id` 去重
+4. 语音消息转写为文本（Recognition 或本地 ASR）
+5. LLM 解析意图（add/query/delete/update）
+6. 写操作进入待确认状态，用户回复“确认/取消”
+7. 确认后写入提醒，APScheduler 周期扫描并触发推送
+
+---
+
+## 目录结构
+
+```text
+app/
+  api/           # wechat, mobile, health 接口
+  core/          # 配置、日志、时区
+  domain/        # 枚举、ORM 模型、schema
+  infra/         # DB 与仓储、WeCom client
+  llm/           # prompt、ollama client、provider
+  services/      # 业务服务（intent/asr/reminder/...）
+  workers/       # 调度派发
+scripts/         # 启动与隧道脚本
+tests/           # 单元与集成测试
+docs/            # 演示文档
+```
+
+---
 
 ## 快速开始
 
-1. 安装依赖
+### 1. 环境准备
+
+- Python（建议 3.10+）
+- FFmpeg（语音转写必需）
+- Ollama（本地 LLM）
+- Cloudflared（需要企业微信公网回调时）
+
+### 2. 安装依赖
 
 ```powershell
 pip install -r requirements.txt
 ```
 
-2. 创建配置
+### 3. 配置环境变量
 
 ```powershell
 copy .env.example .env
 ```
 
-3. 首次一键初始化并启动（会要求你输入固定域名）
+至少补齐以下企业微信配置：
+
+- `WECOM_TOKEN`
+- `WECOM_AES_KEY`
+- `WECOM_CORP_ID`
+- `WECOM_AGENT_ID`
+- `WECOM_SECRET`
+
+### 4. 启动方式
+
+- 一键先测再启（推荐开发态）：
+
+```powershell
+.\scripts\one_click_start_and_test.ps1
+```
+
+- 启动后端 + tunnel：
+
+```powershell
+.\scripts\start_all.ps1
+```
+
+- 仅启动后端：
+
+```powershell
+.\scripts\start_backend.ps1
+```
+
+---
+
+## 企业微信回调地址
+
+### quick tunnel（临时域名）
+
+- 每次启动 URL 都会变化，适合本地临时调试
+
+### named tunnel（固定域名）
+
+- 首次配置一次，后续 URL 稳定
+- 可使用：
 
 ```powershell
 .\scripts\one_click_test.ps1
 ```
 
-脚本会自动做这些事：
-- 如果没配置过固定隧道：执行 Cloudflare 登录、创建 tunnel、绑定 DNS、写入 `.env`
-- 启动后端服务
-- 启动隧道服务
-- 输出固定回调地址 `https://<你的固定域名>/wechat`
-
-4. 在企业微信后台把回调地址配置为上面的固定地址（只需一次）
-
-后续每次启动都只需要：
+或手动：
 
 ```powershell
-.\scripts\one_click_test.ps1
+.\scripts\setup_named_tunnel.ps1 -Hostname memomate.yourdomain.com
 ```
 
-## 其他常用脚本
+---
 
-- 仅启动后端：`.\scripts\start_backend.ps1`
-- 启动隧道（自动优先固定隧道，缺失时退回临时隧道）：`.\scripts\start_tunnel.ps1`
-- 手动初始化固定隧道：`.\scripts\setup_named_tunnel.ps1 -Hostname memomate.yourdomain.com`
-- 本地流程 smoke（不依赖微信）：`python .\scripts\smoke_intent_flow.py`
-- 一键先测再启：`.\scripts\one_click_start_and_test.ps1`
+## API 总览
 
-## API
+- `GET /wechat` 企业微信 URL 验签
+- `POST /wechat` 企业微信消息入口（文本/语音）
+- `GET /api/v1/health` 健康检查
+- `GET /api/v1/capabilities` 当前 provider 能力映射
+- `POST /api/v1/auth/pair` 移动端配对换 token
+- `POST /api/v1/auth/refresh` 刷新 token
+- `GET/POST/PATCH/DELETE /api/v1/reminders` 提醒管理
+- `GET /api/v1/calendar` 日历视图
+- `POST /api/v1/asr/transcribe` 本地语音转文字（Bearer + multipart）
 
-- `GET /wechat`: 企业微信 URL 验证
-- `POST /wechat`: 企业微信消息入口
-- `GET /api/v1/health`: 健康检查
-- `POST /api/v1/auth/pair`: 移动端配对换 token
-- `POST /api/v1/auth/refresh`: 刷新 token
-- `GET/POST/PATCH/DELETE /api/v1/reminders`
-- `GET /api/v1/calendar`
-- `POST /api/v1/asr/transcribe`: 本地语音转文字 API（Bearer + multipart）
-- `GET /api/v1/capabilities`: 当前能力与 provider 映射
+---
 
-## 测试
+## 测试与演示
+
+- 运行测试：
 
 ```powershell
 python -m pytest -q
 ```
 
-## 开发演示
-
-- 详细步骤：`docs/DEMO_STEPS.md`
-
-## 上传 GitHub（首次）
+- 本地 smoke（不依赖企业微信）：
 
 ```powershell
-git init
-git branch -M main
-git add .
-git commit -m "chore: initialize memomate project"
-git remote add origin <你的仓库地址>
-git push -u origin main
+python .\scripts\smoke_intent_flow.py
 ```
 
-说明：
-- `.env`、本地数据库、`cloudflared.exe`、缓存目录已在 `.gitignore` 中排除，不会被上传。
+- 开发演示步骤见：
+
+`docs/DEMO_STEPS.md`
+
+---
+
+## 常见问题
+
+- `cloudflared` 在 VSCode 终端不可用：使用 `.\cloudflared.exe` 或确认 PATH
+- `faster-whisper is not installed`：执行 `pip install -r requirements.txt`
+- 企业微信发不出消息 `errcode 60020`：检查企业可信 IP 白名单
+- `address already in use :8000`：结束占用进程或修改 `APP_PORT`
+
+---
+
+## 安全说明
+
+- `.env`、数据库、缓存、`cloudflared.exe` 已在 `.gitignore` 中排除
+- 请勿把真实密钥提交到仓库
