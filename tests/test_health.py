@@ -71,6 +71,17 @@ class DummyReplyGeneration:
         }
 
 
+class DummyOpenClaw:
+    @staticmethod
+    def metrics_snapshot():
+        return {
+            "openclaw_http_ok": 7,
+            "openclaw_http_fail": 2,
+            "openclaw_cli_fallback_count": 1,
+            "openclaw_latency_ms": 88,
+        }
+
+
 def fake_db():
     class _DB:
         def execute(self, _):
@@ -88,6 +99,7 @@ def test_health_extended_fields():
     app.state.intent_service = DummyIntent()
     app.state.asr_service = DummyAsr()
     app.state.reply_generation_service = DummyReplyGeneration()
+    app.state.openclaw_client = DummyOpenClaw()
     app.include_router(health_router)
     app.dependency_overrides[get_db] = fake_db
 
@@ -111,6 +123,10 @@ def test_health_extended_fields():
     assert body["reply_provider_name"] == "ollama"
     assert body["asr_provider_ok"] is True
     assert body["asr_provider_name"] == "local"
+    assert body["openclaw_http_ok"] == 7
+    assert body["openclaw_http_fail"] == 2
+    assert body["openclaw_cli_fallback_count"] == 1
+    assert body["openclaw_latency_ms"] == 88
 
 
 def test_capabilities_endpoint():

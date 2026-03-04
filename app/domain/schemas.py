@@ -117,6 +117,10 @@ class HealthResponse(BaseModel):
     reply_last_error: str | None = None
     asr_provider_ok: bool = True
     asr_provider_name: str | None = None
+    openclaw_http_ok: int = 0
+    openclaw_http_fail: int = 0
+    openclaw_cli_fallback_count: int = 0
+    openclaw_latency_ms: int = 0
 
 
 class CapabilityItem(BaseModel):
@@ -349,3 +353,68 @@ class AdminChatSendResponse(BaseModel):
     replies: list[AdminChatReplyItem]
     pipeline_status: str
     errors: dict[str, str | None] = Field(default_factory=dict)
+
+
+class ResearchTaskCreateRequest(BaseModel):
+    topic: str
+    year_from: int | None = None
+    year_to: int | None = None
+    top_n: int | None = None
+    sources: list[str] | None = None
+
+
+class ResearchTaskSearchRequest(BaseModel):
+    direction_index: int
+    top_n: int | None = None
+
+
+class ResearchDirectionItem(BaseModel):
+    direction_index: int
+    name: str
+    queries: list[str]
+    exclude_terms: list[str] = Field(default_factory=list)
+    papers_count: int = 0
+
+
+class ResearchPaperItem(BaseModel):
+    index: int
+    title: str
+    authors: list[str] = Field(default_factory=list)
+    year: int | None = None
+    venue: str | None = None
+    doi: str | None = None
+    url: str | None = None
+    abstract: str | None = None
+    method_summary: str = ""
+    source: str
+
+
+class ResearchTaskResponse(BaseModel):
+    task_id: str
+    topic: str
+    status: str
+    constraints: dict = Field(default_factory=dict)
+    directions: list[ResearchDirectionItem] = Field(default_factory=list)
+    papers_total: int = 0
+    created_at: datetime
+    updated_at: datetime
+
+
+class ResearchTaskListResponse(BaseModel):
+    items: list[ResearchTaskResponse]
+    total: int
+
+
+class ResearchSearchResponse(BaseModel):
+    task_id: str
+    direction_index: int
+    page: int
+    page_size: int
+    total: int
+    items: list[ResearchPaperItem] = Field(default_factory=list)
+
+
+class ResearchExportResponse(BaseModel):
+    task_id: str
+    format: str
+    path: str

@@ -6,6 +6,7 @@ from sqlalchemy import (
     Boolean,
     DateTime,
     Enum,
+    Float,
     ForeignKey,
     Integer,
     String,
@@ -18,6 +19,9 @@ from app.domain.enums import (
     DeliveryStatus,
     OperationType,
     PendingActionStatus,
+    ResearchJobStatus,
+    ResearchJobType,
+    ResearchTaskStatus,
     ReminderSource,
     ReminderStatus,
     ScheduleType,
@@ -40,6 +44,7 @@ class User(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
 
     reminders: Mapped[list["Reminder"]] = relationship(back_populates="user")
+    research_tasks: Mapped[list["ResearchTask"]] = relationship(back_populates="user")
 
 
 class InboundMessage(Base):
@@ -146,5 +151,105 @@ class VoiceRecord(Base):
     status: Mapped[VoiceRecordStatus] = mapped_column(Enum(VoiceRecordStatus), nullable=False)
     error: Mapped[str | None] = mapped_column(Text, nullable=True)
     latency_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
+class ResearchTask(Base):
+    __tablename__ = "research_tasks"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    task_id: Mapped[str] = mapped_column(String(64), unique=True, nullable=False)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), nullable=False)
+    topic: Mapped[str] = mapped_column(Text, nullable=False)
+    constraints_json: Mapped[str] = mapped_column(Text, default="{}", nullable=False)
+    status: Mapped[ResearchTaskStatus] = mapped_column(
+        Enum(ResearchTaskStatus), default=ResearchTaskStatus.CREATED, nullable=False
+    )
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+    user: Mapped["User"] = relationship(back_populates="research_tasks")
+    directions: Mapped[list["ResearchDirection"]] = relationship(back_populates="task")
+    jobs: Mapped[list["ResearchJob"]] = relationship(back_populates="task")
+
+
+class ResearchDirection(Base):
+    __tablename__ = "research_directions"
+    __table_args__ = (UniqueConstraint("task_id", "direction_index", name="uq_research_direction_task_idx"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    task_id: Mapped[int] = mapped_column(ForeignKey("research_tasks.id"), nullable=False)
+    direction_index: Mapped[int] = mapped_column(Integer, nullable=False)
+    name: Mapped[str] = mapped_column(String(255), nullable=False)
+    queries_json: Mapped[str] = mapped_column(Text, default="[]", nullable=False)
+    exclude_terms_json: Mapped[str] = mapped_column(Text, default="[]", nullable=False)
+    papers_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+    task: Mapped["ResearchTask"] = relationship(back_populates="directions")
+    papers: Mapped[list["ResearchPaper"]] = relationship(back_populates="direction")
+
+
+class ResearchPaper(Base):
+    __tablename__ = "research_papers"
+    __table_args__ = (
+        UniqueConstraint("task_id", "doi", name="uq_research_paper_task_doi"),
+        UniqueConstraint("task_id", "title_norm", name="uq_research_paper_task_title_norm"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    task_id: Mapped[int] = mapped_column(ForeignKey("research_tasks.id"), nullable=False)
+    direction_id: Mapped[int] = mapped_column(ForeignKey("research_directions.id"), nullable=False)
+    paper_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    title: Mapped[str] = mapped_column(Text, nullable=False)
+    title_norm: Mapped[str] = mapped_column(String(512), nullable=False)
+    authors_json: Mapped[str] = mapped_column(Text, default="[]", nullable=False)
+    year: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    venue: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    doi: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    url: Mapped[str | None] = mapped_column(Text, nullable=True)
+    abstract: Mapped[str | None] = mapped_column(Text, nullable=True)
+    method_summary: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    source: Mapped[str] = mapped_column(String(64), nullable=False)
+    relevance_score: Mapped[float | None] = mapped_column(Float, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+    direction: Mapped["ResearchDirection"] = relationship(back_populates="papers")
+
+
+class ResearchJob(Base):
+    __tablename__ = "research_jobs"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    task_id: Mapped[int] = mapped_column(ForeignKey("research_tasks.id"), nullable=False)
+    job_type: Mapped[ResearchJobType] = mapped_column(Enum(ResearchJobType), nullable=False)
+    status: Mapped[ResearchJobStatus] = mapped_column(
+        Enum(ResearchJobStatus), default=ResearchJobStatus.QUEUED, nullable=False
+    )
+    payload_json: Mapped[str] = mapped_column(Text, default="{}", nullable=False)
+    error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    attempts: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    scheduled_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+    task: Mapped["ResearchTask"] = relationship(back_populates="jobs")
+
+
+class ResearchSession(Base):
+    __tablename__ = "research_sessions"
+    __table_args__ = (UniqueConstraint("user_id", name="uq_research_sessions_user"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), nullable=False)
+    active_task_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    active_direction_index: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    page: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
+    page_size: Mapped[int] = mapped_column(Integer, default=10, nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)

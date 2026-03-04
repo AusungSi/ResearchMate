@@ -3,16 +3,29 @@ from __future__ import annotations
 import hashlib
 from datetime import datetime, timezone
 
+import orjson
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy import Select, and_, desc, func, select
 from sqlalchemy.orm import Session
 
-from app.domain.enums import PendingActionStatus, ReminderStatus, VoiceRecordStatus
+from app.domain.enums import (
+    PendingActionStatus,
+    ReminderStatus,
+    ResearchJobStatus,
+    ResearchJobType,
+    ResearchTaskStatus,
+    VoiceRecordStatus,
+)
 from app.domain.models import (
     DeliveryLog,
     InboundMessage,
     MobileDevice,
     PendingAction,
+    ResearchDirection,
+    ResearchJob,
+    ResearchPaper,
+    ResearchSession,
+    ResearchTask,
     RefreshToken,
     Reminder,
     User,
@@ -358,6 +371,271 @@ class VoiceRecordRepo:
         row.status = status
         row.error = error
         row.latency_ms = latency_ms
+        row.updated_at = now
+        self.db.add(row)
+        self.db.flush()
+        return row
+
+
+class ResearchTaskRepo:
+    def __init__(self, db: Session):
+        self.db = db
+
+    def create(self, row: ResearchTask) -> ResearchTask:
+        self.db.add(row)
+        self.db.flush()
+        return row
+
+    def get_by_task_id(self, task_id: str, user_id: int | None = None) -> ResearchTask | None:
+        filters = [ResearchTask.task_id == task_id]
+        if user_id is not None:
+            filters.append(ResearchTask.user_id == user_id)
+        stmt = select(ResearchTask).where(and_(*filters))
+        return self.db.execute(stmt).scalar_one_or_none()
+
+    def list_recent(self, user_id: int, limit: int = 10) -> list[ResearchTask]:
+        stmt = (
+            select(ResearchTask)
+            .where(ResearchTask.user_id == user_id)
+            .order_by(ResearchTask.created_at.desc())
+            .limit(limit)
+        )
+        return list(self.db.execute(stmt).scalars().all())
+
+    def update_status(self, row: ResearchTask, status: ResearchTaskStatus) -> ResearchTask:
+        row.status = status
+        row.updated_at = datetime.now(timezone.utc)
+        self.db.add(row)
+        self.db.flush()
+        return row
+
+
+class ResearchSessionRepo:
+    def __init__(self, db: Session):
+        self.db = db
+
+    def get_or_create(self, user_id: int, page_size: int = 10) -> ResearchSession:
+        stmt = select(ResearchSession).where(ResearchSession.user_id == user_id)
+        row = self.db.execute(stmt).scalar_one_or_none()
+        if row:
+            return row
+        now = datetime.now(timezone.utc)
+        row = ResearchSession(
+            user_id=user_id,
+            active_task_id=None,
+            active_direction_index=None,
+            page=1,
+            page_size=page_size,
+            created_at=now,
+            updated_at=now,
+        )
+        self.db.add(row)
+        self.db.flush()
+        return row
+
+    def set_active_task(self, row: ResearchSession, task_id: str) -> ResearchSession:
+        row.active_task_id = task_id
+        row.active_direction_index = None
+        row.page = 1
+        row.updated_at = datetime.now(timezone.utc)
+        self.db.add(row)
+        self.db.flush()
+        return row
+
+    def set_pagination(self, row: ResearchSession, *, direction_index: int | None, page: int) -> ResearchSession:
+        row.active_direction_index = direction_index
+        row.page = max(1, page)
+        row.updated_at = datetime.now(timezone.utc)
+        self.db.add(row)
+        self.db.flush()
+        return row
+
+
+class ResearchDirectionRepo:
+    def __init__(self, db: Session):
+        self.db = db
+
+    def replace_for_task(self, task: ResearchTask, directions: list[dict]) -> list[ResearchDirection]:
+        self.db.query(ResearchPaper).filter(ResearchPaper.task_id == task.id).delete()
+        self.db.query(ResearchDirection).filter(ResearchDirection.task_id == task.id).delete()
+        now = datetime.now(timezone.utc)
+        rows: list[ResearchDirection] = []
+        for idx, item in enumerate(directions, start=1):
+            row = ResearchDirection(
+                task_id=task.id,
+                direction_index=idx,
+                name=str(item.get("name") or f"Direction {idx}"),
+                queries_json=orjson.dumps(item.get("queries") or []).decode("utf-8"),
+                exclude_terms_json=orjson.dumps(item.get("exclude_terms") or []).decode("utf-8"),
+                papers_count=0,
+                created_at=now,
+                updated_at=now,
+            )
+            self.db.add(row)
+            rows.append(row)
+        self.db.flush()
+        return rows
+
+    def list_for_task(self, task_id: int) -> list[ResearchDirection]:
+        stmt = select(ResearchDirection).where(ResearchDirection.task_id == task_id).order_by(ResearchDirection.direction_index.asc())
+        return list(self.db.execute(stmt).scalars().all())
+
+    def get_by_index(self, task_id: int, direction_index: int) -> ResearchDirection | None:
+        stmt = select(ResearchDirection).where(
+            and_(ResearchDirection.task_id == task_id, ResearchDirection.direction_index == direction_index)
+        )
+        return self.db.execute(stmt).scalar_one_or_none()
+
+    def update_papers_count(self, row: ResearchDirection, papers_count: int) -> None:
+        row.papers_count = papers_count
+        row.updated_at = datetime.now(timezone.utc)
+        self.db.add(row)
+        self.db.flush()
+
+
+class ResearchPaperRepo:
+    def __init__(self, db: Session):
+        self.db = db
+
+    def replace_direction_papers(self, direction: ResearchDirection, papers: list[dict]) -> list[ResearchPaper]:
+        self.db.query(ResearchPaper).filter(ResearchPaper.direction_id == direction.id).delete()
+        existing_rows = (
+            self.db.execute(
+                select(ResearchPaper).where(
+                    and_(
+                        ResearchPaper.task_id == direction.task_id,
+                        ResearchPaper.direction_id != direction.id,
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+        existing_doi = {
+            (row.doi or "").strip().lower()
+            for row in existing_rows
+            if (row.doi or "").strip()
+        }
+        existing_title = {
+            (row.title_norm or "").strip()
+            for row in existing_rows
+            if (row.title_norm or "").strip()
+        }
+
+        now = datetime.now(timezone.utc)
+        rows: list[ResearchPaper] = []
+        seen_doi: set[str] = set()
+        seen_title: set[str] = set()
+        for item in papers:
+            doi = str(item.get("doi") or "").strip().lower()
+            title_norm = str(item.get("title_norm") or "").strip()[:512]
+            if doi and (doi in existing_doi or doi in seen_doi):
+                continue
+            if title_norm and (title_norm in existing_title or title_norm in seen_title):
+                continue
+            row = ResearchPaper(
+                task_id=direction.task_id,
+                direction_id=direction.id,
+                paper_id=item.get("paper_id"),
+                title=str(item.get("title") or "").strip()[:10000],
+                title_norm=title_norm,
+                authors_json=orjson.dumps(item.get("authors") or []).decode("utf-8"),
+                year=item.get("year"),
+                venue=item.get("venue"),
+                doi=doi or None,
+                url=item.get("url"),
+                abstract=item.get("abstract"),
+                method_summary=str(item.get("method_summary") or ""),
+                source=str(item.get("source") or "unknown"),
+                relevance_score=item.get("relevance_score"),
+                created_at=now,
+                updated_at=now,
+            )
+            self.db.add(row)
+            rows.append(row)
+            if doi:
+                seen_doi.add(doi)
+            if title_norm:
+                seen_title.add(title_norm)
+        self.db.flush()
+        return rows
+
+    def list_for_direction(self, direction_id: int) -> list[ResearchPaper]:
+        stmt = select(ResearchPaper).where(ResearchPaper.direction_id == direction_id).order_by(ResearchPaper.id.asc())
+        return list(self.db.execute(stmt).scalars().all())
+
+    def list_for_task(self, task_id: int) -> list[ResearchPaper]:
+        stmt = select(ResearchPaper).where(ResearchPaper.task_id == task_id).order_by(ResearchPaper.id.asc())
+        return list(self.db.execute(stmt).scalars().all())
+
+
+class ResearchJobRepo:
+    def __init__(self, db: Session):
+        self.db = db
+
+    def create(self, row: ResearchJob) -> ResearchJob:
+        self.db.add(row)
+        self.db.flush()
+        return row
+
+    def enqueue(self, task_id: int, job_type: ResearchJobType, payload: dict) -> ResearchJob:
+        now = datetime.now(timezone.utc)
+        row = ResearchJob(
+            task_id=task_id,
+            job_type=job_type,
+            status=ResearchJobStatus.QUEUED,
+            payload_json=orjson.dumps(payload).decode("utf-8"),
+            error=None,
+            attempts=0,
+            scheduled_at=now,
+            started_at=None,
+            finished_at=None,
+            created_at=now,
+            updated_at=now,
+        )
+        self.db.add(row)
+        self.db.flush()
+        return row
+
+    def next_queued(self) -> ResearchJob | None:
+        stmt = (
+            select(ResearchJob)
+            .where(
+                and_(
+                    ResearchJob.status == ResearchJobStatus.QUEUED,
+                    ResearchJob.scheduled_at <= datetime.now(timezone.utc),
+                )
+            )
+            .order_by(ResearchJob.created_at.asc())
+            .limit(1)
+        )
+        return self.db.execute(stmt).scalar_one_or_none()
+
+    def mark_running(self, row: ResearchJob) -> ResearchJob:
+        now = datetime.now(timezone.utc)
+        row.status = ResearchJobStatus.RUNNING
+        row.started_at = now
+        row.updated_at = now
+        row.attempts += 1
+        self.db.add(row)
+        self.db.flush()
+        return row
+
+    def mark_done(self, row: ResearchJob) -> ResearchJob:
+        now = datetime.now(timezone.utc)
+        row.status = ResearchJobStatus.DONE
+        row.error = None
+        row.finished_at = now
+        row.updated_at = now
+        self.db.add(row)
+        self.db.flush()
+        return row
+
+    def mark_failed(self, row: ResearchJob, error: str) -> ResearchJob:
+        now = datetime.now(timezone.utc)
+        row.status = ResearchJobStatus.FAILED
+        row.error = error[:2000]
+        row.finished_at = now
         row.updated_at = now
         self.db.add(row)
         self.db.flush()

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from app.core.config import Settings
+from app.llm.openclaw_client import OpenClawClient
 from app.llm.ollama_client import OllamaClient
 from app.llm.providers import (
     ExternalIntentProvider,
@@ -8,6 +9,7 @@ from app.llm.providers import (
     IntentLLMProvider,
     LocalOllamaIntentProvider,
     LocalOllamaReplyProvider,
+    OpenClawIntentProvider,
     ReplyLLMProvider,
 )
 from app.services.asr_service import AsrProvider, IflytekAsrProvider, LocalAsrProvider
@@ -26,16 +28,41 @@ def parse_fallback_order(settings: Settings) -> list[str]:
     return out
 
 
-def build_intent_providers(settings: Settings, ollama_client: OllamaClient | None = None) -> list[IntentLLMProvider]:
+def build_intent_providers(
+    settings: Settings,
+    ollama_client: OllamaClient | None = None,
+    openclaw_client: OpenClawClient | None = None,
+) -> list[IntentLLMProvider]:
     local_provider = LocalOllamaIntentProvider(settings=settings, ollama_client=ollama_client)
     external_provider = ExternalIntentProvider(settings=settings)
-    return _ordered_llm_providers(
-        primary=settings.intent_provider.lower().strip(),
-        fallback_enabled=settings.intent_fallback_enabled,
-        fallback_order=parse_fallback_order(settings),
-        local_provider=local_provider,
-        external_provider=external_provider,
+    openclaw_provider = (
+        OpenClawIntentProvider(settings=settings, openclaw_client=openclaw_client)
+        if settings.openclaw_enabled
+        else None
     )
+
+    primary = settings.intent_provider.lower().strip()
+    providers: list[IntentLLMProvider] = []
+    if primary == "openclaw" and openclaw_provider is not None:
+        providers.append(openclaw_provider)
+    elif primary == "external":
+        providers.append(external_provider)
+    else:
+        providers.append(local_provider)
+
+    if settings.intent_fallback_enabled:
+        for order in parse_fallback_order(settings):
+            if order == "openclaw" and openclaw_provider is not None:
+                _append_unique(providers, openclaw_provider)
+            elif order == "local":
+                _append_unique(providers, local_provider)
+            elif order == "external":
+                _append_unique(providers, external_provider)
+
+    if primary != "openclaw" and openclaw_provider is not None:
+        # Prefer OpenClaw as first fallback when enabled, unless explicitly primary.
+        providers.insert(0, openclaw_provider)
+    return providers
 
 
 def build_reply_providers(settings: Settings, ollama_client: OllamaClient | None = None) -> list[ReplyLLMProvider]:

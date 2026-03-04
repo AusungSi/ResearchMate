@@ -22,6 +22,7 @@ from app.services.intent_service import IntentService
 from app.services.reply_generation_service import ReplyGenerationService
 from app.services.reply_renderer import ReplyRenderer
 from app.services.reminder_service import ReminderService
+from app.services.research_command_service import ResearchCommandService
 
 
 logger = get_logger("message_ingest")
@@ -37,6 +38,7 @@ class MessageIngestService:
         asr_service: AsrService | None = None,
         reply_generation_service: ReplyGenerationService | None = None,
         reply_renderer: ReplyRenderer | None = None,
+        research_command_service: ResearchCommandService | None = None,
     ) -> None:
         self.settings = get_settings()
         self.intent_service = intent_service
@@ -46,6 +48,7 @@ class MessageIngestService:
         self.asr_service = asr_service
         self.reply_generation_service = reply_generation_service
         self.reply_renderer = reply_renderer or ReplyRenderer()
+        self.research_command_service = research_command_service
         self.dedup_duplicates = 0
         self.dedup_failures = 0
 
@@ -235,6 +238,17 @@ class MessageIngestService:
                 reply_sink=reply_sink,
             )
             return
+
+        if self.research_command_service and self.research_command_service.is_research_command(normalized):
+            handled = self.research_command_service.handle(
+                db=db,
+                user_id=user.id,
+                wecom_user_id=wecom_user_id,
+                text=normalized,
+                reply_sink=reply_sink,
+            )
+            if handled:
+                return
 
         pending = pending_repo.latest_pending_for_user(user.id)
         if pending:

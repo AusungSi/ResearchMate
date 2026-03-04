@@ -48,6 +48,7 @@ def get_reply_generation(request: Request) -> ReplyGenerationService:
 
 @router.get("/health", response_model=HealthResponse)
 def healthcheck(
+    request: Request,
     db: Session = Depends(get_db),
     scheduler_service: SchedulerService = Depends(get_scheduler),
     ollama_client: OllamaClient = Depends(get_ollama),
@@ -68,6 +69,13 @@ def healthcheck(
     intent_ok, intent_provider_name, intent_last_error = intent_service.health_status()
     reply_ok, reply_provider_name, reply_last_error = reply_generation_service.health_status()
     asr_ok, asr_provider_name, asr_last_error = asr_service.health_status()
+    metrics = {"openclaw_http_ok": 0, "openclaw_http_fail": 0, "openclaw_cli_fallback_count": 0, "openclaw_latency_ms": 0}
+    openclaw_client = getattr(request.app.state, "openclaw_client", None)
+    if openclaw_client and hasattr(openclaw_client, "metrics_snapshot"):
+        try:
+            metrics = openclaw_client.metrics_snapshot()
+        except Exception:
+            metrics = metrics
 
     return HealthResponse(
         db_ok=db_ok,
@@ -88,6 +96,10 @@ def healthcheck(
         reply_last_error=reply_last_error,
         asr_provider_ok=asr_ok,
         asr_provider_name=asr_provider_name,
+        openclaw_http_ok=int(metrics.get("openclaw_http_ok", 0)),
+        openclaw_http_fail=int(metrics.get("openclaw_http_fail", 0)),
+        openclaw_cli_fallback_count=int(metrics.get("openclaw_cli_fallback_count", 0)),
+        openclaw_latency_ms=int(metrics.get("openclaw_latency_ms", 0)),
     )
 
 

@@ -12,6 +12,7 @@ import orjson
 
 from app.core.config import Settings, get_settings
 from app.domain.schemas import IntentLite
+from app.llm.openclaw_client import LLMTaskType, OpenClawClient, OpenClawClientError
 from app.llm.ollama_client import OllamaClient, load_prompt_template
 
 
@@ -132,6 +133,67 @@ class ExternalIntentProvider:
         if missing:
             return False, f"external_intent_config_missing:{','.join(missing)}"
         return False, "external_intent_placeholder_not_implemented"
+
+
+class OpenClawIntentProvider:
+    name = "openclaw"
+    mode = "gateway_http"
+    prompt_version = "intent_openclaw_v1"
+
+    def __init__(
+        self,
+        *,
+        settings: Settings | None = None,
+        openclaw_client: OpenClawClient | None = None,
+        prompt_template: str | None = None,
+    ) -> None:
+        self.settings = settings or get_settings()
+        self.openclaw_client = openclaw_client or OpenClawClient(settings=self.settings)
+        self.prompt_template = prompt_template or load_prompt_template()
+        self.model = f"openclaw:{self.settings.openclaw_agent_id}"
+
+    def parse_intent_raw(self, text: str, timezone_name: str, context_messages: list[str]) -> dict:
+        now_local = datetime.now(ZoneInfo(timezone_name))
+        context_text = LocalOllamaIntentProvider._format_context(context_messages)
+        prompt = (
+            self.prompt_template.replace("{text}", text)
+            .replace("{now_local}", now_local.isoformat())
+            .replace("{conversation_context}", context_text)
+        )
+        system_prompt = (
+            "You are memomate-intent-parser. "
+            "Return strict JSON exactly matching the schema in the prompt."
+        )
+        try:
+            result = self.openclaw_client.chat_completion(
+                task_type=LLMTaskType.INTENT_PARSE,
+                prompt=prompt,
+                system_prompt=system_prompt,
+                user=f"intent:{timezone_name}",
+                temperature=self.settings.ollama_intent_temperature,
+                max_tokens=1024,
+            )
+        except OpenClawClientError as exc:
+            raise LlmProviderError(f"openclaw_intent_failed:{exc.code}") from exc
+
+        raw = (result.text or "").strip()
+        if raw.startswith("```"):
+            raw = re.sub(r"^```[a-zA-Z0-9_-]*\s*", "", raw)
+            raw = re.sub(r"\s*```$", "", raw).strip()
+        try:
+            data = orjson.loads(raw)
+        except Exception as exc:
+            raise LlmProviderError("openclaw intent returned invalid json") from exc
+        if not isinstance(data, dict):
+            raise LlmProviderError("openclaw intent provider returned non-dict payload")
+        return data
+
+    def parse_intent(self, text: str, timezone_name: str, context_messages: list[str]) -> IntentLite:
+        data = self.parse_intent_raw(text, timezone_name, context_messages)
+        return IntentLite.model_validate(data)
+
+    def healthcheck(self) -> tuple[bool, str | None]:
+        return self.openclaw_client.healthcheck()
 
 
 class LocalOllamaReplyProvider:

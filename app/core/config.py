@@ -34,7 +34,7 @@ class Settings(BaseSettings):
     ollama_intent_temperature: float = 0.0
     ollama_nlg_temperature: float = 0.2
     ollama_nlg_model: str | None = None
-    intent_provider: str = "local"
+    intent_provider: str = "openclaw"
     intent_local_backend: str = "ollama"
     intent_external_base_url: str = ""
     intent_external_api_key: str = ""
@@ -75,6 +75,23 @@ class Settings(BaseSettings):
     default_timezone: str = "Asia/Shanghai"
     pending_action_minutes: int = 10
     pair_code_minutes: int = 10
+
+    openclaw_enabled: bool = False
+    openclaw_base_url: str = "http://127.0.0.1:18789"
+    openclaw_gateway_token: str = ""
+    openclaw_agent_id: str = "memomate"
+    openclaw_timeout_seconds: int = 30
+    openclaw_retries: int = 2
+    openclaw_cli_path: str = "~/.openclaw/bin/openclaw"
+
+    research_enabled: bool = False
+    research_job_interval_seconds: int = 20
+    research_direction_min: int = 3
+    research_direction_max: int = 8
+    research_topn_default: int = 20
+    research_page_size: int = 10
+    research_sources_default: str = "semantic_scholar,arxiv"
+    research_artifact_dir: str = "./artifacts/research"
 
 
 @lru_cache(maxsize=1)

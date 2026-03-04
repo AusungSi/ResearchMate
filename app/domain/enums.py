@@ -48,3 +48,23 @@ class VoiceRecordStatus(str, Enum):
 class TokenType(str, Enum):
     ACCESS = "access"
     REFRESH = "refresh"
+
+
+class ResearchTaskStatus(str, Enum):
+    CREATED = "created"
+    PLANNING = "planning"
+    SEARCHING = "searching"
+    DONE = "done"
+    FAILED = "failed"
+
+
+class ResearchJobType(str, Enum):
+    PLAN = "plan"
+    SEARCH = "search"
+
+
+class ResearchJobStatus(str, Enum):
+    QUEUED = "queued"
+    RUNNING = "running"
+    DONE = "done"
+    FAILED = "failed"
