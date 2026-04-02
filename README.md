@@ -2,7 +2,7 @@
 
 # OpenClaw for Paper Research
 
-本地优先的研究工作流与个人助理原型，围绕 OpenClaw 构建文献规划、轮次探索、全文处理、引文图谱和轻量提醒能力。代码中的应用名仍为 `MemoMate`。
+本地优先的研究工作流与个人助理原型，围绕 OpenClaw 构建文献规划、轮次探索、全文处理、引文图谱和轻量提醒能力。
 
 <p>
   <a href="https://github.com/AusungSi/OpenClaw-for-paper-research/stargazers"><img alt="GitHub stars" src="https://img.shields.io/github/stars/AusungSi/OpenClaw-for-paper-research?style=social"></a>
@@ -186,11 +186,3 @@ python -m pytest -q
 ```
 
 测试覆盖了 research API、队列 reclaim、OpenClaw client、提醒流程、语音消息、管理台和移动端配对等主路径。
-
-## Current Boundaries
-
-- 当前默认不做 OCR：`RESEARCH_OCR_ENABLED=false`
-- Research 图谱默认是按需触发，而不是每次检索自动扩展
-- 项目仍是原型架构，配置、安全和部署策略更偏本地研发环境
-
-如果你准备把它演化为长期维护的研究平台，优先建议补齐：生产配置管理、权限模型、对象存储、任务监控和前后端拆分部署。
