@@ -1,881 +1,542 @@
 # OpenClaw for Paper Research 项目说明文档
 
 生成时间：2026-04-16
+文档状态：已同步到当前 `research_local` 重构进度
 
-## 1. 项目定位
+## 1. 当前项目定位
 
-当前仓库是一个基于 FastAPI 的个人研究助手原型，项目名为 `OpenClaw for Paper Research`。它并不是单纯的论文搜索脚本，而是一个组合型后端系统：
+当前仓库已经不再以“企业微信提醒助手”作为默认主线，而是转向一个本地运行的单用户研究工作台。
 
-- 以企业微信作为轻量消息入口，支持文本、语音消息、提醒创建、确认、查询和研究状态通知。
-- 以移动端 API 作为提醒和语音转写入口，支持配对码、JWT access token、refresh token。
-- 以本地 Research UI 作为主要研究操作界面，支持创建研究任务、规划方向、多轮探索、论文检索、全文处理、引文图构建、论文保存和导出。
-- 以 OpenClaw/Ollama/模板回退构成 LLM 能力层，用于意图识别、回复生成、研究方向规划、论文要点总结。
-- 以 SQLite + SQLAlchemy 存储用户、消息、提醒、研究任务、论文、全文、图谱快照和异步任务队列。
+当前默认目标形态是：
 
-从代码结构看，项目当前更像一个“可运行的研究助手 MVP/原型系统”。其中 `research` 模块已经明显成为最大业务域，后续改造时建议优先围绕这个模块拆分边界。
+- 运行环境：`WSL / Linux VM`
+- 默认部署档位：`research_local`
+- 默认使用方式：本地启动后，通过浏览器访问前端工作台
+- 核心能力：围绕论文研究任务进行规划、检索、探索、全文处理、图谱构建、报告输出和工作台组织
 
-## 2. 技术栈概览
+项目当前的真实目标可以概括为一句话：
 
-主要技术栈：
+> 一个运行在本地 Linux 环境中的 research-only 研究系统，支持半自动的 `GPT Step` 模式，以及分阶段自治的 `OpenClaw Auto` 模式，并通过独立前端工作台承载卡片化研究过程。
+
+## 2. 当前阶段结论
+
+这轮重构之后，仓库已经进入“research-only 主线已跑通，legacy 功能软下线”的状态。
+
+已经完成的核心变化：
+
+- 默认启动档位改为 `research_local`
+- `research` API 在本地档位下不再依赖 JWT
+- 旧的企业微信、提醒、移动端认证、Admin、自建通知、ASR 链路默认不参与启动
+- 引入了独立前端工程 `frontend/`
+- 增加了 `GPT Step` 和 `OpenClaw Auto` 两种研究模式
+- 增加了 `canvas state`、`run events`、`node chat` 相关数据结构和 API
+- 补充了 WSL 下前后端启动、构建、打包脚本
+
+当前仍然保留但不是默认主线的内容：
+
+- 企业微信入口
+- 提醒和确认流
+- 移动端 JWT 配对与提醒 API
+- Admin / Dev 页面
+- 本地语音转写链路
+- 原内嵌 `research_ui`
+
+这些内容没有被删除，但只有在 `legacy_full` 档位下才会重新进入启动链路。
+
+## 3. 当前技术栈
+
+### 后端
 
 - Python 3.10+
-- FastAPI / Starlette：HTTP API、Webhook、内嵌本地 UI
-- SQLAlchemy 2.x：ORM 与 SQLite 持久化
-- Alembic：数据库迁移脚本
-- APScheduler：后台调度提醒和内部 research job
-- httpx / requests：外部 HTTP 调用
-- pydantic / pydantic-settings：配置和请求响应模型
-- PyJWT / passlib：移动端认证相关能力
-- wechatpy：企业微信回调加解密
-- faster-whisper / av：本地语音识别链路
-- PyMuPDF / pdfminer.six：PDF 全文解析
-- networkx：图谱指标计算
-- OpenClaw / Ollama：LLM 能力提供方
-- pytest：自动化测试
+- FastAPI / Starlette
+- SQLAlchemy 2.x
+- Alembic
+- SQLite
+- APScheduler
+- httpx / requests
+- pydantic / pydantic-settings
+- PyMuPDF / pdfminer.six
+- networkx
 
-默认数据库为 SQLite，配置项是 `DB_URL=sqlite:///./memomate.db`。默认应用端口是 `8000`。
+### 模型与研究能力
 
-## 3. 仓库结构
+- OpenClaw：用于原生自治式 research 流程
+- GPT API：用于 step-by-step 半自动研究流程
+- Ollama：仍保留在代码中，但不再是当前主线文档的重点
+
+### 前端
+
+- Vite
+- React
+- TypeScript
+- React Flow
+- Tailwind CSS
+- TanStack Query
+
+### 部署与运行
+
+- WSL / Linux VM
+- Docker Compose
+- 仓库内 WSL Node 工具链脚本
+
+## 4. 当前仓库结构
 
 ```text
 OpenClaw-for-paper-research/
 ├── app/
-│   ├── api/              # FastAPI 路由：wechat、mobile、health、research、admin、dev、research_ui
-│   ├── core/             # 配置、日志、时区工具
-│   ├── domain/           # SQLAlchemy 模型、枚举、Pydantic schema
-│   ├── infra/            # DB session、Repository、企业微信 client
-│   ├── llm/              # OpenClaw/Ollama client、provider、prompt 文件
-│   ├── services/         # 核心业务服务
-│   └── workers/          # 提醒分发器、research worker
-├── docs/                 # 已有架构/演示/LLM 调优文档，本文件也放在这里
-├── migrations/           # Alembic 迁移脚本
-├── scripts/              # PowerShell 启动、测试、隧道、LLM 调试脚本
-├── tests/                # 单元测试和集成测试
-├── .env.example          # 配置模板
-├── alembic.ini
-├── README.md
-└── requirements.txt
+│   ├── api/                  # FastAPI 路由，默认主用 health + research
+│   ├── core/                 # 配置、日志、时区工具
+│   ├── domain/               # SQLAlchemy 模型、枚举、Pydantic schema
+│   ├── infra/                # DB、repo、外部 client
+│   ├── llm/                  # OpenClaw / Ollama / GPT 相关封装
+│   ├── services/             # research 核心服务
+│   └── workers/              # research worker
+├── docs/
+│   ├── PROJECT_OVERVIEW_ZH.md
+│   ├── RESEARCH_LOCAL_QUICKSTART.md
+│   ├── README.md
+│   └── design/              # 前端示例与设计参考
+├── frontend/                # 独立前端工作台工程
+├── artifacts/               # research 产物、前端打包产物
+├── data/                    # 本地 SQLite 等数据
+├── migrations/
+├── scripts/                 # WSL / research-local 启停、构建、打包脚本
+├── tests/
+├── docker-compose.yml
+├── Dockerfile.backend
+├── requirements-research-local.txt
+├── requirements.txt
+└── README.md
 ```
 
-代码体量上，`app/` 下约有 46 个文件，`tests/` 下约有 23 个测试文件。当前最重的文件包括：
-
-- `app/services/research_service.py`：约 3029 行，是 research 业务核心中枢。
-- `app/infra/repos.py`：约 1429 行，集中放置所有仓储类。
-- `app/api/research_ui.py`：约 824 行，内嵌 HTML/CSS/JS 本地研究界面。
-- `app/api/admin.py`：约 641 行，包含本地管理 API 与 HTML 页面。
-- `app/api/research.py`：约 622 行，包含 research REST API。
-- `app/domain/schemas.py`：约 537 行，集中定义请求/响应 schema。
-- `app/services/research_command_service.py`：约 477 行，处理企业微信 research 命令。
-
-这说明后续重构时，主要复杂度不在入口文件，而集中在 `research_service.py`、`repos.py`、`research_ui.py` 和 `admin.py`。
-
-## 4. 应用启动链路
-
-应用入口是 `app/main.py`。
-
-启动时会执行以下工作：
-
-1. 调用 `setup_logging()` 初始化日志。
-2. 读取 `.env` 和默认配置，生成全局 `settings`。
-3. 在 FastAPI lifespan 中调用 `init_db()`，根据 SQLAlchemy 模型创建表。
-4. 初始化外部 client：
-   - `WeComClient`
-   - `OllamaClient`
-   - `OpenClawClient`
-5. 根据配置构造 Provider 链：
-   - intent providers
-   - reply providers
-   - ASR providers
-6. 初始化业务服务：
-   - `AsrService`
-   - `ReplyRenderer`
-   - `ReplyGenerationService`
-   - `IntentService`
-   - `ConfirmService`
-   - `ReminderService`
-   - `ResearchService`
-   - `ResearchCommandService`
-   - `MobileAuthService`
-   - `MessageIngestService`
-   - `SchedulerService`
-7. 将这些服务挂到 `app.state`，供路由依赖注入使用。
-8. 启动 APScheduler。
-9. 注册所有 router。
-
-注册的 router 包括：
-
-- `/wechat`
-- `/api/v1/health`
-- `/api/v1/capabilities`
-- `/api/v1/auth/*`
-- `/api/v1/reminders/*`
-- `/api/v1/asr/transcribe`
-- `/api/v1/research/*`
-- `/research/ui`
-- `/api/v1/dev/*`
-- `/admin`
-- `/api/v1/admin/*`
-
-## 5. 配置体系
-
-配置集中在 `app/core/config.py` 的 `Settings` 类中，通过 `pydantic-settings` 从 `.env` 读取。
-
-主要配置分组如下：
-
-- 应用配置：`APP_NAME`、`APP_ENV`、`APP_HOST`、`APP_PORT`、`LOG_LEVEL`
-- 数据库配置：`DB_URL`
-- 调度配置：`SCHEDULER_INTERVAL_SECONDS`、`REMINDER_RETRY_MINUTES`
-- 企业微信配置：`WECOM_TOKEN`、`WECOM_AES_KEY`、`WECOM_CORP_ID`、`WECOM_AGENT_ID`、`WECOM_SECRET`
-- Ollama 配置：`OLLAMA_BASE_URL`、`OLLAMA_MODEL`、温度、超时
-- LLM provider 配置：`INTENT_PROVIDER`、`REPLY_PROVIDER`、fallback 开关和顺序
-- OpenClaw 配置：`OPENCLAW_ENABLED`、`OPENCLAW_BASE_URL`、`OPENCLAW_GATEWAY_TOKEN`、`OPENCLAW_AGENT_ID`、CLI fallback
-- ASR 配置：本地 whisper、外部讯飞占位、fallback
-- 移动端认证配置：`JWT_SECRET`、`ACCESS_TOKEN_MINUTES`、`REFRESH_TOKEN_DAYS`
-- research 配置：是否启用、队列模式、worker、方向数量、检索数量、缓存、全文、图谱、探索轮次、导出路径
-- Cloudflare tunnel 配置：用于企业微信回调地址暴露
-
-默认 `.env.example` 中 `OPENCLAW_ENABLED=false`、`RESEARCH_ENABLED=false`。如果要运行完整 research 功能，至少需要打开：
-
-```env
-OPENCLAW_ENABLED=true
-RESEARCH_ENABLED=true
-RESEARCH_QUEUE_MODE=worker
-```
+与旧版本相比，当前结构上最重要的变化有三点：
 
-如果只想先跑本地 Research UI，可以先不配置企业微信真实凭据，但涉及消息推送、导出文件发送、语音下载时仍会依赖企业微信配置。
+- 新增 `frontend/` 独立前端工程
+- 新增 `requirements-research-local.txt` 作为 research-only 运行依赖入口
+- 新增一组 WSL 本地启动与打包脚本
 
-## 6. 分层说明
+## 5. 启动档位与应用装配
 
-### 6.1 API 层
+当前应用存在两个启动档位：
 
-API 层位于 `app/api/`。
+### 5.1 `research_local`
 
-主要文件职责：
-
-- `wechat.py`：企业微信 URL 验证和消息接收，负责解密回调 XML，然后把文本或语音消息交给 `MessageIngestService`。
-- `mobile.py`：移动端认证、提醒 CRUD、日历视图、音频上传转写。
-- `health.py`：健康检查和能力查询，聚合 DB、scheduler、WeCom、ASR、LLM、OpenClaw、research metrics。
-- `research.py`：research REST API，依赖移动端 Bearer token 识别用户。
-- `research_ui.py`：内嵌本地研究 UI，路径是 `/research/ui`。
-- `dev.py`：本地开发 token 和用户列表，限制 localhost 访问。
-- `admin.py`：本地管理后台页面和 `/api/v1/admin/*` API，限制 localhost 访问。
+这是当前默认档位，也是当前文档描述的主线。
 
-### 6.2 Domain 层
+特点：
 
-Domain 层位于 `app/domain/`。
+- 默认用于本地单用户 research 工作台
+- 启动时只初始化 research 相关依赖
+- 默认只注册：
+  - `/api/v1/health`
+  - `/api/v1/research/*`
+- research API 无需 JWT，隐式绑定本地单例用户
 
-主要文件：
+当前 `app/main.py` 的 `research_local` 启动逻辑会初始化：
 
-- `models.py`：SQLAlchemy 数据库模型。
-- `schemas.py`：Pydantic 请求/响应模型。
-- `enums.py`：业务枚举。
+- 数据库
+- `OpenClawClient`
+- `ResearchService`
 
-当前模型分为几大类：
+不会默认初始化：
 
-- 用户与消息：`User`、`InboundMessage`
-- 待确认动作：`PendingAction`
-- 提醒：`Reminder`、`DeliveryLog`
-- 移动端认证：`MobileDevice`、`RefreshToken`
-- 语音：`VoiceRecord`
-- Research：`ResearchTask`、`ResearchDirection`、`ResearchSeedPaper`、`ResearchPaper`、`ResearchJob`、`ResearchSession`、`ResearchSearchCache`、`ResearchPaperFulltext`、`ResearchCitationEdge`、`ResearchGraphSnapshot`、`ResearchRound`、`ResearchRoundCandidate`、`ResearchRoundPaper`、`ResearchCitationFetchCache`
+- `WeComClient`
+- `SchedulerService`
+- `MessageIngestService`
+- `ReminderService`
+- `MobileAuthService`
+- Admin / Dev / WeChat 相关 router
 
-### 6.3 Infra 层
+### 5.2 `legacy_full`
 
-Infra 层位于 `app/infra/`。
+这是保留兼容档位，用于回到旧系统的全量链路。
 
-主要职责：
+特点：
 
-- `db.py`：创建 engine、sessionmaker、`session_scope()`、FastAPI `get_db()`。
-- `repos.py`：集中封装所有业务表的 CRUD 和查询。
-- `admin_repo.py`：管理后台专用聚合查询。
-- `wecom_client.py`：企业微信 token 获取、文本发送、文件发送、素材下载。
+- 恢复企业微信、提醒、移动端认证、Admin、ASR 等能力
+- 恢复完整路由注册
+- 启动路径仍保留，但不再是当前项目主文档的默认推荐方式
 
-目前 `repos.py` 体量较大，包含所有 repo 类。后续如果要增强可维护性，建议按业务域拆分，比如 `user_repo.py`、`reminder_repo.py`、`research_repo/`。
+## 6. 当前运行方式
 
-### 6.4 Service 层
+## 6.1 推荐方式：WSL / Linux VM
 
-Service 层位于 `app/services/`。
+当前推荐的本地运行方式是：
 
-主要服务：
+- 后端运行在 WSL / Linux VM
+- worker 运行在 WSL / Linux VM
+- 前端运行在 WSL / Linux VM
 
-- `MessageIngestService`：统一处理企业微信/管理聊天入口的文本和语音消息。
-- `IntentService`：调用 LLM provider 识别提醒意图，并做 fallback 解析和归一化。
-- `ConfirmService`：生成 pending action，解析用户确认/取消。
-- `ReminderService`：创建、更新、删除、查询提醒。
-- `SchedulerService`：定时分发提醒，也可以在 internal 队列模式下处理 research job。
-- `ReplyGenerationService`：调用回复 provider 生成自然语言回复，并校验必要事实。
-- `ReplyRenderer`：确定性回复模板。
-- `AsrService`：语音转写，支持本地和外部 provider fallback。
-- `MobileAuthService`：JWT access/refresh token 生成、校验和刷新。
-- `AdminService`：管理后台聚合和操作。
-- `ResearchCommandService`：企业微信 research 命令解析。
-- `ResearchService`：research 核心业务中枢。
+默认本地地址：
 
-### 6.5 LLM 层
+- 前端工作台：`http://127.0.0.1:5173`
+- 后端 API：`http://127.0.0.1:8000`
 
-LLM 层位于 `app/llm/`。
+## 6.2 Compose 形态
 
-主要组成：
+仓库已经提供 `docker-compose.yml`，定义了三个服务：
 
-- `openclaw_client.py`：封装 OpenClaw HTTP gateway 调用和 CLI fallback。
-- `ollama_client.py`：封装本地 Ollama `/api/generate` 调用。
-- `providers.py`：定义 intent/reply provider 协议，以及 Ollama/OpenClaw/external provider 实现。
-- `prompts/intent_v1.txt`：意图识别 prompt。
-- `prompts/reply_nlg_v1.txt`：回复生成 prompt。
+- `backend`
+- `worker`
+- `frontend`
 
-OpenClaw 支持的任务类型包括：
+其中：
 
-- `intent_parse`
-- `research_plan`
-- `abstract_summarize`
-- `paper_keypoints`
+- `backend` 使用 `Dockerfile.backend`
+- `worker` 运行 `python -m app.workers.research_worker`
+- `frontend` 使用 `frontend/Dockerfile`
 
-当前 external provider 主要是占位实现，配置检查存在，但实际调用尚未完成。
+当前 Compose 文件已经准备好，但在这台机器上还没有完成一次完整的 `docker compose up --build` 实机验收，原因是当时环境中没有可用 Docker。
 
-## 7. 核心业务流程
+## 6.3 WSL 前端工具链
 
-### 7.1 企业微信文本消息流程
+为了避免系统级安装依赖，仓库里已经补了 WSL 前端脚本：
 
-入口：
+- `scripts/install_frontend_node_wsl.sh`
+- `scripts/start_frontend_wsl.sh`
+- `scripts/stop_frontend_wsl.sh`
+- `scripts/build_frontend_wsl.sh`
+- `scripts/package_frontend_wsl.sh`
 
-```text
-POST /wechat
-```
+Node 会安装到仓库内的 `.wsl-tools/`，不污染系统全局环境。
 
-流程：
+## 7. 当前 research 模式设计
 
-1. `wechat.py` 解密企业微信消息。
-2. 解析 XML，识别消息类型。
-3. 文本消息交给 `MessageIngestService.process_text_message()`。
-4. `MessageIngestService` 根据 `wecom_user_id` 获取或创建用户。
-5. 写入 `inbound_messages`，用 `wecom_msg_id` 去重。
-6. 判断是否是移动端配对命令。
-7. 判断是否是 research 命令。
-8. 如果有 pending action，则解析用户确认/取消。
-9. 如果是普通提醒消息，调用 `IntentService` 解析意图。
-10. 查询类意图直接返回提醒摘要。
-11. 新增/删除/更新类意图先创建 `PendingAction`，然后回复确认文案。
+当前系统明确支持两种研究模式。
 
-### 7.2 企业微信语音消息流程
+### 7.1 `GPT Step`
 
-入口同样是 `/wechat`。
+这是半自动模式。
 
-流程：
+特点：
 
-1. 如果企业微信回调中已经带有 `Recognition` 字段，则直接使用该文本。
-2. 如果没有识别文本，则通过 `WeComClient.download_media()` 下载音频。
-3. 交给 `AsrService.transcribe_wecom_media()`。
-4. 本地 ASR provider 会使用 faster-whisper，并可能调用 ffmpeg 转换音频。
-5. 转写结果写入 `voice_records`。
-6. 转写文本继续走普通文本消息流程。
+- 用户逐步推进研究流程
+- 后端沿用现有 research pipeline
+- 每一步由用户显式触发
+- 更适合“人来控节奏，模型辅助推进”的场景
+
+当前这条链路仍然复用了原有 research 主体能力，例如：
+
+- 创建任务
+- 规划方向
+- 检索方向
+- 开始 exploration round
+- 生成候选
+- 选择候选
+- 继续下一轮
+- 全文处理
+- 图谱构建
+- 论文总结
+
+### 7.2 `OpenClaw Auto`
+
+这是分阶段自治模式。
+
+特点：
 
-### 7.3 提醒流程
+- OpenClaw 负责自动推进 research
+- 后端记录中间事件流
+- 在 checkpoint 暂停，等待用户给出 guidance
+- guidance 提交后继续下一阶段
 
-提醒相关数据表：
+当前第一版已经实现的流程骨架是：
 
-- `reminders`
-- `deliveries`
-- `pending_actions`
+- `start`
+- `progress`
+- `checkpoint`
+- `guidance`
+- `continue`
+- `report_chunk`
+- `artifact`
+- `cancel`
 
-流程：
+这条链路已经具备“阶段性同步 + 用户引导后继续”的基本形态，但还不是最终完整版自治编排。
 
-1. 用户发消息，例如“明天早上 9 点提醒我开会”。
-2. LLM 解析为 `IntentDraft`。
-3. 系统回复确认文案。
-4. 用户确认后，`ReminderService.apply_confirmed_draft()` 写入提醒。
-5. `SchedulerService` 定期调用 `Dispatcher.dispatch_due()`。
-6. `Dispatcher` 查询到期提醒，调用 `WeComClient.send_text()` 发送消息。
-7. 发送结果写入 `deliveries`。
-8. 对周期性提醒，根据 RRULE 计算下一次执行时间。
+## 8. 当前 research 数据结构
 
-## 8. Research 模块说明
+## 8.1 保留的 canonical research 数据
 
-Research 是当前项目最复杂的业务域。
+当前保留并继续使用的核心 research 数据表包括：
 
-### 8.1 Research 目标
+- `research_tasks`
+- `research_directions`
+- `research_seed_papers`
+- `research_papers`
+- `research_rounds`
+- `research_round_candidates`
+- `research_round_papers`
+- `research_paper_fulltext`
+- `research_citation_edges`
+- `research_graph_snapshots`
+- `research_search_cache`
+- `research_citation_fetch_cache`
+- `research_jobs`
+- `research_sessions`
 
-Research 模块的目标是把“搜索论文”升级为一个持续迭代的研究流程：
+## 8.2 新增的任务运行字段
 
-```text
-Topic
-  -> 初始方向规划
-  -> 每个方向检索论文
-  -> 用户反馈
-  -> 生成下一轮候选方向
-  -> 选择候选并继续检索
-  -> 全文解析
-  -> 引文图构建
-  -> 保存/导出/总结
-```
+`ResearchTask` 现在额外记录：
 
-### 8.2 Research 数据模型
+- `mode`
+  - `gpt_step`
+  - `openclaw_auto`
+- `llm_backend`
+  - `gpt`
+  - `openclaw`
+- `llm_model`
+- `auto_status`
+  - `idle`
+  - `running`
+  - `awaiting_guidance`
+  - `completed`
+  - `failed`
+  - `canceled`
+- `last_checkpoint_id`
 
-核心表：
+## 8.3 新增的数据表
 
-- `research_tasks`：研究任务主体，保存 topic、constraints、status。
-- `research_directions`：初始研究方向，每个方向有名称、queries、exclude terms、论文数量。
-- `research_seed_papers`：规划方向前的种子论文语料，用于让 LLM 基于真实论文归纳方向。
-- `research_papers`：检索到的论文，包含标题、作者、年份、venue、DOI、URL、abstract、方法摘要、保存状态、要点总结状态。
-- `research_rounds`：用户驱动的探索轮次，记录 action、feedback、query terms、深度和父轮次。
-- `research_round_candidates`：某一轮 propose 出来的候选方向。
-- `research_round_papers`：轮次与论文的映射。
-- `research_paper_fulltext`：论文全文抓取、PDF 路径、文本路径、解析状态、质量分。
-- `research_citation_edges`：引用/被引边。
-- `research_graph_snapshots`：树图或引文图快照。
-- `research_search_cache`：检索缓存。
-- `research_citation_fetch_cache`：引文 provider 抓取缓存。
-- `research_jobs`：异步任务队列表，支持 lease、heartbeat、retry、worker reclaim。
-- `research_sessions`：用户当前活动任务、方向、分页状态。
+本轮新增了三类与工作台和自动运行相关的数据表：
 
-### 8.3 Research Job 类型
+- `research_canvas_state`
+  - 保存用户工作台状态
+  - 包括节点位置、手工节点、手工边、隐藏状态、备注、viewport 等
+- `research_run_events`
+  - 保存 GPT / OpenClaw 的运行事件流
+- `research_node_chats`
+  - 保存节点级问答历史
 
-当前枚举 `ResearchJobType` 包括：
+## 9. 当前后端 API
 
-- `plan`：规划研究方向。
-- `search`：按方向或轮次检索论文。
-- `fulltext`：抓取和解析全文。
-- `graph_build`：构建树图或引文图。
-- `paper_summary`：总结单篇论文要点。
+## 9.1 保留的 research 主路径
 
-Job 状态：
+当前仍然保留并继续服务于 `GPT Step` 模式的主路径包括：
 
-- `queued`
-- `running`
-- `done`
-- `failed`
+- `POST /api/v1/research/tasks`
+- `GET /api/v1/research/tasks`
+- `GET /api/v1/research/tasks/{task_id}`
+- 原有 `search / explore / fulltext / graph / export / summarize` 路径
 
-### 8.4 Research 队列模式
+## 9.2 新增路径
 
-配置项：
+### 画布相关
 
-```env
-RESEARCH_QUEUE_MODE=worker
-```
+- `GET /api/v1/research/tasks/{task_id}/canvas`
+- `PUT /api/v1/research/tasks/{task_id}/canvas`
 
-支持两种模式：
+### OpenClaw Auto 相关
 
-- `internal`：由 FastAPI 进程中的 `SchedulerService` 定时调用 `ResearchService.process_one_job()`。
-- `worker`：由独立进程 `app.workers.research_worker` 轮询数据库 job 队列。
+- `POST /api/v1/research/tasks/{task_id}/auto/start`
+- `GET /api/v1/research/tasks/{task_id}/runs/{run_id}/events`
+- `POST /api/v1/research/tasks/{task_id}/runs/{run_id}/guidance`
+- `POST /api/v1/research/tasks/{task_id}/runs/{run_id}/continue`
+- `POST /api/v1/research/tasks/{task_id}/runs/{run_id}/cancel`
 
-当前 README 和脚本更推荐 `worker` 模式，因为 research job 可能执行较久，包含外部检索、LLM 调用、PDF 下载和图构建。
+### 节点问答与资产
 
-Worker 机制：
+- `POST /api/v1/research/tasks/{task_id}/nodes/{node_id}/chat`
+- `GET /api/v1/research/tasks/{task_id}/papers/{paper_id}/asset`
 
-1. `research_worker.py` 启动后创建 `worker_id`。
-2. 按 `RESEARCH_WORKER_POLL_SECONDS` 轮询。
-3. 每轮最多处理 `RESEARCH_WORKER_CONCURRENCY` 个 job。
-4. 使用 `ResearchJobRepo.claim_next()` 抢占 job。
-5. claim 时写入 `worker_id` 和 `lease_until`。
-6. 长任务执行时通过 heartbeat 延长 lease。
-7. 如果 worker 崩溃，lease 过期后其他 worker 可 reclaim。
-8. 失败后按最大重试次数和指数退避重新排队。
+## 9.3 当前接口行为约束
 
-### 8.5 Research 规划流程
+当前后端已经按下面的分层原则工作：
 
-创建任务时：
+- `graph` 返回 canonical research graph
+- `canvas` 返回用户工作台状态
+- 用户拖拽、手工节点、手工边、隐藏状态只写入 `canvas state`
+- 系统图谱和用户工作台不直接互相覆盖
 
-1. API 或企业微信命令调用 `ResearchService.create_task()`。
-2. 系统写入 `research_tasks`。
-3. 同时写入一个 `PLAN` job。
-4. 设置用户 `research_sessions.active_task_id`。
+这点很重要，因为后续要做更强的前端组织能力时，必须保证“研究结果”和“工作台视图”分层存储。
 
-执行 `PLAN` job 时：
+## 10. 当前前端工作台
 
-1. `ResearchService._build_seed_corpus_for_task()` 根据 topic 先检索种子论文。
-2. 种子来源包括 Semantic Scholar 和 arXiv。
-3. 对种子论文去重后写入 `research_seed_papers`。
-4. `ResearchService._plan_directions_from_seed()` 基于种子论文构造 prompt。
-5. 调用 OpenClaw 生成方向 JSON。
-6. 如果 LLM 失败或输出不合规，则 fallback 到 `ResearchService._plan_directions()`。
-7. 如果仍失败，则使用 `_fallback_directions()`。
-8. 方向写入 `research_directions`。
-9. 任务状态更新为 `created`。
+前端已经从旧的 Python 内嵌 HTML 字符串迁移为独立工程。
 
-### 8.6 Research 检索流程
+## 10.1 前端定位
 
-检索入口包括：
+当前前端不再是演示型单页，而是研究工作台骨架。
 
-- REST API：`POST /api/v1/research/tasks/{task_id}/search`
-- 企业微信命令：研究检索/选择/继续
-- 探索轮次选择后触发的 child round search
+主设计方向：
 
-执行 `SEARCH` job 时：
+- 三栏布局
+- 卡片式节点
+- 工作台化而不是单纯图节点化
+- 节点详情、上下文问答、PDF / 全文、运行日志同屏协作
 
-1. 读取任务 constraints。
-2. 合并 payload 中的 override，例如年份、来源、topN。
-3. 找到对应 direction。
-4. 如果是 round search，则读取 round 的 query terms，并更新 round 状态为 running。
-5. 如果不是 round search，则使用 direction 的 queries。
-6. 对每个 query 合并 exclude terms。
-7. 依次调用 Semantic Scholar 和 arXiv。
-8. 通过 `research_search_cache` 进行 TTL 缓存。
-9. 合并所有来源结果。
-10. 按 DOI 和标题归一化去重。
-11. 为每篇论文生成轻量方法摘要。
-12. 如果是普通方向检索，则替换该方向论文。
-13. 如果是轮次检索，则 upsert 到方向论文，并写入 `research_round_papers`。
-14. 更新 direction 的论文数量。
-15. 任务状态更新为 `done`。
+## 10.2 当前主要能力
 
-### 8.7 多轮探索流程
+当前前端已经落地的骨架能力包括：
 
-核心动作枚举：
+- 任务创建
+- 模式切换
+- 研究任务列表
+- 中间卡片画布
+- 右侧详情面板
+- 节点问答
+- Run Log 查看
+- 画布保存
+- 前端 API 代理到本地后端
 
-- `expand`：扩展邻近方向。
-- `deepen`：深入当前方向。
-- `pivot`：转向新角度。
-- `converge`：收敛到核心问题。
-- `stop`：停止。
+## 10.3 视觉方向
 
-REST API：
+当前视觉方向参考 `docs/design/前端示例.canvas`，已确定的方向包括：
 
-- `POST /api/v1/research/tasks/{task_id}/explore/start`
-- `POST /api/v1/research/tasks/{task_id}/explore/rounds/{round_id}/propose`
-- `POST /api/v1/research/tasks/{task_id}/explore/rounds/{round_id}/select`
-- `POST /api/v1/research/tasks/{task_id}/explore/rounds/{round_id}/next`
-- `GET /api/v1/research/tasks/{task_id}/explore/tree`
+- 浅色工作台背景
+- 大圆角白色主容器
+- 卡片式节点，不再使用圆点式节点
+- slate 基色搭配 blue / green / violet / amber badge
+- 柔和阴影和较轻的边线
 
-流程：
+这一轮已经把结构和 design token 方向定住，但还没有进入最终视觉精修阶段。后续如果继续补示例样式，前端会在现有组件结构上继续细化。
 
-1. `explore/start` 为某个 direction 创建 Round-1，并提交 search job。
-2. 用户输入反馈和 action。
-3. `propose` 调用 OpenClaw 生成若干候选方向，写入 `research_round_candidates`。
-4. 用户选择 candidate。
-5. `select` 创建子 round，并把 candidate queries 用于新一轮检索。
-6. `next` 支持用户用自然语言直接进入下一轮，系统会从 intent 文本生成 queries。
-7. `explore/tree` 返回 Topic -> Direction -> Round -> Paper 的树图数据。
+## 11. 当前 worker 与异步处理
 
-### 8.8 全文处理流程
+Research worker 仍然保留，并继续承担异步研究任务处理。
 
-REST API：
+当前 job 类型包括：
 
-- `POST /api/v1/research/tasks/{task_id}/fulltext/build`
-- `POST /api/v1/research/tasks/{task_id}/fulltext/retry`
-- `GET /api/v1/research/tasks/{task_id}/fulltext/status`
-- `POST /api/v1/research/tasks/{task_id}/papers/{paper_id}/pdf/upload`
+- `plan`
+- `search`
+- `fulltext`
+- `graph_build`
+- `paper_summary`
+- `auto_research`
 
-执行 `FULLTEXT` job 时：
+其中：
 
-1. 遍历任务下论文。
-2. 跳过已解析且未强制刷新的论文。
-3. 设置全文状态为 `fetching`。
-4. 尝试根据论文 URL、候选 PDF 链接下载 PDF。
-5. 下载失败则标记为 `need_upload`。
-6. 下载成功后保存到 `RESEARCH_ARTIFACT_DIR/{task_id}/fulltext/`。
-7. 使用 PyMuPDF 或 pdfminer 解析文本。
-8. 提取轻量 sections。
-9. 估算文本质量分。
-10. 写入 PDF 路径、txt 路径、字符数、parser、质量分和状态。
-11. 解析失败则仍保留 PDF，并标记 `need_upload`。
+- `GPT Step` 主要复用已有 job 流程
+- `OpenClaw Auto` 使用新增的 `auto_research` 任务链
 
-手动上传 PDF 后，会立即解析并写入 `research_paper_fulltext`。
+## 12. 软下线内容
 
-### 8.9 引文图和树图流程
-
-REST API：
-
-- `POST /api/v1/research/tasks/{task_id}/graph/build`
-- `POST /api/v1/research/tasks/{task_id}/explore/rounds/{round_id}/citation/build`
-- `GET /api/v1/research/tasks/{task_id}/graph`
-- `GET /api/v1/research/tasks/{task_id}/graph/snapshots`
-- `GET /api/v1/research/tasks/{task_id}/graph/view`
-
-图类型：
-
-- `tree`：Topic -> Direction -> Round -> Paper。
-- `citation`：Topic/Direction/Paper + 引用/被引边。
-
-引文 provider 顺序：
-
-1. Semantic Scholar
-2. OpenAlex
-3. Crossref
-
-构建 citation graph 时：
-
-1. 根据 task/direction/round 确定 seed papers。
-2. 为 topic 和 direction 建立基础节点。
-3. 为 seed papers 建立论文节点。
-4. 对每篇 seed paper 依次调用 citation provider。
-5. 成功获取邻居后构建引用/被引边。
-6. 使用 cache 减少重复抓取。
-7. 使用 networkx 计算图统计指标，如组件数、中心性分数。
-8. 写入 `research_citation_edges`。
-9. 写入 `research_graph_snapshots`。
-
-### 8.10 论文保存、导出和总结
-
-相关 API：
-
-- `GET /api/v1/research/tasks/{task_id}/papers`
-- `GET /api/v1/research/tasks/{task_id}/papers/saved`
-- `GET /api/v1/research/tasks/{task_id}/papers/{paper_id}`
-- `POST /api/v1/research/tasks/{task_id}/papers/{paper_id}/save`
-- `POST /api/v1/research/tasks/{task_id}/papers/{paper_id}/summarize`
-- `GET /api/v1/research/tasks/{task_id}/export`
-
-保存论文时：
-
-- 生成 Markdown 文件。
-- 生成 BibTeX 文件。
-- 标记 `research_papers.saved=true`。
-- 写入保存路径和保存时间。
-
-导出任务时支持：
-
-- `md`
-- `bib`
-- `json`
-
-论文总结时：
-
-1. 提交 `PAPER_SUMMARY` job。
-2. 优先读取全文 txt。
-3. 如果没有全文，则使用 abstract。
-4. 调用 OpenClaw 生成 5-8 条关键要点。
-5. 写回 `research_papers.key_points`、状态和来源。
-
-## 9. 本地 Research UI
-
-本地 UI 路径：
-
-```text
-http://127.0.0.1:8000/research/ui
-```
-
-UI 是内嵌在 `app/api/research_ui.py` 的 HTML/CSS/JS 页面。它会通过 `/api/v1/dev/token` 获取 localhost-only 的开发 token，然后调用 research API。
-
-主要功能：
-
-- 切换本地用户。
-- 创建研究任务。
-- 刷新任务列表。
-- 查看方向列表。
-- 开始某方向探索。
-- 输入反馈，继续调研或生成候选。
-- 查看树图。
-- 显示论文节点。
-- 保存论文。
-- 查看已保存论文。
-- 查看日志。
-
-图渲染依赖 CDN 上的 Cytoscape。
-
-后续如果要做正式前端，建议把这块从 Python 字符串中迁移出去，至少拆成静态文件；如果要长期维护，建议改为单独前端工程。
-
-## 10. 移动端和认证
-
-移动端 API 前缀为：
-
-```text
-/api/v1
-```
-
-认证流程：
-
-1. 用户在企业微信发送配对命令。
-2. `MessageIngestService` 生成 6 位配对码，写入 `mobile_devices`。
-3. 移动端调用 `POST /api/v1/auth/pair`，提交 `pair_code` 和 `device_id`。
-4. 后端签发 access token 和 refresh token。
-5. refresh token 的 hash 写入 `refresh_tokens`。
-6. 后续移动端请求使用 `Authorization: Bearer <access_token>`。
-7. access token 过期后调用 `POST /api/v1/auth/refresh`。
-
-注意：
-
-- `JWT_SECRET` 在 `.env.example` 里是弱默认值，部署或对外暴露前必须更换。
-- refresh token 会按设备维度撤销旧 token。
-
-## 11. Admin 和 Dev 接口
-
-Admin 页面：
-
-- `/admin`
-- `/admin/users`
-- `/admin/users/{user_id}`
-- `/admin/chat`
-
-Admin API：
-
-- `/api/v1/admin/overview`
-- `/api/v1/admin/scheduler/dispatch-once`
-- `/api/v1/admin/users`
-- `/api/v1/admin/users/{user_id}/overview`
-- `/api/v1/admin/users/{user_id}/reminders`
-- `/api/v1/admin/users/{user_id}/pending-actions`
-- `/api/v1/admin/users/{user_id}/inbound-messages`
-- `/api/v1/admin/users/{user_id}/voice-records`
-- `/api/v1/admin/users/{user_id}/deliveries`
-- `/api/v1/admin/users/{user_id}/devices`
-- `/api/v1/admin/reminders/{reminder_id}/cancel`
-- `/api/v1/admin/reminders/{reminder_id}/retry`
-- `/api/v1/admin/reminders/{reminder_id}/snooze`
-- `/api/v1/admin/chat/send`
-
-Admin 和 Dev 接口均通过请求来源限制为 localhost 或 testclient。
-
-Dev API：
-
-- `POST /api/v1/dev/token`
-- `GET /api/v1/dev/users`
-
-Dev token 用于本地 Research UI，不应暴露到公网。
-
-## 12. 启动方式
-
-### 12.1 安装依赖
-
-推荐创建独立环境：
-
-```powershell
-python -m venv .venv
-.\.venv\Scripts\Activate.ps1
-pip install -r requirements.txt
-```
-
-项目脚本默认会读取 `.env` 中的 `CONDA_ENV_NAME`，并寻找对应 conda 环境的 `python.exe`。默认环境名是 `memomate`。
-
-### 12.2 创建配置
-
-```powershell
-Copy-Item .env.example .env
-```
-
-### 12.3 启动后端
-
-```powershell
-.\scripts\start_backend.ps1
-```
-
-等价命令：
-
-```powershell
-python -m uvicorn app.main:app --host 0.0.0.0 --port 8000
-```
-
-### 12.4 启动 research worker
-
-```powershell
-.\scripts\start_research_worker.ps1
-```
-
-### 12.5 同时启动后端和 worker
-
-```powershell
-.\scripts\start_all_with_worker.ps1
-```
-
-### 12.6 一键测试和启动
-
-```powershell
-.\scripts\one_click_start_and_test.ps1
-```
-
-这个脚本会先运行 pytest，通过后再启动服务。
-
-## 13. 测试覆盖情况
-
-测试目录包含以下方向：
+下面这些内容目前是“保留代码，但不进入默认链路”的状态：
 
 - 企业微信 webhook
-- 语音流程
-- RRULE 调度
-- Research flow
-- Research API
-- Reply renderer
-- Reply generation
-- Provider fallback
-- OpenClaw client
-- Mobile auth
-- LLM intent/reply contract
-- LLM complex cases
-- Intent flow
-- Health API
-- ASR API
-- Admin guard
-- Admin users list
-- Admin readonly contract
-- Admin user audit detail
-- Admin chat flow
+- 提醒服务与确认流
+- 移动端认证
+- Admin 页面与接口
+- Dev token 页面
+- 本地 ASR 入口
+- 原内嵌 `research_ui`
 
-我在当前环境尝试运行：
+如果未来要彻底清理仓库，可以进一步做两件事：
 
-```powershell
-python -m pytest -q
-```
+- 从默认文档和 README 中继续弱化这些内容
+- 将 legacy 模块迁到更明确的 `legacy/` 目录或独立分支
 
-第一次失败原因：
+## 13. 当前已验证状态
 
-- 当前全局环境中 `pytest==7.4.4`，但 `pytest_asyncio` 插件导入时报错：`cannot import name 'FixtureDef' from 'pytest'`。
-- 这是 pytest 和 pytest-asyncio 版本不兼容导致的测试加载失败。
+基于 2026-04-16 的本地联调结果，已经验证通过：
 
-随后用禁用插件自动加载的方式尝试：
+- WSL 中启动 `backend + worker`
+- WSL 中安装本地 Node 工具链并启动前端
+- 前端通过 `/api` 代理访问 WSL 后端
+- `GPT Step` 任务创建和 worker 自动消费
+- `canvas` 的读写
+- `node chat` 落库
+- `OpenClaw Auto` 的 `start -> checkpoint -> guidance -> continue -> report/artifact`
+- 前端打包产物生成
 
-```powershell
-$env:PYTEST_DISABLE_PLUGIN_AUTOLOAD='1'
-python -m pytest -q
-```
+当前尚未完成的验收：
 
-这次进入测试收集，但失败原因变成缺少项目依赖：
+- Docker Compose 在当前机器上的完整实机联调
+- 配置真实 OpenClaw 后的完整自治质量验证
+- 更完整的前端样式还原和交互细化
 
-- `pydantic_settings`
-- `wechatpy`
+## 14. 当前风险与欠缺
 
-结论：当前机器的 Python 环境尚未按 `requirements.txt` 完整安装或版本不匹配，测试未能验证业务代码本身。建议在干净虚拟环境或项目指定 conda 环境中执行：
+虽然主线已经切换成功，但目前仍有几类明显的未完成项。
 
-```powershell
-pip install -r requirements.txt
-python -m pytest -q
-```
+### 14.1 `ResearchService` 仍然偏重
 
-## 14. 当前架构优点
+虽然这轮已经加了新的模式和 API，但 `ResearchService` 仍然是一个大文件，后续还应继续拆分为更清晰的子域服务。
 
-- 功能闭环完整：从消息入口、提醒、ASR、移动端认证，到 research UI 和 worker 都有实现。
-- Research workflow 设计比较完整：规划、检索、轮次、全文、图谱、导出、总结都有数据模型和 API。
-- 队列设计考虑了可靠性：`claim_next`、lease、heartbeat、retry、reclaim 都已经具备。
-- Localhost-only 的 dev/admin 限制降低了本地调试风险。
-- LLM provider 做了 fallback 设计，不完全绑定单一模型。
-- 测试覆盖面较广，虽然当前环境没跑通，但测试文件覆盖了大部分关键链路。
+### 14.2 OpenClaw Auto 仍是第一版
 
-## 15. 当前架构风险和改造重点
+当前已经有事件流和 checkpoint 机制，但它更像“可运行的自治 research 骨架”，还不是最终成熟版 orchestrator。
 
-### 15.1 ResearchService 过重
+### 14.3 前端工作台结构已定，视觉仍待细化
 
-`ResearchService` 目前承担了过多职责：
+当前前端已经具备独立工程和卡片工作台骨架，但还没有完成最终样式、对比视图、集合管理、更多节点交互等功能。
 
-- 任务创建和状态流转
-- job 分发
-- 方向规划
-- 论文检索
-- 搜索缓存
-- 全文下载和解析
-- 引文 provider 调用
-- 图构建
-- 论文保存和导出
-- 论文总结
-- 企业微信通知
-- metrics 统计
+### 14.4 Compose 还缺一次完整实机验证
 
-后续建议拆分为：
+Compose 文件已经准备好，但在当前机器上仍需要一次带 Docker 的完整验收，才能把文档从“已准备”升级到“已完全验证”。
 
-- `ResearchTaskService`
-- `ResearchPlanningService`
-- `ResearchSearchService`
-- `ResearchFulltextService`
-- `ResearchGraphService`
-- `ResearchRoundService`
-- `ResearchExportService`
-- `ResearchSummaryService`
-- `ResearchJobProcessor`
+## 15. 后续开发计划
 
-### 15.2 Repository 过于集中
+结合当前仓库状态，后续建议继续按这个顺序推进。
 
-`app/infra/repos.py` 包含所有 repo。随着 research 表增多，这个文件会越来越难维护。
+### P1：运行链路补齐
 
-建议按领域拆分：
+- 在 WSL / Linux VM 中完成 `docker compose up --build` 的实机验收
+- 校验前端、后端、worker、volume、SQLite、artifacts 全链路
+- 补齐 Compose 相关故障排查文档
 
-- `infra/repos/user_repo.py`
-- `infra/repos/reminder_repo.py`
-- `infra/repos/mobile_repo.py`
-- `infra/repos/voice_repo.py`
-- `infra/repos/research/`
+### P2：OpenClaw Auto 强化
 
-### 15.3 UI 内嵌在 Python 字符串中
+- 对接真实 OpenClaw 环境变量和代理能力
+- 提升中间事件质量
+- 优化 checkpoint 的摘要质量和引导反馈逻辑
+- 明确阶段报告格式
 
-`research_ui.py` 把完整 HTML/CSS/JS 写在 Python 字符串里，短期方便演示，长期会带来维护困难。
+### P3：前端工作台继续深化
 
-建议：
+- 更完整地还原设计参考样式
+- 增加更多卡片动作
+- 完善节点分组、筛选、组织和比较体验
+- 打磨 PDF / Fulltext / Run Log 面板
 
-- 短期：拆成 `static/research/index.html`、`static/research/app.js`、`static/research/style.css`。
-- 中期：如果 UI 要持续发展，迁移为独立前端工程。
+### P4：研究服务拆分
 
-### 15.4 外部 provider 与网络失败处理需要产品化
+- 将 `ResearchService` 拆成 task / planning / search / fulltext / graph / summary / export / auto-run 子域
+- 保持 API 行为不变，优先做低风险重构
 
-Research 模块依赖 Semantic Scholar、arXiv、OpenAlex、Crossref、OpenClaw。当前已有 fallback 和 cache，但生产化还需要关注：
+### P5：外部集成
 
-- API 限流
-- 失败重试策略
-- provider 状态展示
-- per-source 配额
-- 数据来源可追踪性
-- 论文元数据归一化规则
+本轮明确不做，但已经是后续候选方向：
 
-### 15.5 配置默认值不适合对外部署
+- Zotero
+- 飞书
+- 多用户
+- 正式登录权限体系
 
-例如：
+## 16. 阅读顺序建议
 
-- `JWT_SECRET` 是示例值。
-- dev/admin 接口依赖 localhost 判断。
-- research UI 可通过 dev token 获取本地 token。
-- 企业微信配置为空或占位。
-
-如果后续要公网部署，需要重新审视认证、授权、CORS、dev endpoint、admin endpoint 和密钥管理。
-
-### 15.6 文档编码显示问题
-
-我在 PowerShell 中读取 README 和部分 docs 时中文显示为乱码。这通常是终端编码问题，不一定代表文件内容损坏。
-
-如果后续维护中文文档，建议统一：
-
-```powershell
-chcp 65001
-$OutputEncoding = [System.Text.UTF8Encoding]::new()
-```
-
-并确保编辑器以 UTF-8 保存。
-
-## 16. 建议的后续改造路线
-
-如果目标是“在现有项目上继续扩展 research 能力”，建议按以下顺序推进：
-
-1. 先修环境：创建干净虚拟环境，安装 `requirements.txt`，跑通 `python -m pytest -q`。
-2. 固化当前行为：在所有重构前，保留并补充 research service 的关键测试，尤其是 job 状态流转、search cache、round select、graph build。
-3. 拆分 `ResearchService`：先做纯移动，不改行为，把 plan/search/fulltext/graph/export/summary 拆出去。
-4. 拆分 `repos.py`：跟随业务域拆分 repo，保持方法签名尽量不变。
-5. 抽离 Research UI 静态资源：先不重做设计，只从 Python 字符串中移出。
-6. 梳理配置和启动脚本：明确 venv/conda 二选一策略，避免测试跑到全局 Python。
-7. 强化外部 provider 层：为论文检索和引文抓取定义统一 provider 接口、错误码和限流策略。
-8. 最后再做功能增强：例如更好的全文质量评估、图谱可视化、论文评分、任务协作、多用户权限。
-
-如果目标是“做论文研究系统产品化”，则优先级应调整为：
-
-1. 认证和权限。
-2. 数据模型稳定化。
-3. Worker 独立部署。
-4. 前端独立化。
-5. Provider 可靠性和缓存策略。
-6. 任务观测、日志和失败恢复。
-
-## 17. 快速接手清单
-
-第一次接手建议按这个顺序看代码：
+如果你现在接手当前版本，建议按下面顺序阅读：
 
 1. `README.md`
-2. `.env.example`
+2. `docs/RESEARCH_LOCAL_QUICKSTART.md`
 3. `app/main.py`
 4. `app/core/config.py`
-5. `app/domain/models.py`
-6. `app/domain/schemas.py`
-7. `app/api/research.py`
+5. `app/api/research.py`
+6. `app/domain/models.py`
+7. `app/domain/schemas.py`
 8. `app/services/research_service.py`
-9. `app/infra/repos.py`
-10. `app/workers/research_worker.py`
-11. `app/api/research_ui.py`
-12. `tests/test_research_flow.py`
-13. `tests/test_research_api.py`
+9. `frontend/package.json`
+10. `frontend/src/`
+11. `docker-compose.yml`
+12. `scripts/start_research_local_wsl.sh`
+13. `scripts/start_frontend_wsl.sh`
 
-如果只关心提醒助手底座，则看：
+如果只想看 OpenClaw Auto 相关，可以重点看：
 
-1. `app/api/wechat.py`
-2. `app/services/message_ingest.py`
-3. `app/services/intent_service.py`
-4. `app/services/reminder_service.py`
-5. `app/workers/dispatcher.py`
-6. `tests/test_intent_flow.py`
-7. `tests/test_rrule_scheduler.py`
+1. `app/domain/enums.py`
+2. `app/domain/models.py`
+3. `app/domain/schemas.py`
+4. `app/api/research.py`
+5. `app/services/research_service.py`
+6. `app/infra/repos.py`
 
-## 18. 总体结论
+## 17. 总体结论
 
-这个项目已经具备比较完整的“个人研究助手”原型能力，核心价值集中在 research workflow：它能从一个 topic 出发，通过 LLM 规划方向、检索论文、支持用户多轮反馈、补全文、构建引文图并导出结果。
+当前项目已经从“功能较杂的个人研究助手原型”收敛成“以 research-only 为主线的本地研究工作台”。
 
-当前最大问题不是“缺功能”，而是“核心业务逐渐集中在少数大文件里”。因此，后续改造最稳妥的策略不是先大改业务，而是先修环境、补测试、再做低风险拆分。只要保持 API 和数据模型行为不变，先把 `ResearchService`、`repos.py`、内嵌 UI 拆开，项目后续扩展会轻松很多。
+最关键的进展不是又加了多少功能，而是主线已经切换清楚：
+
+- 默认是 `research_local`
+- 默认跑在 `WSL / Linux VM`
+- 默认通过独立前端工作台访问
+- 默认区分 `GPT Step` 与 `OpenClaw Auto`
+- 默认把 canonical research graph 和用户工作台 canvas 分层存储
+
+这意味着项目后续的演化方向已经比旧版本清晰很多。接下来最值得做的，不是再把 legacy 内容堆回主线，而是继续把这条 research-only 路线做实：补 Compose 验收、加强 OpenClaw Auto、细化前端工作台、再逐步拆解过重的 research 服务。
