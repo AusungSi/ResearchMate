@@ -28,6 +28,7 @@ htmlcov/
 *.log
 *.pid
 *.out
+.runtime/
 
 # Environment and secrets
 .env
@@ -39,11 +40,25 @@ htmlcov/
 *.sqlite
 *.sqlite3
 instance/
+data/
+artifacts/
 
 # Cloudflare local artifacts
 cloudflared.exe
 cloudflared
 .cloudflared/
+
+# WSL local toolchain
+.wsl-tools/
+
+# Frontend local artifacts
+frontend/node_modules/
+frontend/dist/
+frontend/*.tsbuildinfo
+frontend/vite.config.js
+frontend/vite.config.d.ts
+frontend/tailwind.config.js
+frontend/tailwind.config.d.ts
 
 # OS
 .DS_Store

@@ -12,10 +12,12 @@ from app.domain.enums import (
     PendingActionStatus,
     ReminderStatus,
     ResearchActionType,
+    ResearchAutoStatus,
     ResearchGraphBuildStatus,
     ResearchGraphViewType,
     ResearchJobStatus,
     ResearchJobType,
+    ResearchRunEventType,
     ResearchPaperFulltextStatus,
     ResearchRoundStatus,
     ResearchTaskStatus,
@@ -26,17 +28,20 @@ from app.domain.models import (
     InboundMessage,
     MobileDevice,
     PendingAction,
+    ResearchCanvasState,
     ResearchCitationFetchCache,
     ResearchDirection,
     ResearchJob,
     ResearchCitationEdge,
     ResearchGraphSnapshot,
+    ResearchNodeChat,
     ResearchPaper,
     ResearchSeedPaper,
     ResearchPaperFulltext,
     ResearchRound,
     ResearchRoundCandidate,
     ResearchRoundPaper,
+    ResearchRunEvent,
     ResearchSearchCache,
     ResearchSession,
     ResearchTask,
@@ -435,6 +440,145 @@ class ResearchTaskRepo:
         self.db.add(row)
         self.db.flush()
         return row
+
+
+class ResearchCanvasStateRepo:
+    def __init__(self, db: Session):
+        self.db = db
+
+    def get_for_task(self, task_id: int) -> ResearchCanvasState | None:
+        stmt = select(ResearchCanvasState).where(ResearchCanvasState.task_id == task_id)
+        return self.db.execute(stmt).scalar_one_or_none()
+
+    def upsert(self, task_id: int, state: dict) -> ResearchCanvasState:
+        row = self.get_for_task(task_id)
+        now = datetime.now(timezone.utc)
+        payload = orjson.dumps(state or {}).decode("utf-8")
+        if row:
+            row.state_json = payload
+            row.updated_at = now
+            self.db.add(row)
+            self.db.flush()
+            return row
+        row = ResearchCanvasState(
+            task_id=task_id,
+            state_json=payload,
+            created_at=now,
+            updated_at=now,
+        )
+        self.db.add(row)
+        self.db.flush()
+        return row
+
+
+class ResearchRunEventRepo:
+    def __init__(self, db: Session):
+        self.db = db
+
+    def next_seq(self, run_id: str) -> int:
+        stmt = select(func.max(ResearchRunEvent.seq)).where(ResearchRunEvent.run_id == run_id)
+        current = self.db.execute(stmt).scalar_one()
+        return int(current or 0) + 1
+
+    def create_event(
+        self,
+        *,
+        task_id: int,
+        run_id: str,
+        event_type: ResearchRunEventType | str,
+        payload: dict | None = None,
+        seq: int | None = None,
+    ) -> ResearchRunEvent:
+        event_type_text = event_type.value if isinstance(event_type, ResearchRunEventType) else str(event_type)
+        row = ResearchRunEvent(
+            task_id=task_id,
+            run_id=run_id,
+            event_type=ResearchRunEventType(event_type_text),
+            seq=seq or self.next_seq(run_id),
+            payload_json=orjson.dumps(payload or {}).decode("utf-8"),
+            created_at=datetime.now(timezone.utc),
+        )
+        self.db.add(row)
+        self.db.flush()
+        return row
+
+    def list_for_run(self, *, task_id: int, run_id: str, after_seq: int | None = None, limit: int = 200) -> list[ResearchRunEvent]:
+        filters = [ResearchRunEvent.task_id == task_id, ResearchRunEvent.run_id == run_id]
+        if after_seq is not None:
+            filters.append(ResearchRunEvent.seq > after_seq)
+        stmt = (
+            select(ResearchRunEvent)
+            .where(and_(*filters))
+            .order_by(ResearchRunEvent.seq.asc(), ResearchRunEvent.id.asc())
+            .limit(max(1, min(1000, int(limit))))
+        )
+        return list(self.db.execute(stmt).scalars().all())
+
+    def latest_checkpoint(self, *, task_id: int, run_id: str) -> ResearchRunEvent | None:
+        stmt = (
+            select(ResearchRunEvent)
+            .where(
+                and_(
+                    ResearchRunEvent.task_id == task_id,
+                    ResearchRunEvent.run_id == run_id,
+                    ResearchRunEvent.event_type == ResearchRunEventType.CHECKPOINT,
+                )
+            )
+            .order_by(ResearchRunEvent.seq.desc(), ResearchRunEvent.id.desc())
+        )
+        return self.db.execute(stmt).scalars().first()
+
+    def latest_for_task(self, task_id: int) -> ResearchRunEvent | None:
+        stmt = (
+            select(ResearchRunEvent)
+            .where(ResearchRunEvent.task_id == task_id)
+            .order_by(ResearchRunEvent.created_at.desc(), ResearchRunEvent.id.desc())
+        )
+        return self.db.execute(stmt).scalars().first()
+
+
+class ResearchNodeChatRepo:
+    def __init__(self, db: Session):
+        self.db = db
+
+    def create(
+        self,
+        *,
+        task_id: int,
+        node_id: str,
+        thread_id: str,
+        question: str,
+        answer: str,
+        provider: str,
+        model: str | None,
+        context: dict | None = None,
+    ) -> ResearchNodeChat:
+        row = ResearchNodeChat(
+            task_id=task_id,
+            node_id=node_id[:128],
+            thread_id=thread_id[:64],
+            question=question.strip(),
+            answer=answer.strip(),
+            provider=(provider or "template")[:32],
+            model=(model[:128] if model else None),
+            context_json=orjson.dumps(context or {}).decode("utf-8"),
+            created_at=datetime.now(timezone.utc),
+        )
+        self.db.add(row)
+        self.db.flush()
+        return row
+
+    def list_for_node(self, *, task_id: int, node_id: str, thread_id: str | None = None, limit: int = 50) -> list[ResearchNodeChat]:
+        filters = [ResearchNodeChat.task_id == task_id, ResearchNodeChat.node_id == node_id]
+        if thread_id:
+            filters.append(ResearchNodeChat.thread_id == thread_id)
+        stmt = (
+            select(ResearchNodeChat)
+            .where(and_(*filters))
+            .order_by(ResearchNodeChat.created_at.asc(), ResearchNodeChat.id.asc())
+            .limit(max(1, min(200, int(limit))))
+        )
+        return list(self.db.execute(stmt).scalars().all())
 
 
 class ResearchSessionRepo:

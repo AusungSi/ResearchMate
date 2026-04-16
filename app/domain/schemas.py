@@ -4,7 +4,15 @@ from datetime import datetime
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from app.domain.enums import OperationType, ReminderSource, ScheduleType, TokenType
+from app.domain.enums import (
+    OperationType,
+    ReminderSource,
+    ResearchAutoStatus,
+    ResearchLLMBackend,
+    ResearchRunMode,
+    ScheduleType,
+    TokenType,
+)
 
 
 class IntentDraft(BaseModel):
@@ -368,6 +376,9 @@ class ResearchTaskCreateRequest(BaseModel):
     year_to: int | None = None
     top_n: int | None = None
     sources: list[str] | None = None
+    mode: ResearchRunMode = ResearchRunMode.GPT_STEP
+    llm_backend: ResearchLLMBackend = ResearchLLMBackend.GPT
+    llm_model: str | None = None
 
 
 class ResearchTaskSearchRequest(BaseModel):
@@ -590,6 +601,12 @@ class ResearchTaskResponse(BaseModel):
     task_id: str
     topic: str
     status: str
+    mode: ResearchRunMode = ResearchRunMode.GPT_STEP
+    llm_backend: ResearchLLMBackend = ResearchLLMBackend.GPT
+    llm_model: str | None = None
+    auto_status: ResearchAutoStatus = ResearchAutoStatus.IDLE
+    last_checkpoint_id: str | None = None
+    latest_run_id: str | None = None
     constraints: dict = Field(default_factory=dict)
     directions: list[ResearchDirectionItem] = Field(default_factory=list)
     papers_total: int = 0
@@ -609,6 +626,103 @@ class ResearchTaskResponse(BaseModel):
 class ResearchTaskListResponse(BaseModel):
     items: list[ResearchTaskResponse]
     total: int
+
+
+class ResearchCanvasNode(BaseModel):
+    id: str
+    type: str
+    position: dict = Field(default_factory=dict)
+    data: dict = Field(default_factory=dict)
+    hidden: bool = False
+    width: float | None = None
+    height: float | None = None
+
+
+class ResearchCanvasEdge(BaseModel):
+    id: str
+    source: str
+    target: str
+    type: str = "default"
+    data: dict = Field(default_factory=dict)
+    hidden: bool = False
+
+
+class ResearchCanvasRequest(BaseModel):
+    nodes: list[ResearchCanvasNode] = Field(default_factory=list)
+    edges: list[ResearchCanvasEdge] = Field(default_factory=list)
+    viewport: dict = Field(default_factory=lambda: {"x": 0, "y": 0, "zoom": 1})
+
+
+class ResearchCanvasResponse(ResearchCanvasRequest):
+    task_id: str
+    updated_at: datetime | None = None
+
+
+class ResearchRunEventItem(BaseModel):
+    run_id: str
+    task_id: str
+    event_type: str
+    seq: int
+    payload: dict = Field(default_factory=dict)
+    created_at: datetime
+
+
+class ResearchRunEventsResponse(BaseModel):
+    task_id: str
+    run_id: str
+    items: list[ResearchRunEventItem] = Field(default_factory=list)
+
+
+class ResearchNodeChatRequest(BaseModel):
+    question: str = Field(min_length=1)
+    thread_id: str | None = None
+    tags: list[str] = Field(default_factory=list)
+
+
+class ResearchNodeChatItem(BaseModel):
+    id: int | None = None
+    task_id: str
+    node_id: str
+    thread_id: str
+    question: str
+    answer: str
+    provider: str
+    model: str | None = None
+    created_at: datetime
+
+
+class ResearchNodeChatResponse(BaseModel):
+    task_id: str
+    node_id: str
+    thread_id: str
+    item: ResearchNodeChatItem
+    history: list[ResearchNodeChatItem] = Field(default_factory=list)
+
+
+class ResearchAutoRunResponse(BaseModel):
+    task_id: str
+    run_id: str
+    auto_status: str
+    queued: bool = True
+
+
+class ResearchRunGuidanceRequest(BaseModel):
+    text: str = Field(min_length=1)
+    tags: list[str] = Field(default_factory=list)
+
+
+class ResearchRunGuidanceResponse(BaseModel):
+    task_id: str
+    run_id: str
+    auto_status: str
+    accepted: bool = True
+
+
+class ResearchRunControlResponse(BaseModel):
+    task_id: str
+    run_id: str
+    auto_status: str
+    queued: bool = False
 
 
 class ResearchSearchResponse(BaseModel):

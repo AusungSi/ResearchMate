@@ -17,6 +17,7 @@ from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
 from app.domain.enums import (
     ResearchActionType,
+    ResearchAutoStatus,
     DeliveryStatus,
     OperationType,
     PendingActionStatus,
@@ -24,7 +25,10 @@ from app.domain.enums import (
     ResearchGraphViewType,
     ResearchJobStatus,
     ResearchJobType,
+    ResearchLLMBackend,
     ResearchPaperFulltextStatus,
+    ResearchRunEventType,
+    ResearchRunMode,
     ResearchRoundStatus,
     ResearchTaskStatus,
     ReminderSource,
@@ -168,6 +172,23 @@ class ResearchTask(Base):
     user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), nullable=False)
     topic: Mapped[str] = mapped_column(Text, nullable=False)
     constraints_json: Mapped[str] = mapped_column(Text, default="{}", nullable=False)
+    mode: Mapped[ResearchRunMode] = mapped_column(
+        Enum(ResearchRunMode),
+        default=ResearchRunMode.GPT_STEP,
+        nullable=False,
+    )
+    llm_backend: Mapped[ResearchLLMBackend] = mapped_column(
+        Enum(ResearchLLMBackend),
+        default=ResearchLLMBackend.GPT,
+        nullable=False,
+    )
+    llm_model: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    auto_status: Mapped[ResearchAutoStatus] = mapped_column(
+        Enum(ResearchAutoStatus),
+        default=ResearchAutoStatus.IDLE,
+        nullable=False,
+    )
+    last_checkpoint_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
     status: Mapped[ResearchTaskStatus] = mapped_column(
         Enum(ResearchTaskStatus), default=ResearchTaskStatus.CREATED, nullable=False
     )
@@ -178,6 +199,9 @@ class ResearchTask(Base):
     directions: Mapped[list["ResearchDirection"]] = relationship(back_populates="task")
     seed_papers: Mapped[list["ResearchSeedPaper"]] = relationship(back_populates="task")
     jobs: Mapped[list["ResearchJob"]] = relationship(back_populates="task")
+    canvas_states: Mapped[list["ResearchCanvasState"]] = relationship(back_populates="task")
+    run_events: Mapped[list["ResearchRunEvent"]] = relationship(back_populates="task")
+    node_chats: Mapped[list["ResearchNodeChat"]] = relationship(back_populates="task")
 
 
 class ResearchDirection(Base):
@@ -384,6 +408,51 @@ class ResearchGraphSnapshot(Base):
     )
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
+class ResearchCanvasState(Base):
+    __tablename__ = "research_canvas_state"
+    __table_args__ = (UniqueConstraint("task_id", name="uq_research_canvas_state_task"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    task_id: Mapped[int] = mapped_column(ForeignKey("research_tasks.id"), nullable=False)
+    state_json: Mapped[str] = mapped_column(Text, nullable=False, default="{}")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+    task: Mapped["ResearchTask"] = relationship(back_populates="canvas_states")
+
+
+class ResearchRunEvent(Base):
+    __tablename__ = "research_run_events"
+    __table_args__ = (UniqueConstraint("run_id", "seq", name="uq_research_run_event_run_seq"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    task_id: Mapped[int] = mapped_column(ForeignKey("research_tasks.id"), nullable=False)
+    run_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    event_type: Mapped[ResearchRunEventType] = mapped_column(Enum(ResearchRunEventType), nullable=False)
+    seq: Mapped[int] = mapped_column(Integer, nullable=False)
+    payload_json: Mapped[str] = mapped_column(Text, nullable=False, default="{}")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+    task: Mapped["ResearchTask"] = relationship(back_populates="run_events")
+
+
+class ResearchNodeChat(Base):
+    __tablename__ = "research_node_chats"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    task_id: Mapped[int] = mapped_column(ForeignKey("research_tasks.id"), nullable=False)
+    node_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    thread_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    question: Mapped[str] = mapped_column(Text, nullable=False)
+    answer: Mapped[str] = mapped_column(Text, nullable=False)
+    provider: Mapped[str] = mapped_column(String(32), nullable=False, default="template")
+    model: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    context_json: Mapped[str] = mapped_column(Text, nullable=False, default="{}")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+    task: Mapped["ResearchTask"] = relationship(back_populates="node_chats")
 
 
 class ResearchRound(Base):

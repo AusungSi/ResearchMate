@@ -8,6 +8,7 @@ from io import BytesIO
 from pathlib import Path
 from time import perf_counter, sleep
 from urllib.parse import quote_plus, urljoin
+from uuid import uuid4
 from xml.etree import ElementTree as ET
 import re
 
@@ -19,25 +20,32 @@ from app.core.config import get_settings
 from app.core.logging import get_logger
 from app.domain.enums import (
     ResearchActionType,
+    ResearchAutoStatus,
     ResearchGraphBuildStatus,
     ResearchGraphViewType,
     ResearchJobType,
+    ResearchLLMBackend,
     ResearchPaperFulltextStatus,
+    ResearchRunEventType,
+    ResearchRunMode,
     ResearchRoundStatus,
     ResearchTaskStatus,
 )
 from app.domain.models import ResearchRound, ResearchTask, User
 from app.infra.repos import (
+    ResearchCanvasStateRepo,
     ResearchCitationFetchCacheRepo,
     ResearchCitationEdgeRepo,
     ResearchDirectionRepo,
     ResearchGraphSnapshotRepo,
     ResearchJobRepo,
+    ResearchNodeChatRepo,
     ResearchPaperRepo,
     ResearchPaperFulltextRepo,
     ResearchRoundCandidateRepo,
     ResearchRoundPaperRepo,
     ResearchRoundRepo,
+    ResearchRunEventRepo,
     ResearchSeedPaperRepo,
     ResearchSearchCacheRepo,
     ResearchSessionRepo,
@@ -46,6 +54,7 @@ from app.infra.repos import (
 )
 from app.infra.wecom_client import WeComClient
 from app.llm.openclaw_client import LLMCallResult, LLMTaskType, OpenClawClient
+from app.llm.research_llm_gateway import ResearchLLMGateway
 
 
 logger = get_logger("research")
@@ -82,6 +91,7 @@ class ResearchService:
     ) -> None:
         self.settings = get_settings()
         self.openclaw_client = openclaw_client or OpenClawClient(settings=self.settings)
+        self.llm_gateway = ResearchLLMGateway(settings=self.settings, openclaw_client=self.openclaw_client)
         self.wecom_client = wecom_client
         self.research_jobs_total = 0
         self.research_job_latency_ms = 0
@@ -109,28 +119,43 @@ class ResearchService:
         user_id: int,
         topic: str,
         constraints: dict | None = None,
+        mode: str | ResearchRunMode = ResearchRunMode.GPT_STEP,
+        llm_backend: str | ResearchLLMBackend = ResearchLLMBackend.GPT,
+        llm_model: str | None = None,
     ) -> ResearchTask:
         task_repo = ResearchTaskRepo(db)
         session_repo = ResearchSessionRepo(db)
         now = datetime.now(timezone.utc)
         # Use global recent tasks to avoid collisions across users.
         task_id = self._next_task_id(task_repo.list_recent_all(limit=500))
+        mode_text = mode.value if isinstance(mode, ResearchRunMode) else str(mode)
+        backend_text = llm_backend.value if isinstance(llm_backend, ResearchLLMBackend) else str(llm_backend)
+        mode_value = ResearchRunMode(mode_text)
+        backend_value = ResearchLLMBackend(backend_text)
+        if mode_value == ResearchRunMode.OPENCLAW_AUTO:
+            backend_value = ResearchLLMBackend.OPENCLAW
+        status = ResearchTaskStatus.CREATED if mode_value == ResearchRunMode.OPENCLAW_AUTO else ResearchTaskStatus.PLANNING
         row = ResearchTask(
             task_id=task_id,
             user_id=user_id,
             topic=topic.strip(),
             constraints_json=orjson.dumps(constraints or {}).decode("utf-8"),
-            status=ResearchTaskStatus.PLANNING,
+            mode=mode_value,
+            llm_backend=backend_value,
+            llm_model=(llm_model.strip()[:128] if llm_model and llm_model.strip() else None),
+            auto_status=ResearchAutoStatus.IDLE,
+            status=status,
             created_at=now,
             updated_at=now,
         )
         task_repo.create(row)
-        ResearchJobRepo(db).enqueue(
-            row.id,
-            ResearchJobType.PLAN,
-            {"topic": row.topic, "constraints": constraints or {}},
-            queue_name=self.settings.research_queue_name,
-        )
+        if mode_value == ResearchRunMode.GPT_STEP:
+            ResearchJobRepo(db).enqueue(
+                row.id,
+                ResearchJobType.PLAN,
+                {"topic": row.topic, "constraints": constraints or {}},
+                queue_name=self.settings.research_queue_name,
+            )
         session = session_repo.get_or_create(user_id, page_size=self.settings.research_page_size)
         session_repo.set_active_task(session, row.task_id)
         return row
@@ -611,6 +636,8 @@ class ResearchService:
                 self._run_graph_job(db, task, payload, touch_lease=touch_lease)
             elif job.job_type == ResearchJobType.PAPER_SUMMARY:
                 self._run_paper_summary_job(db, task, payload, touch_lease=touch_lease)
+            elif job.job_type == ResearchJobType.AUTO_RESEARCH:
+                self._run_auto_research_job(db, task, payload, touch_lease=touch_lease)
             else:
                 raise ValueError(f"unsupported job type: {job.job_type}")
             job_repo.mark_done(job)
@@ -636,6 +663,8 @@ class ResearchService:
                 )
             else:
                 task.status = ResearchTaskStatus.FAILED
+                if job.job_type == ResearchJobType.AUTO_RESEARCH:
+                    task.auto_status = ResearchAutoStatus.FAILED
                 task.updated_at = datetime.now(timezone.utc)
                 db.add(task)
                 db.flush()
@@ -656,12 +685,20 @@ class ResearchService:
         items = task_repo.list_recent(user_id=user_id, limit=1)
         return items[0] if items else None
 
-    def switch_task(self, db: Session, *, user_id: int, task_id: str) -> ResearchTask:
+    def switch_task(
+        self,
+        db: Session,
+        *,
+        user_id: int,
+        task_id: str,
+        remember_active: bool = True,
+    ) -> ResearchTask:
         row = ResearchTaskRepo(db).get_by_task_id(task_id.strip(), user_id=user_id)
         if not row:
             raise ValueError("task not found")
-        session = ResearchSessionRepo(db).get_or_create(user_id, page_size=self.settings.research_page_size)
-        ResearchSessionRepo(db).set_active_task(session, row.task_id)
+        if remember_active:
+            session = ResearchSessionRepo(db).get_or_create(user_id, page_size=self.settings.research_page_size)
+            ResearchSessionRepo(db).set_active_task(session, row.task_id)
         return row
 
     def list_tasks(self, db: Session, *, user_id: int, limit: int = 10) -> list[dict]:
@@ -679,6 +716,259 @@ class ResearchService:
         if not row:
             return None
         return self._task_to_dict(db, row)
+
+    def get_canvas_state(self, db: Session, *, user_id: int, task_id: str) -> dict:
+        task = self.switch_task(db, user_id=user_id, task_id=task_id, remember_active=False)
+        repo = ResearchCanvasStateRepo(db)
+        row = repo.get_for_task(task.id)
+        if row:
+            state = _load_json_dict(row.state_json)
+            return {
+                "task_id": task.task_id,
+                "nodes": list(state.get("nodes") or []),
+                "edges": list(state.get("edges") or []),
+                "viewport": dict(state.get("viewport") or {"x": 0, "y": 0, "zoom": 1}),
+                "updated_at": row.updated_at,
+            }
+        graph = self.get_graph_snapshot(
+            db,
+            user_id=user_id,
+            task_id=task.task_id,
+            view=ResearchGraphViewType.TREE.value,
+            include_papers=True,
+            paper_limit=self.settings.research_graph_paper_limit_default,
+        )
+        state = self._default_canvas_from_graph(task_id=task.task_id, graph=graph)
+        saved = repo.upsert(task.id, state)
+        return {
+            "task_id": task.task_id,
+            "nodes": list(state.get("nodes") or []),
+            "edges": list(state.get("edges") or []),
+            "viewport": dict(state.get("viewport") or {"x": 0, "y": 0, "zoom": 1}),
+            "updated_at": saved.updated_at,
+        }
+
+    def save_canvas_state(self, db: Session, *, user_id: int, task_id: str, state: dict) -> dict:
+        task = self.switch_task(db, user_id=user_id, task_id=task_id)
+        payload = {
+            "nodes": list(state.get("nodes") or []),
+            "edges": list(state.get("edges") or []),
+            "viewport": dict(state.get("viewport") or {"x": 0, "y": 0, "zoom": 1}),
+        }
+        row = ResearchCanvasStateRepo(db).upsert(task.id, payload)
+        return {
+            "task_id": task.task_id,
+            "nodes": payload["nodes"],
+            "edges": payload["edges"],
+            "viewport": payload["viewport"],
+            "updated_at": row.updated_at,
+        }
+
+    def chat_with_node(
+        self,
+        db: Session,
+        *,
+        user_id: int,
+        task_id: str,
+        node_id: str,
+        question: str,
+        thread_id: str | None = None,
+        tags: list[str] | None = None,
+    ) -> dict:
+        task = self.switch_task(db, user_id=user_id, task_id=task_id)
+        repo = ResearchNodeChatRepo(db)
+        thread = (thread_id or uuid4().hex[:12]).strip()[:64]
+        context = self._resolve_node_context(db, task=task, node_id=node_id)
+        history_rows = repo.list_for_node(task_id=task.id, node_id=node_id, thread_id=thread, limit=12)
+        history_lines = [f"Q: {row.question}\nA: {row.answer}" for row in history_rows[-4:]]
+        prompt = (
+            "你是 research node assistant。请只基于给定节点上下文回答，不要接管整个研究流程。\n\n"
+            f"Task topic: {task.topic}\n"
+            f"Node ID: {node_id}\n"
+            f"Node context JSON: {orjson.dumps(context).decode('utf-8')}\n"
+            f"Existing chat: {orjson.dumps(history_lines).decode('utf-8')}\n"
+            f"User question: {question.strip()}\n"
+            f"Tags: {orjson.dumps(tags or []).decode('utf-8')}"
+        )
+        result = self.llm_gateway.chat_text(
+            backend=task.llm_backend.value,
+            model=task.llm_model,
+            system_prompt="Answer in concise Chinese. Prefer evidence already present in the node context.",
+            prompt=prompt,
+            temperature=0.2,
+            max_tokens=900,
+        )
+        row = repo.create(
+            task_id=task.id,
+            node_id=node_id,
+            thread_id=thread,
+            question=question,
+            answer=result.text,
+            provider=result.provider,
+            model=result.model,
+            context=context,
+        )
+        history_rows = repo.list_for_node(task_id=task.id, node_id=node_id, thread_id=thread, limit=50)
+        return {
+            "task_id": task.task_id,
+            "node_id": node_id,
+            "thread_id": thread,
+            "item": self._node_chat_to_dict(task.task_id, row),
+            "history": [self._node_chat_to_dict(task.task_id, item) for item in history_rows],
+        }
+
+    def get_paper_asset_path(
+        self,
+        db: Session,
+        *,
+        user_id: int,
+        task_id: str,
+        paper_token: str,
+        kind: str = "pdf",
+    ) -> str:
+        task = self.switch_task(db, user_id=user_id, task_id=task_id)
+        paper = ResearchPaperRepo(db).get_by_token(task.id, paper_token)
+        if not paper:
+            raise ValueError("paper not found")
+        fulltext = ResearchPaperFulltextRepo(db).get(task.id, _paper_token(paper))
+        kind_norm = (kind or "pdf").strip().lower()
+        candidates: list[str | None]
+        if kind_norm == "pdf":
+            candidates = [fulltext.pdf_path if fulltext else None]
+        elif kind_norm in {"txt", "fulltext"}:
+            candidates = [fulltext.text_path if fulltext else None]
+        elif kind_norm in {"md", "markdown"}:
+            candidates = [paper.saved_path]
+        elif kind_norm == "bib":
+            candidates = [paper.saved_bib_path]
+        else:
+            candidates = [
+                fulltext.pdf_path if fulltext else None,
+                fulltext.text_path if fulltext else None,
+                paper.saved_path,
+                paper.saved_bib_path,
+            ]
+        for candidate in candidates:
+            if candidate and Path(candidate).exists():
+                return str(Path(candidate))
+        raise ValueError("asset not found")
+
+    def start_auto_research(self, db: Session, *, user_id: int, task_id: str) -> dict:
+        task = self.switch_task(db, user_id=user_id, task_id=task_id)
+        if task.mode != ResearchRunMode.OPENCLAW_AUTO:
+            raise ValueError("task mode is not openclaw_auto")
+        if task.llm_backend != ResearchLLMBackend.OPENCLAW:
+            raise ValueError("openclaw_auto task must use llm_backend=openclaw")
+        run_id = f"run-{uuid4().hex[:12]}"
+        ResearchJobRepo(db).enqueue(
+            task.id,
+            ResearchJobType.AUTO_RESEARCH,
+            {"run_id": run_id, "phase": "start"},
+            queue_name=self.settings.research_queue_name,
+        )
+        task.auto_status = ResearchAutoStatus.RUNNING
+        task.status = ResearchTaskStatus.SEARCHING
+        task.updated_at = datetime.now(timezone.utc)
+        db.add(task)
+        db.flush()
+        self._emit_run_event(
+            db,
+            task=task,
+            run_id=run_id,
+            event_type=ResearchRunEventType.PROGRESS,
+            payload={"message": "auto research queued", "phase": "start"},
+        )
+        return {
+            "task_id": task.task_id,
+            "run_id": run_id,
+            "auto_status": task.auto_status.value,
+            "queued": True,
+        }
+
+    def list_run_events(
+        self,
+        db: Session,
+        *,
+        user_id: int,
+        task_id: str,
+        run_id: str,
+        after_seq: int | None = None,
+        limit: int = 200,
+    ) -> dict:
+        task = self.switch_task(db, user_id=user_id, task_id=task_id, remember_active=False)
+        rows = ResearchRunEventRepo(db).list_for_run(task_id=task.id, run_id=run_id, after_seq=after_seq, limit=limit)
+        return {
+            "task_id": task.task_id,
+            "run_id": run_id,
+            "items": [self._run_event_to_dict(task.task_id, row) for row in rows],
+        }
+
+    def submit_run_guidance(
+        self,
+        db: Session,
+        *,
+        user_id: int,
+        task_id: str,
+        run_id: str,
+        text: str,
+        tags: list[str] | None = None,
+    ) -> dict:
+        task = self.switch_task(db, user_id=user_id, task_id=task_id)
+        self._emit_run_event(
+            db,
+            task=task,
+            run_id=run_id,
+            event_type=ResearchRunEventType.PROGRESS,
+            payload={"message": "guidance received", "kind": "user_guidance", "text": text.strip(), "tags": tags or []},
+        )
+        return {
+            "task_id": task.task_id,
+            "run_id": run_id,
+            "auto_status": task.auto_status.value,
+            "accepted": True,
+        }
+
+    def continue_auto_research(self, db: Session, *, user_id: int, task_id: str, run_id: str) -> dict:
+        task = self.switch_task(db, user_id=user_id, task_id=task_id)
+        if task.auto_status not in {ResearchAutoStatus.AWAITING_GUIDANCE, ResearchAutoStatus.RUNNING}:
+            raise ValueError("task is not awaiting guidance")
+        ResearchJobRepo(db).enqueue(
+            task.id,
+            ResearchJobType.AUTO_RESEARCH,
+            {"run_id": run_id, "phase": "continue"},
+            queue_name=self.settings.research_queue_name,
+        )
+        task.auto_status = ResearchAutoStatus.RUNNING
+        task.status = ResearchTaskStatus.SEARCHING
+        task.updated_at = datetime.now(timezone.utc)
+        db.add(task)
+        db.flush()
+        return {
+            "task_id": task.task_id,
+            "run_id": run_id,
+            "auto_status": task.auto_status.value,
+            "queued": True,
+        }
+
+    def cancel_auto_research(self, db: Session, *, user_id: int, task_id: str, run_id: str) -> dict:
+        task = self.switch_task(db, user_id=user_id, task_id=task_id)
+        task.auto_status = ResearchAutoStatus.CANCELED
+        task.updated_at = datetime.now(timezone.utc)
+        db.add(task)
+        db.flush()
+        self._emit_run_event(
+            db,
+            task=task,
+            run_id=run_id,
+            event_type=ResearchRunEventType.PROGRESS,
+            payload={"message": "auto research canceled", "status": ResearchAutoStatus.CANCELED.value},
+        )
+        return {
+            "task_id": task.task_id,
+            "run_id": run_id,
+            "auto_status": task.auto_status.value,
+            "queued": False,
+        }
 
     def get_fulltext_status(self, db: Session, *, user_id: int, task_id: str) -> dict:
         task = self.switch_task(db, user_id=user_id, task_id=task_id)
@@ -1549,6 +1839,293 @@ class ResearchService:
         task.updated_at = datetime.now(timezone.utc)
         db.add(task)
         db.flush()
+
+    def _run_auto_research_job(
+        self,
+        db: Session,
+        task: ResearchTask,
+        payload: dict,
+        *,
+        touch_lease: Callable[[], None] | None = None,
+    ) -> None:
+        run_id = str(payload.get("run_id") or "").strip()
+        phase = str(payload.get("phase") or "start").strip().lower()
+        if not run_id:
+            raise ValueError("run_id is required")
+        task.auto_status = ResearchAutoStatus.RUNNING
+        task.status = ResearchTaskStatus.SEARCHING
+        task.updated_at = datetime.now(timezone.utc)
+        db.add(task)
+        db.flush()
+        self._emit_run_event(
+            db,
+            task=task,
+            run_id=run_id,
+            event_type=ResearchRunEventType.PROGRESS,
+            payload={"message": f"auto research {phase} started", "phase": phase},
+        )
+        if phase == "start":
+            directions = ResearchDirectionRepo(db).list_for_task(task.id)
+            if not directions:
+                constraints = _load_json_dict(task.constraints_json)
+                seed_rows = self._build_seed_corpus_for_task(db, task=task, constraints=constraints)
+                directions = self._plan_directions_from_seed(task.topic, constraints, seed_rows)
+                ResearchDirectionRepo(db).replace_for_task(task, directions)
+            if touch_lease:
+                touch_lease()
+            graph = self._build_tree_graph(db, task, include_papers=False)
+            for node in graph["nodes"]:
+                self._emit_run_event(
+                    db,
+                    task=task,
+                    run_id=run_id,
+                    event_type=ResearchRunEventType.NODE_UPSERT,
+                    payload=node,
+                )
+            for edge in graph["edges"]:
+                self._emit_run_event(
+                    db,
+                    task=task,
+                    run_id=run_id,
+                    event_type=ResearchRunEventType.EDGE_UPSERT,
+                    payload=edge,
+                )
+            checkpoint_id = f"ckpt-{uuid4().hex[:10]}"
+            task.last_checkpoint_id = checkpoint_id
+            task.auto_status = ResearchAutoStatus.AWAITING_GUIDANCE
+            task.status = ResearchTaskStatus.DONE
+            task.updated_at = datetime.now(timezone.utc)
+            db.add(task)
+            db.flush()
+            self._emit_run_event(
+                db,
+                task=task,
+                run_id=run_id,
+                event_type=ResearchRunEventType.CHECKPOINT,
+                payload={
+                    "checkpoint_id": checkpoint_id,
+                    "title": "Initial research map",
+                    "summary": "已生成第一版 topic/direction 研究图谱，请给出下一阶段引导。",
+                    "suggested_next_steps": [
+                        "指定优先扩展的方向",
+                        "要求加入特定约束或关键论文",
+                        "聚焦某个方法路线继续深入",
+                    ],
+                    "graph_delta_summary": {
+                        "node_count": len(graph["nodes"]),
+                        "edge_count": len(graph["edges"]),
+                    },
+                    "report_excerpt": "初版图谱已建立，当前在第一个 checkpoint 等待用户引导。",
+                },
+            )
+            return
+
+        guidance = self._latest_guidance_text(db, task_id=task.id, run_id=run_id)
+        prompt = (
+            "你是 openclaw auto research orchestrator。请基于 topic、已有方向和用户 guidance，输出一段阶段报告。\n\n"
+            f"Topic: {task.topic}\n"
+            f"Directions: {orjson.dumps([d.name for d in ResearchDirectionRepo(db).list_for_task(task.id)]).decode('utf-8')}\n"
+            f"Guidance: {guidance}\n"
+            "请输出一段结构化中文总结，包含：当前重点、建议下一步、风险。"
+        )
+        try:
+            result = self.llm_gateway.chat_text(
+                backend=ResearchLLMBackend.OPENCLAW.value,
+                model=task.llm_model,
+                system_prompt="Act like an autonomous research run, but respond with a concise stage report.",
+                prompt=prompt,
+                temperature=0.2,
+                max_tokens=1200,
+            )
+            report_text = result.text.strip()
+        except Exception as exc:
+            logger.warning(
+                "auto_research_continue_fallback task_id=%s run_id=%s error=%s",
+                task.task_id,
+                run_id,
+                exc,
+            )
+            report_text = (
+                f"Stage summary for {task.topic}\n\n"
+                f"- Guidance received: {guidance or 'None'}\n"
+                "- Current focus: keep the existing direction graph and prioritize user-selected branches.\n"
+                "- Suggested next step: continue with retrieval-augmented exploration, then add a focused paper search.\n"
+                "- Risks: OpenClaw is not currently available in this local environment, so this report is a safe fallback.\n"
+            )
+        report_dir = Path(self.settings.research_artifact_dir) / task.task_id / "runs" / run_id
+        report_dir.mkdir(parents=True, exist_ok=True)
+        report_path = report_dir / "stage-report.md"
+        report_md = (
+            f"# {task.topic}\n\n"
+            f"## Run\n\n- run_id: {run_id}\n- phase: {phase}\n\n"
+            f"## Guidance\n\n{guidance or 'None'}\n\n"
+            f"## Report\n\n{report_text}\n"
+        )
+        report_path.write_text(report_md, encoding="utf-8")
+        report_node_id = f"report:{run_id}"
+        self._emit_run_event(
+            db,
+            task=task,
+            run_id=run_id,
+            event_type=ResearchRunEventType.REPORT_CHUNK,
+            payload={"title": "Stage report", "content": report_text},
+        )
+        self._emit_run_event(
+            db,
+            task=task,
+            run_id=run_id,
+            event_type=ResearchRunEventType.NODE_UPSERT,
+            payload={
+                "id": report_node_id,
+                "type": "report",
+                "label": "Stage report",
+                "summary": report_text[:280],
+                "status": "done",
+            },
+        )
+        self._emit_run_event(
+            db,
+            task=task,
+            run_id=run_id,
+            event_type=ResearchRunEventType.EDGE_UPSERT,
+            payload={
+                "source": f"topic:{task.task_id}",
+                "target": report_node_id,
+                "type": "topic_report",
+                "weight": 1.0,
+            },
+        )
+        self._emit_run_event(
+            db,
+            task=task,
+            run_id=run_id,
+            event_type=ResearchRunEventType.ARTIFACT,
+            payload={"kind": "report", "path": str(report_path)},
+        )
+        task.auto_status = ResearchAutoStatus.COMPLETED
+        task.status = ResearchTaskStatus.DONE
+        task.updated_at = datetime.now(timezone.utc)
+        db.add(task)
+        db.flush()
+
+    def _emit_run_event(
+        self,
+        db: Session,
+        *,
+        task: ResearchTask,
+        run_id: str,
+        event_type: ResearchRunEventType,
+        payload: dict,
+    ) -> dict:
+        row = ResearchRunEventRepo(db).create_event(
+            task_id=task.id,
+            run_id=run_id,
+            event_type=event_type,
+            payload={
+                "run_id": run_id,
+                "task_id": task.task_id,
+                "event_type": event_type.value,
+                "payload": payload,
+            },
+        )
+        return self._run_event_to_dict(task.task_id, row)
+
+    def _latest_guidance_text(self, db: Session, *, task_id: int, run_id: str) -> str:
+        rows = ResearchRunEventRepo(db).list_for_run(task_id=task_id, run_id=run_id, limit=200)
+        for row in reversed(rows):
+            data = _load_json_dict(row.payload_json)
+            payload = _load_json_dict(data.get("payload"))
+            if data.get("event_type") == ResearchRunEventType.PROGRESS.value and payload.get("kind") == "user_guidance":
+                return str(payload.get("text") or "").strip()
+        return ""
+
+    def _run_event_to_dict(self, task_id: str, row) -> dict:
+        data = _load_json_dict(row.payload_json)
+        payload = _load_json_dict(data.get("payload"))
+        return {
+            "run_id": str(data.get("run_id") or row.run_id),
+            "task_id": str(data.get("task_id") or task_id),
+            "event_type": str(data.get("event_type") or row.event_type.value),
+            "seq": row.seq,
+            "payload": payload,
+            "created_at": row.created_at,
+        }
+
+    def _node_chat_to_dict(self, task_id: str, row) -> dict:
+        return {
+            "id": row.id,
+            "task_id": task_id,
+            "node_id": row.node_id,
+            "thread_id": row.thread_id,
+            "question": row.question,
+            "answer": row.answer,
+            "provider": row.provider,
+            "model": row.model,
+            "created_at": row.created_at,
+        }
+
+    def _resolve_node_context(self, db: Session, *, task: ResearchTask, node_id: str) -> dict:
+        if node_id.startswith("paper:"):
+            paper = ResearchPaperRepo(db).get_by_token(task.id, node_id)
+            if paper:
+                return {
+                    "type": "paper",
+                    "title": paper.title,
+                    "authors": _load_json_list(paper.authors_json),
+                    "year": paper.year,
+                    "venue": paper.venue,
+                    "abstract": paper.abstract,
+                    "method_summary": paper.method_summary,
+                    "key_points": paper.key_points,
+                    "source": paper.source,
+                    "saved": paper.saved,
+                }
+        graph = self._build_tree_graph(db, task, include_papers=True, paper_limit=self.settings.research_graph_paper_limit_default)
+        for node in graph["nodes"]:
+            if str(node.get("id")) == node_id:
+                return node
+        return {"id": node_id, "type": "unknown", "label": node_id}
+
+    def _default_canvas_from_graph(self, *, task_id: str, graph: dict) -> dict:
+        nodes = []
+        edges = []
+        type_columns = {
+            "topic": 0,
+            "direction": 1,
+            "round": 2,
+            "paper": 3,
+            "checkpoint": 2,
+            "report": 3,
+        }
+        counts: dict[str, int] = {}
+        for node in graph.get("nodes", []):
+            node_type = str(node.get("type") or "note")
+            col = type_columns.get(node_type, 4)
+            row = counts.get(node_type, 0)
+            counts[node_type] = row + 1
+            nodes.append(
+                {
+                    "id": node.get("id"),
+                    "type": node_type,
+                    "position": {"x": 120 + col * 320, "y": 100 + row * 180},
+                    "data": node,
+                    "hidden": False,
+                }
+            )
+        for idx, edge in enumerate(graph.get("edges", []), start=1):
+            source = str(edge.get("source") or "")
+            target = str(edge.get("target") or "")
+            edges.append(
+                {
+                    "id": f"edge:{task_id}:{idx}:{source}:{target}",
+                    "source": source,
+                    "target": target,
+                    "type": "smoothstep",
+                    "data": edge,
+                    "hidden": False,
+                }
+            )
+        return {"nodes": nodes, "edges": edges, "viewport": {"x": 0, "y": 0, "zoom": 1}}
 
     def _search_with_cache(
         self,
@@ -2666,6 +3243,7 @@ class ResearchService:
         next_retry_job = job_repo.next_retry_for_task(row.id)
         fulltext_stats = ResearchPaperFulltextRepo(db).summary_for_task(row.id)
         seed_stats = ResearchSeedPaperRepo(db).summary_for_task(row.id)
+        latest_run = ResearchRunEventRepo(db).latest_for_task(row.id)
         latest_graph = ResearchGraphSnapshotRepo(db).latest_for_task(row.id)
         rounds_total = len(ResearchRoundRepo(db).list_for_task(row.id))
         graph_stats = _load_json_dict(latest_graph.stats_json) if latest_graph else {}
@@ -2682,6 +3260,12 @@ class ResearchService:
             "task_id": row.task_id,
             "topic": row.topic,
             "status": row.status.value,
+            "mode": row.mode.value,
+            "llm_backend": row.llm_backend.value,
+            "llm_model": row.llm_model,
+            "auto_status": row.auto_status.value,
+            "last_checkpoint_id": row.last_checkpoint_id,
+            "latest_run_id": latest_run.run_id if latest_run else None,
             "constraints": _load_json_dict(row.constraints_json),
             "directions": [
                 {
@@ -2770,6 +3354,8 @@ class ResearchService:
     def _task_status_for_retry(job_type: ResearchJobType) -> ResearchTaskStatus:
         if job_type == ResearchJobType.PLAN:
             return ResearchTaskStatus.PLANNING
+        if job_type == ResearchJobType.AUTO_RESEARCH:
+            return ResearchTaskStatus.SEARCHING
         return ResearchTaskStatus.SEARCHING
 
     def _record_job_metric(self, *, latency_ms: int = 0) -> None:

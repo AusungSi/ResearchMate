@@ -58,12 +58,32 @@ class ResearchTaskStatus(str, Enum):
     FAILED = "failed"
 
 
+class ResearchRunMode(str, Enum):
+    GPT_STEP = "gpt_step"
+    OPENCLAW_AUTO = "openclaw_auto"
+
+
+class ResearchLLMBackend(str, Enum):
+    GPT = "gpt"
+    OPENCLAW = "openclaw"
+
+
+class ResearchAutoStatus(str, Enum):
+    IDLE = "idle"
+    RUNNING = "running"
+    AWAITING_GUIDANCE = "awaiting_guidance"
+    COMPLETED = "completed"
+    FAILED = "failed"
+    CANCELED = "canceled"
+
+
 class ResearchJobType(str, Enum):
     PLAN = "plan"
     SEARCH = "search"
     FULLTEXT = "fulltext"
     GRAPH_BUILD = "graph_build"
     PAPER_SUMMARY = "paper_summary"
+    AUTO_RESEARCH = "auto_research"
 
 
 class ResearchJobStatus(str, Enum):
@@ -108,3 +128,14 @@ class ResearchRoundStatus(str, Enum):
 class ResearchGraphViewType(str, Enum):
     TREE = "tree"
     CITATION = "citation"
+
+
+class ResearchRunEventType(str, Enum):
+    PROGRESS = "progress"
+    NODE_UPSERT = "node_upsert"
+    EDGE_UPSERT = "edge_upsert"
+    PAPER_UPSERT = "paper_upsert"
+    CHECKPOINT = "checkpoint"
+    REPORT_CHUNK = "report_chunk"
+    ARTIFACT = "artifact"
+    ERROR = "error"

@@ -1,0 +1,43 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  color: #0f172a;
+  background:
+    radial-gradient(circle at 15% 10%, rgba(59, 130, 246, 0.08), transparent 22%),
+    radial-gradient(circle at 82% 12%, rgba(16, 185, 129, 0.06), transparent 18%),
+    linear-gradient(180deg, #f8fafc 0%, #eef2f7 100%);
+  font-family:
+    "Segoe UI",
+    "PingFang SC",
+    "Noto Sans SC",
+    sans-serif;
+}
+
+body {
+  margin: 0;
+  min-width: 320px;
+  min-height: 100vh;
+}
+
+#root {
+  min-height: 100vh;
+}
+
+.react-flow__attribution {
+  display: none;
+}
+
+.react-flow__edge-path {
+  stroke: #cbd5e1;
+  stroke-dasharray: 7 7;
+  stroke-width: 2;
+}
+
+.react-flow__handle {
+  width: 10px;
+  height: 10px;
+  border: 2px solid white;
+  background: #94a3b8;
+}

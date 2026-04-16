@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 from datetime import datetime
+from typing import Any
 
 from fastapi import APIRouter, Depends, File, Header, HTTPException, Query, Request, UploadFile
 from sqlalchemy.orm import Session
 
+from app.core.config import get_settings
 from app.domain.schemas import (
     AsrTranscribeResponse,
     PairCodeRequest,
@@ -16,35 +18,42 @@ from app.domain.schemas import (
     TokenResponse,
 )
 from app.infra.db import get_db
-from app.infra.repos import MobileRepo
-from app.services.asr_service import AsrError, AsrService, AsrTimeoutError, AsrValidationError
-from app.services.mobile_auth_service import MobileAuthService
-from app.services.reminder_service import ReminderService
+from app.infra.repos import MobileRepo, UserRepo
 
 
 router = APIRouter(prefix="/api/v1")
 
 
-def get_auth_service(request: Request) -> MobileAuthService:
+def get_auth_service(request: Request) -> Any:
     return request.app.state.mobile_auth_service
 
 
-def get_reminder_service(request: Request) -> ReminderService:
+def get_reminder_service(request: Request) -> Any:
     return request.app.state.reminder_service
 
 
-def get_asr_service(request: Request) -> AsrService:
+def get_asr_service(request: Request) -> Any:
     return request.app.state.asr_service
 
 
 def get_current_user_id(
+    request: Request,
     authorization: str = Header(default=""),
-    auth_service: MobileAuthService = Depends(get_auth_service),
+    db: Session = Depends(get_db),
 ) -> int:
+    settings = get_settings()
+    if settings.app_profile.strip().lower() == "research_local":
+        user = UserRepo(db).get_or_create(
+            settings.research_local_user_id,
+            timezone_name=settings.default_timezone,
+            locale=settings.research_local_user_locale,
+        )
+        return int(user.id)
     if not authorization.startswith("Bearer "):
         raise HTTPException(status_code=401, detail="missing bearer token")
     token = authorization.replace("Bearer ", "", 1).strip()
     try:
+        auth_service = get_auth_service(request)
         payload = auth_service.verify_access_token(token)
         return int(payload.sub)
     except Exception as exc:
@@ -180,6 +189,8 @@ async def asr_transcribe(
     _user_id: int = Depends(get_current_user_id),
     asr_service: AsrService = Depends(get_asr_service),
 ) -> AsrTranscribeResponse:
+    from app.services.asr_service import AsrError, AsrTimeoutError, AsrValidationError
+
     data = await file.read()
     if not data:
         raise HTTPException(status_code=400, detail="audio file is empty")

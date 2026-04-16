@@ -1,19 +1,29 @@
 from __future__ import annotations
 
 from fastapi import APIRouter, Depends, File, HTTPException, Query, Request, UploadFile
-from fastapi.responses import HTMLResponse
+from fastapi.responses import FileResponse, HTMLResponse
+from pathlib import Path
 from sqlalchemy.orm import Session
 
 from app.api.mobile import get_current_user_id
 from app.domain.schemas import (
     ResearchPaperDetailResponse,
     ResearchExportResponse,
+    ResearchAutoRunResponse,
+    ResearchCanvasRequest,
+    ResearchCanvasResponse,
     ResearchExploreStartRequest,
     ResearchExploreStartResponse,
     ResearchExploreTreeResponse,
+    ResearchNodeChatRequest,
+    ResearchNodeChatResponse,
     ResearchPaperSaveRequest,
     ResearchPaperSaveResponse,
     ResearchPaperSummarizeResponse,
+    ResearchRunControlResponse,
+    ResearchRunEventsResponse,
+    ResearchRunGuidanceRequest,
+    ResearchRunGuidanceResponse,
     ResearchRoundNextRequest,
     ResearchRoundNextResponse,
     ResearchFulltextBuildResponse,
@@ -59,7 +69,15 @@ def create_research_task(
         "top_n": payload.top_n,
         "sources": payload.sources,
     }
-    row = research_service.create_task(db, user_id=user_id, topic=payload.topic, constraints=constraints)
+    row = research_service.create_task(
+        db,
+        user_id=user_id,
+        topic=payload.topic,
+        constraints=constraints,
+        mode=payload.mode,
+        llm_backend=payload.llm_backend,
+        llm_model=payload.llm_model,
+    )
     data = research_service.get_task(db, user_id=user_id, task_id=row.task_id)
     return ResearchTaskResponse(**data)
 
@@ -87,6 +105,131 @@ def get_research_task(
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     return ResearchTaskResponse(**data)
+
+
+@router.get("/tasks/{task_id}/canvas", response_model=ResearchCanvasResponse)
+def get_canvas(
+    task_id: str,
+    user_id: int = Depends(get_current_user_id),
+    db: Session = Depends(get_db),
+    research_service: ResearchService = Depends(get_research_service),
+) -> ResearchCanvasResponse:
+    try:
+        data = research_service.get_canvas_state(db, user_id=user_id, task_id=task_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    return ResearchCanvasResponse(**data)
+
+
+@router.put("/tasks/{task_id}/canvas", response_model=ResearchCanvasResponse)
+def put_canvas(
+    task_id: str,
+    payload: ResearchCanvasRequest,
+    user_id: int = Depends(get_current_user_id),
+    db: Session = Depends(get_db),
+    research_service: ResearchService = Depends(get_research_service),
+) -> ResearchCanvasResponse:
+    try:
+        data = research_service.save_canvas_state(
+            db,
+            user_id=user_id,
+            task_id=task_id,
+            state=payload.model_dump(),
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    return ResearchCanvasResponse(**data)
+
+
+@router.post("/tasks/{task_id}/auto/start", response_model=ResearchAutoRunResponse)
+def auto_start(
+    task_id: str,
+    user_id: int = Depends(get_current_user_id),
+    db: Session = Depends(get_db),
+    research_service: ResearchService = Depends(get_research_service),
+) -> ResearchAutoRunResponse:
+    try:
+        data = research_service.start_auto_research(db, user_id=user_id, task_id=task_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return ResearchAutoRunResponse(**data)
+
+
+@router.get("/tasks/{task_id}/runs/{run_id}/events", response_model=ResearchRunEventsResponse)
+def get_run_events(
+    task_id: str,
+    run_id: str,
+    after_seq: int | None = Query(default=None, ge=0),
+    limit: int = Query(default=200, ge=1, le=1000),
+    user_id: int = Depends(get_current_user_id),
+    db: Session = Depends(get_db),
+    research_service: ResearchService = Depends(get_research_service),
+) -> ResearchRunEventsResponse:
+    try:
+        data = research_service.list_run_events(
+            db,
+            user_id=user_id,
+            task_id=task_id,
+            run_id=run_id,
+            after_seq=after_seq,
+            limit=limit,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    return ResearchRunEventsResponse(**data)
+
+
+@router.post("/tasks/{task_id}/runs/{run_id}/guidance", response_model=ResearchRunGuidanceResponse)
+def submit_guidance(
+    task_id: str,
+    run_id: str,
+    payload: ResearchRunGuidanceRequest,
+    user_id: int = Depends(get_current_user_id),
+    db: Session = Depends(get_db),
+    research_service: ResearchService = Depends(get_research_service),
+) -> ResearchRunGuidanceResponse:
+    try:
+        data = research_service.submit_run_guidance(
+            db,
+            user_id=user_id,
+            task_id=task_id,
+            run_id=run_id,
+            text=payload.text,
+            tags=payload.tags,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return ResearchRunGuidanceResponse(**data)
+
+
+@router.post("/tasks/{task_id}/runs/{run_id}/continue", response_model=ResearchRunControlResponse)
+def continue_auto_run(
+    task_id: str,
+    run_id: str,
+    user_id: int = Depends(get_current_user_id),
+    db: Session = Depends(get_db),
+    research_service: ResearchService = Depends(get_research_service),
+) -> ResearchRunControlResponse:
+    try:
+        data = research_service.continue_auto_research(db, user_id=user_id, task_id=task_id, run_id=run_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return ResearchRunControlResponse(**data)
+
+
+@router.post("/tasks/{task_id}/runs/{run_id}/cancel", response_model=ResearchRunControlResponse)
+def cancel_auto_run(
+    task_id: str,
+    run_id: str,
+    user_id: int = Depends(get_current_user_id),
+    db: Session = Depends(get_db),
+    research_service: ResearchService = Depends(get_research_service),
+) -> ResearchRunControlResponse:
+    try:
+        data = research_service.cancel_auto_research(db, user_id=user_id, task_id=task_id, run_id=run_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return ResearchRunControlResponse(**data)
 
 
 @router.post("/tasks/{task_id}/plan", response_model=ResearchTaskPlanResponse)
@@ -296,6 +439,28 @@ def get_saved_papers(
     return ResearchSavedPaperListResponse(**data)
 
 
+@router.get("/tasks/{task_id}/papers/{paper_id:path}/asset")
+def get_paper_asset(
+    task_id: str,
+    paper_id: str,
+    kind: str = Query(default="pdf"),
+    user_id: int = Depends(get_current_user_id),
+    db: Session = Depends(get_db),
+    research_service: ResearchService = Depends(get_research_service),
+):
+    try:
+        path = research_service.get_paper_asset_path(
+            db,
+            user_id=user_id,
+            task_id=task_id,
+            paper_token=paper_id,
+            kind=kind,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    return FileResponse(path=path, filename=Path(path).name)
+
+
 @router.get("/tasks/{task_id}/papers/{paper_id:path}", response_model=ResearchPaperDetailResponse)
 def get_paper_detail(
     task_id: str,
@@ -314,6 +479,30 @@ def get_paper_detail(
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     return ResearchPaperDetailResponse(**data)
+
+
+@router.post("/tasks/{task_id}/nodes/{node_id:path}/chat", response_model=ResearchNodeChatResponse)
+def chat_with_node(
+    task_id: str,
+    node_id: str,
+    payload: ResearchNodeChatRequest,
+    user_id: int = Depends(get_current_user_id),
+    db: Session = Depends(get_db),
+    research_service: ResearchService = Depends(get_research_service),
+) -> ResearchNodeChatResponse:
+    try:
+        data = research_service.chat_with_node(
+            db,
+            user_id=user_id,
+            task_id=task_id,
+            node_id=node_id,
+            question=payload.question,
+            thread_id=payload.thread_id,
+            tags=payload.tags,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return ResearchNodeChatResponse(**data)
 
 
 @router.post("/tasks/{task_id}/papers/{paper_id:path}/save", response_model=ResearchPaperSaveResponse)

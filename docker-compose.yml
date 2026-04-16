@@ -1,0 +1,46 @@
+services:
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile.backend
+    environment:
+      APP_PROFILE: research_local
+      APP_HOST: 0.0.0.0
+      APP_PORT: 8000
+      RESEARCH_ENABLED: "true"
+      RESEARCH_QUEUE_MODE: worker
+      DB_URL: sqlite:///./data/memomate.db
+      RESEARCH_ARTIFACT_DIR: ./artifacts/research
+      RESEARCH_SAVE_BASE_DIR: ./artifacts/research/saved
+    volumes:
+      - ./data:/app/data
+      - ./artifacts:/app/artifacts
+    ports:
+      - "8000:8000"
+
+  worker:
+    build:
+      context: .
+      dockerfile: Dockerfile.backend
+    command: ["python", "-m", "app.workers.research_worker"]
+    environment:
+      APP_PROFILE: research_local
+      RESEARCH_ENABLED: "true"
+      RESEARCH_QUEUE_MODE: worker
+      DB_URL: sqlite:///./data/memomate.db
+      RESEARCH_ARTIFACT_DIR: ./artifacts/research
+      RESEARCH_SAVE_BASE_DIR: ./artifacts/research/saved
+    volumes:
+      - ./data:/app/data
+      - ./artifacts:/app/artifacts
+    depends_on:
+      - backend
+
+  frontend:
+    build:
+      context: .
+      dockerfile: frontend/Dockerfile
+    depends_on:
+      - backend
+    ports:
+      - "3000:80"

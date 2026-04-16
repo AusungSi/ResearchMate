@@ -14,9 +14,12 @@ class Settings(BaseSettings):
 
     app_name: str = "MemoMate"
     app_env: str = "development"
+    app_profile: str = "research_local"
     app_host: str = "0.0.0.0"
     app_port: int = 8000
     log_level: str = "INFO"
+    research_local_user_id: str = "local-single-user"
+    research_local_user_locale: str = "zh-CN"
 
     db_url: str = "sqlite:///./memomate.db"
     scheduler_interval_seconds: int = 15
@@ -84,6 +87,11 @@ class Settings(BaseSettings):
     openclaw_retries: int = 2
     openclaw_cli_path: str = "~/.openclaw/bin/openclaw"
     openclaw_cli_fallback_enabled: bool = True
+
+    research_gpt_base_url: str = "https://api.openai.com/v1"
+    research_gpt_api_key: str = ""
+    research_gpt_model: str = "gpt-5.2"
+    research_gpt_timeout_seconds: int = 60
 
     research_enabled: bool = False
     research_job_interval_seconds: int = 20

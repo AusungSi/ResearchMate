@@ -7,7 +7,6 @@ from uuid import uuid4
 from app.core.config import get_settings
 from app.core.logging import get_logger, setup_logging
 from app.infra.db import init_db, session_scope
-from app.infra.wecom_client import WeComClient
 from app.llm.openclaw_client import OpenClawClient
 from app.services.research_service import ResearchService
 
@@ -22,7 +21,7 @@ def run_forever() -> None:
     worker_id = os.getenv("RESEARCH_WORKER_ID", f"worker-{uuid4().hex[:8]}")
     research_service = ResearchService(
         openclaw_client=OpenClawClient(settings=settings),
-        wecom_client=WeComClient(),
+        wecom_client=None,
     )
     poll_seconds = max(1, int(settings.research_worker_poll_seconds))
     concurrency = max(1, int(settings.research_worker_concurrency))

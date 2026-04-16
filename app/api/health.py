@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import Any
+
 from fastapi import APIRouter, Depends, Request
 from sqlalchemy import text
 from sqlalchemy.orm import Session
@@ -8,43 +10,75 @@ from app.domain.schemas import CapabilitiesResponse, CapabilityItem, HealthRespo
 from app.infra.db import get_db
 from app.infra.wecom_client import WeComClient
 from app.llm.ollama_client import OllamaClient
-from app.services.asr_service import AsrService
-from app.services.intent_service import IntentService
-from app.services.message_ingest import MessageIngestService
 from app.services.research_service import ResearchService
-from app.services.reply_generation_service import ReplyGenerationService
-from app.services.scheduler_service import SchedulerService
 
 
 router = APIRouter(prefix="/api/v1")
 
 
-def get_scheduler(request: Request) -> SchedulerService:
-    return request.app.state.scheduler_service
+class _NullScheduler:
+    started = False
 
 
-def get_ollama(request: Request) -> OllamaClient:
-    return request.app.state.ollama_client
+class _NullOllama:
+    def healthcheck(self) -> bool:
+        return False
 
 
-def get_wecom(request: Request) -> WeComClient:
-    return request.app.state.wecom_client
+class _NullWeCom:
+    def last_send_status(self) -> tuple[bool, str | None]:
+        return False, "soft_disabled"
 
 
-def get_ingest_service(request: Request) -> MessageIngestService:
-    return request.app.state.message_ingest_service
+class _NullIngest:
+    webhook_dedup_ok = True
 
 
-def get_intent_service(request: Request) -> IntentService:
-    return request.app.state.intent_service
+class _NullCapabilityService:
+    last_error: str | None = None
+
+    def __init__(self, provider: str) -> None:
+        self.provider = provider
+
+    def health_status(self) -> tuple[bool, str | None, str | None]:
+        return False, self.provider, "soft_disabled"
+
+    def capability(self) -> dict:
+        return {
+            "enabled": False,
+            "provider": self.provider,
+            "model": None,
+            "mode": "soft_disabled",
+            "fallback_enabled": False,
+        }
 
 
-def get_asr(request: Request) -> AsrService:
-    return request.app.state.asr_service
+def get_scheduler(request: Request) -> Any:
+    return getattr(request.app.state, "scheduler_service", _NullScheduler())
 
 
-def get_reply_generation(request: Request) -> ReplyGenerationService:
-    return request.app.state.reply_generation_service
+def get_ollama(request: Request) -> Any:
+    return getattr(request.app.state, "ollama_client", _NullOllama())
+
+
+def get_wecom(request: Request) -> Any:
+    return getattr(request.app.state, "wecom_client", _NullWeCom())
+
+
+def get_ingest_service(request: Request) -> Any:
+    return getattr(request.app.state, "message_ingest_service", _NullIngest())
+
+
+def get_intent_service(request: Request) -> Any:
+    return getattr(request.app.state, "intent_service", _NullCapabilityService("legacy_intent"))
+
+
+def get_asr(request: Request) -> Any:
+    return getattr(request.app.state, "asr_service", _NullCapabilityService("legacy_asr"))
+
+
+def get_reply_generation(request: Request) -> Any:
+    return getattr(request.app.state, "reply_generation_service", _NullCapabilityService("legacy_reply"))
 
 
 def get_research_service(request: Request) -> ResearchService:
@@ -55,13 +89,13 @@ def get_research_service(request: Request) -> ResearchService:
 def healthcheck(
     request: Request,
     db: Session = Depends(get_db),
-    scheduler_service: SchedulerService = Depends(get_scheduler),
-    ollama_client: OllamaClient = Depends(get_ollama),
-    wecom_client: WeComClient = Depends(get_wecom),
-    ingest_service: MessageIngestService = Depends(get_ingest_service),
-    intent_service: IntentService = Depends(get_intent_service),
-    asr_service: AsrService = Depends(get_asr),
-    reply_generation_service: ReplyGenerationService = Depends(get_reply_generation),
+    scheduler_service: Any = Depends(get_scheduler),
+    ollama_client: Any = Depends(get_ollama),
+    wecom_client: Any = Depends(get_wecom),
+    ingest_service: Any = Depends(get_ingest_service),
+    intent_service: Any = Depends(get_intent_service),
+    asr_service: Any = Depends(get_asr),
+    reply_generation_service: Any = Depends(get_reply_generation),
     research_service: ResearchService = Depends(get_research_service),
 ) -> HealthResponse:
     db_ok = False
@@ -132,9 +166,9 @@ def healthcheck(
 
 @router.get("/capabilities", response_model=CapabilitiesResponse)
 def capabilities(
-    intent_service: IntentService = Depends(get_intent_service),
-    reply_generation_service: ReplyGenerationService = Depends(get_reply_generation),
-    asr_service: AsrService = Depends(get_asr),
+    intent_service: Any = Depends(get_intent_service),
+    reply_generation_service: Any = Depends(get_reply_generation),
+    asr_service: Any = Depends(get_asr),
 ) -> CapabilitiesResponse:
     intent_cap = intent_service.capability()
     reply_cap = reply_generation_service.capability()
