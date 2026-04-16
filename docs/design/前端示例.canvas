@@ -1,0 +1,319 @@
+export default function PaperNodeWorkbenchMockup() {
+  const papers = [
+    {
+      id: 1,
+      x: 120,
+      y: 110,
+      w: 310,
+      h: 190,
+      title: "SGP-Gen: Subgraph-Grounded Planning for Ultrasound Report Generation",
+      venue: "MICCAI 2026",
+      type: "方法型论文",
+      year: "2026",
+      impact: "高相关",
+      status: "有后续跟进",
+      tags: ["Multimodal", "Planning", "Ultrasound"],
+      summary:
+        "将规划约束在临床合法子图空间中，先生成可控 plan，再生成自然语言报告。",
+      figure: "主图预览",
+      selected: true,
+    },
+    {
+      id: 2,
+      x: 520,
+      y: 60,
+      w: 270,
+      h: 156,
+      title: "R2GenGPT",
+      venue: "MIA 2024",
+      type: "方法型论文",
+      year: "2024",
+      impact: "高被引",
+      status: "基础参考",
+      tags: ["Report Gen", "LLM"],
+      summary: "将大模型用于医学报告生成。",
+      figure: "框架图",
+    },
+    {
+      id: 3,
+      x: 540,
+      y: 270,
+      w: 258,
+      h: 150,
+      title: "Semantic Reader / Citation Context",
+      venue: "Tool Reference",
+      type: "工具参考",
+      year: "2025",
+      impact: "适合借鉴",
+      status: "交互参考",
+      tags: ["Citation", "Reading"],
+      summary: "适合做不离开当前节点的增强阅读。",
+      figure: "阅读增强",
+    },
+    {
+      id: 4,
+      x: 50,
+      y: 360,
+      w: 280,
+      h: 160,
+      title: "Connected Papers / ResearchRabbit",
+      venue: "Tool Reference",
+      type: "关系发现",
+      year: "2025",
+      impact: "适合借鉴",
+      status: "图谱参考",
+      tags: ["Graph", "Discovery"],
+      summary: "适合突出 paper 之间的关系与延展探索。",
+      figure: "关系图",
+    },
+  ];
+
+  const selected = papers[0];
+
+  const connections = [
+    { x1: 430, y1: 180, x2: 520, y2: 138 },
+    { x1: 430, y1: 210, x2: 540, y2: 345 },
+    { x1: 250, y1: 300, x2: 200, y2: 360 },
+  ];
+
+  const Badge = ({ children, tone = "default" }) => {
+    const tones = {
+      default: "bg-slate-100 text-slate-700 border-slate-200",
+      blue: "bg-blue-50 text-blue-700 border-blue-200",
+      green: "bg-emerald-50 text-emerald-700 border-emerald-200",
+      amber: "bg-amber-50 text-amber-700 border-amber-200",
+      rose: "bg-rose-50 text-rose-700 border-rose-200",
+      violet: "bg-violet-50 text-violet-700 border-violet-200",
+    };
+    return (
+      <span className={`inline-flex items-center rounded-full border px-2 py-1 text-[11px] font-medium ${tones[tone]}`}>
+        {children}
+      </span>
+    );
+  };
+
+  const NodeCard = ({ paper, compact = false }) => (
+    <div
+      className={`absolute rounded-3xl border border-slate-200 bg-white/95 shadow-[0_8px_30px_rgba(15,23,42,0.08)] backdrop-blur ${paper.selected ? "ring-2 ring-blue-500/30" : ""}`}
+      style={{ left: paper.x, top: paper.y, width: paper.w, height: paper.h }}
+    >
+      <div className="flex h-full flex-col p-4">
+        <div className="mb-3 flex items-start justify-between gap-3">
+          <div className="min-w-0">
+            <div className="line-clamp-2 text-sm font-semibold leading-5 text-slate-900">
+              {paper.title}
+            </div>
+            <div className="mt-2 flex flex-wrap gap-1.5">
+              <Badge tone="blue">{paper.venue}</Badge>
+              <Badge>{paper.year}</Badge>
+              <Badge tone="violet">{paper.type}</Badge>
+            </div>
+          </div>
+          <div className="flex gap-1.5">
+            <button className="h-8 w-8 rounded-full border border-slate-200 bg-white text-slate-500">☆</button>
+            <button className="h-8 w-8 rounded-full border border-slate-200 bg-white text-slate-500">⋯</button>
+          </div>
+        </div>
+
+        <div className={`grid ${compact ? "grid-cols-[1fr]" : "grid-cols-[1.1fr_1fr]"} gap-3`}>
+          <div className="rounded-2xl border border-slate-200 bg-slate-50 p-3">
+            <div className="mb-2 flex items-center justify-between">
+              <span className="text-[11px] font-medium uppercase tracking-wide text-slate-500">TL;DR</span>
+              <Badge tone="green">{paper.impact}</Badge>
+            </div>
+            <p className="line-clamp-3 text-xs leading-5 text-slate-600">{paper.summary}</p>
+            <div className="mt-3 flex flex-wrap gap-1.5">
+              {paper.tags.map((tag) => (
+                <span key={tag} className="rounded-full bg-slate-100 px-2 py-1 text-[11px] text-slate-600">
+                  {tag}
+                </span>
+              ))}
+            </div>
+          </div>
+
+          {!compact && (
+            <div className="rounded-2xl border border-dashed border-slate-300 bg-gradient-to-br from-slate-50 to-slate-100 p-3">
+              <div className="mb-2 text-[11px] font-medium uppercase tracking-wide text-slate-500">Main figure</div>
+              <div className="flex h-[78px] items-center justify-center rounded-xl border border-slate-200 bg-white text-xs text-slate-400">
+                {paper.figure}
+              </div>
+              <div className="mt-2 text-[11px] text-slate-500">可选展示主图 / 图表 / 结构示意</div>
+            </div>
+          )}
+        </div>
+
+        <div className="mt-auto flex items-center justify-between pt-3">
+          <div className="flex gap-2">
+            <button className="rounded-xl bg-slate-900 px-3 py-2 text-xs font-medium text-white">Open PDF</button>
+            <button className="rounded-xl border border-slate-200 bg-white px-3 py-2 text-xs font-medium text-slate-700">Ask Model</button>
+          </div>
+          <div className="text-[11px] text-slate-500">{paper.status}</div>
+        </div>
+      </div>
+    </div>
+  );
+
+  return (
+    <div className="min-h-screen bg-slate-100 p-5 text-slate-900">
+      <div className="mx-auto h-[900px] max-w-[1500px] overflow-hidden rounded-[32px] border border-slate-200 bg-white shadow-[0_20px_80px_rgba(15,23,42,0.12)]">
+        <div className="grid h-full grid-cols-[260px_1fr_360px]">
+          <aside className="border-r border-slate-200 bg-slate-50/70 p-5">
+            <div className="mb-6">
+              <div className="text-xs font-semibold uppercase tracking-[0.18em] text-slate-400">Project View</div>
+              <div className="mt-2 text-2xl font-semibold tracking-tight">Paper Node Workbench</div>
+              <p className="mt-2 text-sm leading-6 text-slate-500">
+                在当前节点上先理解论文，再决定是否深入，同时保留关系探索与上下文对话。
+              </p>
+            </div>
+
+            <div className="rounded-2xl border border-slate-200 bg-white p-3">
+              <div className="text-sm font-medium">Search</div>
+              <div className="mt-3 rounded-xl border border-slate-200 bg-slate-50 px-3 py-2 text-sm text-slate-400">
+                Search title / venue / keyword...
+              </div>
+            </div>
+
+            <div className="mt-4 rounded-2xl border border-slate-200 bg-white p-4">
+              <div className="text-sm font-medium">Filters</div>
+              <div className="mt-3 flex flex-wrap gap-2">
+                <Badge tone="blue">高被引</Badge>
+                <Badge tone="amber">争议较多</Badge>
+                <Badge tone="green">方法型论文</Badge>
+                <Badge tone="violet">综述型论文</Badge>
+                <Badge>有后续跟进</Badge>
+              </div>
+            </div>
+
+            <div className="mt-4 rounded-2xl border border-slate-200 bg-white p-4">
+              <div className="text-sm font-medium">Project Collections</div>
+              <div className="mt-3 space-y-2 text-sm text-slate-600">
+                <div className="rounded-xl bg-slate-100 px-3 py-2">Ultrasound Report Generation</div>
+                <div className="rounded-xl px-3 py-2">Planning-based Methods</div>
+                <div className="rounded-xl px-3 py-2">Baselines</div>
+                <div className="rounded-xl px-3 py-2">To Read / To Compare</div>
+              </div>
+            </div>
+
+            <div className="mt-4 rounded-2xl border border-slate-200 bg-white p-4">
+              <div className="text-sm font-medium">Tag Actions</div>
+              <div className="mt-3 grid gap-2 text-sm">
+                <button className="rounded-xl border border-slate-200 px-3 py-2 text-left text-slate-700">+ Add to Zotero collection</button>
+                <button className="rounded-xl border border-slate-200 px-3 py-2 text-left text-slate-700">+ Add to project set</button>
+                <button className="rounded-xl border border-slate-200 px-3 py-2 text-left text-slate-700">+ Tag current paper</button>
+              </div>
+            </div>
+          </aside>
+
+          <main className="relative overflow-hidden bg-[radial-gradient(circle_at_20%_20%,rgba(59,130,246,0.06),transparent_26%),radial-gradient(circle_at_80%_20%,rgba(16,185,129,0.05),transparent_20%),linear-gradient(to_bottom,white,white)]">
+            <div className="border-b border-slate-200 px-6 py-4">
+              <div className="flex items-center justify-between gap-4">
+                <div>
+                  <div className="text-xs font-semibold uppercase tracking-[0.18em] text-slate-400">Canvas</div>
+                  <div className="mt-1 text-lg font-semibold">Graph + Focused Card + Context Chat</div>
+                </div>
+                <div className="flex items-center gap-2">
+                  <button className="rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm text-slate-700">Map View</button>
+                  <button className="rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm text-slate-700">List View</button>
+                  <button className="rounded-xl bg-slate-900 px-3 py-2 text-sm font-medium text-white">Focused Node</button>
+                </div>
+              </div>
+            </div>
+
+            <svg className="pointer-events-none absolute inset-0 h-full w-full">
+              {connections.map((line, i) => (
+                <line
+                  key={i}
+                  x1={line.x1}
+                  y1={line.y1}
+                  x2={line.x2}
+                  y2={line.y2}
+                  stroke="rgb(203 213 225)"
+                  strokeWidth="2"
+                  strokeDasharray="6 8"
+                />
+              ))}
+            </svg>
+
+            <NodeCard paper={selected} />
+            <NodeCard paper={papers[1]} compact />
+            <NodeCard paper={papers[2]} compact />
+            <NodeCard paper={papers[3]} compact />
+
+            <div className="absolute bottom-5 left-1/2 flex -translate-x-1/2 items-center gap-3 rounded-2xl border border-slate-200 bg-white/95 px-4 py-3 shadow-lg backdrop-blur">
+              <div className="text-sm text-slate-500">Quick actions</div>
+              <button className="rounded-xl bg-slate-900 px-3 py-2 text-xs font-medium text-white">Open PDF</button>
+              <button className="rounded-xl border border-slate-200 px-3 py-2 text-xs font-medium text-slate-700">Compare</button>
+              <button className="rounded-xl border border-slate-200 px-3 py-2 text-xs font-medium text-slate-700">Pin node</button>
+              <button className="rounded-xl border border-slate-200 px-3 py-2 text-xs font-medium text-slate-700">⋯ More</button>
+            </div>
+          </main>
+
+          <aside className="border-l border-slate-200 bg-slate-50/60 p-5">
+            <div className="rounded-3xl border border-slate-200 bg-white p-4 shadow-sm">
+              <div className="flex items-start justify-between gap-3">
+                <div>
+                  <div className="text-xs font-semibold uppercase tracking-[0.18em] text-slate-400">Selected Paper</div>
+                  <div className="mt-2 text-lg font-semibold leading-7">{selected.title}</div>
+                </div>
+                <button className="rounded-full border border-slate-200 px-3 py-1 text-xs text-slate-600">Saved</button>
+              </div>
+
+              <div className="mt-4 flex flex-wrap gap-2">
+                <Badge tone="blue">{selected.venue}</Badge>
+                <Badge>{selected.year}</Badge>
+                <Badge tone="green">高被引</Badge>
+                <Badge tone="amber">有后续跟进</Badge>
+              </div>
+
+              <div className="mt-4 rounded-2xl border border-slate-200 bg-slate-50 p-4">
+                <div className="text-sm font-medium">Why it matters</div>
+                <p className="mt-2 text-sm leading-6 text-slate-600">
+                  这篇论文可作为当前主题的核心方法节点：既有明确的 planning 设计，也天然适合和 report generation 的基线进行比较。
+                </p>
+              </div>
+            </div>
+
+            <div className="mt-4 rounded-3xl border border-slate-200 bg-white p-4 shadow-sm">
+              <div className="flex items-center justify-between">
+                <div>
+                  <div className="text-sm font-medium">Context Chat</div>
+                  <div className="text-xs text-slate-500">绑定当前论文上下文</div>
+                </div>
+                <button className="rounded-xl border border-slate-200 px-3 py-2 text-xs text-slate-700">New thread</button>
+              </div>
+
+              <div className="mt-4 space-y-3">
+                <div className="rounded-2xl bg-slate-100 p-3 text-sm leading-6 text-slate-700">
+                  这篇论文和 R2GenGPT 的核心差异是什么？
+                </div>
+                <div className="rounded-2xl bg-blue-50 p-3 text-sm leading-6 text-slate-700">
+                  当前论文更强调先生成受限 plan，再生成报告；而 R2GenGPT 更偏向直接借助大模型进行生成。这里可以继续追问训练监督、可解释性和评估方式。
+                </div>
+              </div>
+
+              <div className="mt-4 flex flex-wrap gap-2">
+                <button className="rounded-full border border-slate-200 px-3 py-1.5 text-xs text-slate-600">解决了什么问题？</button>
+                <button className="rounded-full border border-slate-200 px-3 py-1.5 text-xs text-slate-600">与当前论文差别？</button>
+                <button className="rounded-full border border-slate-200 px-3 py-1.5 text-xs text-slate-600">实验设置可复用吗？</button>
+                <button className="rounded-full border border-slate-200 px-3 py-1.5 text-xs text-slate-600">局限与争议？</button>
+              </div>
+
+              <div className="mt-4 rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm text-slate-400">
+                Ask about this paper, its methods, limitations, related work...
+              </div>
+            </div>
+
+            <div className="mt-4 rounded-3xl border border-slate-200 bg-white p-4 shadow-sm">
+              <div className="text-sm font-medium">Organize</div>
+              <div className="mt-3 grid gap-2 text-sm">
+                <button className="rounded-xl border border-slate-200 px-3 py-2 text-left text-slate-700">Add to Zotero</button>
+                <button className="rounded-xl border border-slate-200 px-3 py-2 text-left text-slate-700">Add to project collection</button>
+                <button className="rounded-xl border border-slate-200 px-3 py-2 text-left text-slate-700">Tag as baseline / related / must-read</button>
+              </div>
+            </div>
+          </aside>
+        </div>
+      </div>
+    </div>
+  );
+}

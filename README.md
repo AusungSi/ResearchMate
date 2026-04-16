@@ -17,6 +17,9 @@
 > [!NOTE]
 > 这个仓库不只是“文献搜索脚本”，而是一套从 OpenClaw 调研规划到本地研究 UI、异步 worker、WeCom 入口、移动端配对和后台审计的完整原型。
 
+> [!TIP]
+> WSL research-local 主线请优先查看 `docs/RESEARCH_LOCAL_QUICKSTART.md` 和 `docs/README.md`。
+
 ## Overview
 
 `OpenClaw for Paper Research` 的核心目标，是把“找论文”升级为“围绕主题持续收敛研究方向”的工作流：
@@ -84,6 +87,12 @@ OpenClaw-for-paper-research/
 ├── requirements.txt
 └── README.md
 ```
+
+Additional current directories worth noting:
+
+- `frontend/`: Vite + React research workbench
+- `scripts/`: now includes WSL startup, build and packaging helpers
+- `requirements-research-local.txt`: trimmed dependency set for the research-local profile
 
 ## Quick Start
 
@@ -173,6 +182,10 @@ python -m uvicorn app.main:app --host 0.0.0.0 --port 8000
 - `POST /api/v1/admin/chat/send`
 
 ## Development Notes
+
+- `docs/README.md` 给出了 docs 目录的整理索引和主要入口。
+- `docs/PROJECT_OVERVIEW_ZH.md` 适合做中文接手文档。
+- `docs/design/前端示例.canvas` 保存了前端视觉参考样例。
 
 - `docs/RESEARCH_ARCH.md` 解释了研究任务、轮次、引文边和队列模型的设计。
 - `docs/DEMO_STEPS.md` 给出了从启动到演示的完整本地操作流程。
