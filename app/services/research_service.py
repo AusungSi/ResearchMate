@@ -126,8 +126,7 @@ class ResearchService:
         task_repo = ResearchTaskRepo(db)
         session_repo = ResearchSessionRepo(db)
         now = datetime.now(timezone.utc)
-        # Use global recent tasks to avoid collisions across users.
-        task_id = self._next_task_id(task_repo.list_recent_all(limit=500))
+        task_id = self._next_task_id()
         mode_text = mode.value if isinstance(mode, ResearchRunMode) else str(mode)
         backend_text = llm_backend.value if isinstance(llm_backend, ResearchLLMBackend) else str(llm_backend)
         mode_value = ResearchRunMode(mode_text)
@@ -3329,16 +3328,9 @@ class ResearchService:
         return directions[:direction_max]
 
     @staticmethod
-    def _next_task_id(existing_rows: list[ResearchTask]) -> str:
-        day = datetime.now(timezone.utc).strftime("%Y%m%d")
-        max_seq = 0
-        for row in existing_rows:
-            if not row.task_id.startswith(f"R-{day}-"):
-                continue
-            tail = row.task_id.rsplit("-", 1)[-1]
-            if tail.isdigit():
-                max_seq = max(max_seq, int(tail))
-        return f"R-{day}-{max_seq + 1:04d}"
+    def _next_task_id() -> str:
+        now = datetime.now(timezone.utc)
+        return f"R-{now:%Y%m%d-%H%M%S}-{uuid4().hex[:4]}"
 
     def _notify_user(self, db: Session, user_id: int, content: str) -> None:
         if not self.wecom_client:

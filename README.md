@@ -1,201 +1,190 @@
-<div align="center">
-
 # OpenClaw for Paper Research
 
-本地优先的研究工作流与个人助理原型，围绕 OpenClaw 构建文献规划、轮次探索、全文处理、引文图谱和轻量提醒能力。
+一个面向本地 `WSL / Linux VM` 的单用户研究工作台。
 
-<p>
-  <a href="https://github.com/AusungSi/OpenClaw-for-paper-research/stargazers"><img alt="GitHub stars" src="https://img.shields.io/github/stars/AusungSi/OpenClaw-for-paper-research?style=social"></a>
-  <img alt="Python" src="https://img.shields.io/badge/Python-3.10%2B-3776AB?logo=python&logoColor=white">
-  <img alt="FastAPI" src="https://img.shields.io/badge/API-FastAPI-009688?logo=fastapi&logoColor=white">
-  <img alt="OpenClaw" src="https://img.shields.io/badge/LLM-OpenClaw-black">
-  <img alt="Status" src="https://img.shields.io/badge/status-active%20prototype-orange">
-</p>
+当前主线已经切到 `research_local`，核心目标是把论文调研过程统一到一个本地可运行的工作台里，支持两种模式：
 
-</div>
+- `GPT Step`
+  - 半自动，用户逐步决定下一步研究动作。
+- `OpenClaw Auto`
+  - 分阶段自治运行，在 `checkpoint` 暂停并等待用户补充 guidance。
 
-> [!NOTE]
-> 这个仓库不只是“文献搜索脚本”，而是一套从 OpenClaw 调研规划到本地研究 UI、异步 worker、WeCom 入口、移动端配对和后台审计的完整原型。
+## 当前状态
 
-> [!TIP]
-> WSL research-local 主线请优先查看 `docs/RESEARCH_LOCAL_QUICKSTART.md` 和 `docs/README.md`。
+截至 `2026-04-18`，当前仓库已经完成并验证：
 
-## Overview
+- WSL 中运行 `backend + worker + frontend`
+- WSL 中安装并启动本地 OpenClaw gateway
+- `GPT Step` live smoke：
+  - `gpt_basic`
+  - `gpt_explore`
+- `OpenClaw Auto` live smoke：
+  - `start -> checkpoint -> guidance -> continue -> report/artifact`
+- 总控 smoke 脚本顺序跑通：
+  - `gpt_basic -> gpt_explore -> openclaw_auto`
+  - 连续 `2` 轮全部通过
 
-`OpenClaw for Paper Research` 的核心目标，是把“找论文”升级为“围绕主题持续收敛研究方向”的工作流：
+这轮还补了两个稳定性修复：
 
-- 用 OpenClaw 生成研究方向和摘要任务
-- 用多轮探索替代一次性搜索
-- 用全文抓取、手动上传和引文扩展补齐证据链
-- 用本地可视化界面把 Topic / Direction / Round / Paper 串成可迭代的研究树
+- SQLite 在 `backend + worker` 同时访问时启用更友好的 `busy_timeout / WAL`
+- `task_id` 改为时间戳加短随机后缀，避免并发创建任务时撞 ID
 
-除了 research 模块，仓库还保留了提醒助手、企业微信消息入口、语音转写、移动端 token 配对，以及 localhost-only 的管理页面，方便你把 research 能力接入更大的个人助手系统。
+## 默认访问地址
 
-## Core Capabilities
+- 前端工作台：`http://127.0.0.1:5173`
+- 后端 API：`http://127.0.0.1:8000`
+- OpenClaw gateway：`http://127.0.0.1:18789`
 
-- OpenClaw 驱动的研究方向规划、摘要生成与关键点总结
-- 轮次式探索：`expand / deepen / pivot / converge / stop`
-- 论文检索、保存、导出与分页浏览
-- 全文自动下载、PDF 上传补齐、PyMuPDF + pdfminer 解析
-- 按需构建 1-hop 引文图，支持 `semantic_scholar -> openalex -> crossref` 兜底
-- 基于 `research_jobs` 的异步队列，支持 worker claim / lease / heartbeat / reclaim
-- 企业微信文本与语音入口、提醒落库和调度分发
-- 本地管理台、开发 token 接口和用户审计页
+## 文档入口
 
-## Research Workflow
+- [docs/RESEARCH_LOCAL_QUICKSTART.md](docs/RESEARCH_LOCAL_QUICKSTART.md)
+  - WSL 启动、OpenClaw 启停、smoke 命令
+- [docs/RESEARCH_USAGE_ZH.md](docs/RESEARCH_USAGE_ZH.md)
+  - 日常使用说明，包含 GPT Step 和 OpenClaw Auto
+- [docs/PROJECT_OVERVIEW_ZH.md](docs/PROJECT_OVERVIEW_ZH.md)
+  - 当前架构、数据结构、接口与重构进度
+- [docs/ROADMAP_ZH.md](docs/ROADMAP_ZH.md)
+  - 下一步优化方向
+- [docs/README.md](docs/README.md)
+  - `docs/` 文档索引
 
-```mermaid
-flowchart LR
-  A[Topic] --> B[Plan Directions]
-  B --> C[Round 1 Search]
-  C --> D[User Feedback]
-  D --> E[Propose Next Round]
-  E --> F[Select Candidate]
-  F --> G[Fulltext + Citation Build]
-  G --> H[Export / Summarize / Save]
+## 快速开始
+
+### 1. 复制配置
+
+```bash
+cp .env.example .env
 ```
 
-## Architecture at a Glance
+至少确认这些变量：
 
-```mermaid
-flowchart LR
-  A[WeCom / Local UI / Mobile] --> B[FastAPI App]
-  B --> C[ResearchService]
-  B --> D[Reminder + Message Ingest]
-  C --> E[(SQLite)]
-  C --> F[OpenClaw Gateway]
-  C --> G[Semantic Scholar / arXiv / OpenAlex / Crossref]
-  H[Research Worker] --> C
+```env
+APP_PROFILE=research_local
+DB_URL=sqlite:///./data/memomate.db
+RESEARCH_ENABLED=true
+RESEARCH_QUEUE_MODE=worker
+RESEARCH_GPT_API_KEY=...
+RESEARCH_GPT_MODEL=gpt-5.4
 ```
 
-## Repository Structure
+如果要启用真实 OpenClaw：
+
+```env
+OPENCLAW_ENABLED=true
+OPENCLAW_BASE_URL=http://127.0.0.1:18789
+OPENCLAW_GATEWAY_TOKEN=...
+OPENCLAW_AGENT_ID=main
+```
+
+### 2. 安装 research-local 依赖
+
+```bash
+python3 -m venv .venv-wsl
+.venv-wsl/bin/python -m pip install -r requirements-research-local.txt
+```
+
+### 3. 启动后端和 worker
+
+```bash
+bash scripts/start_research_local_wsl.sh
+```
+
+### 4. 启动前端
+
+```bash
+bash scripts/install_frontend_node_wsl.sh
+bash scripts/start_frontend_wsl.sh
+```
+
+### 5. 启动 OpenClaw gateway
+
+如果你已经在 WSL 中装好了 OpenClaw：
+
+```bash
+bash scripts/start_openclaw_wsl.sh
+```
+
+停止：
+
+```bash
+bash scripts/stop_openclaw_wsl.sh
+```
+
+## Smoke 测试
+
+单独跑某条链路：
+
+```bash
+bash scripts/run_research_live_smoke_wsl.sh --scenario gpt_basic
+bash scripts/run_research_live_smoke_wsl.sh --scenario gpt_explore
+bash scripts/run_research_live_smoke_wsl.sh --scenario openclaw_auto
+```
+
+顺序跑完整主链路：
+
+```bash
+bash scripts/run_research_live_smoke_wsl.sh --scenario all
+```
+
+连续跑两轮稳定性检查：
+
+```bash
+bash scripts/run_research_live_smoke_wsl.sh --scenario all --iterations 2
+```
+
+脚本会输出 JSON 摘要，并在有 `--json-out` 时保存到文件。
+
+## 当前推荐使用方式
+
+### GPT Step
+
+适合需要人工控节奏的调研：
+
+1. 创建 task
+2. 等待方向规划
+3. 选择方向开始 explore
+4. 生成 candidates
+5. 选择下一轮
+6. 需要时查看图谱、PDF、node chat
+
+### OpenClaw Auto
+
+适合让 OpenClaw 自行跑第一阶段研究：
+
+1. 创建 `openclaw_auto` task
+2. 启动 auto run
+3. 等待 checkpoint
+4. 输入 guidance
+5. 继续自动研究
+6. 查看阶段报告和 artifact
+
+## 关键脚本
+
+- `scripts/start_research_local_wsl.sh`
+- `scripts/stop_research_local_wsl.sh`
+- `scripts/start_frontend_wsl.sh`
+- `scripts/stop_frontend_wsl.sh`
+- `scripts/start_openclaw_wsl.sh`
+- `scripts/stop_openclaw_wsl.sh`
+- `scripts/research_live_smoke.py`
+- `scripts/run_research_live_smoke_wsl.sh`
+
+## 仓库结构
 
 ```text
-OpenClaw-for-paper-research/
-├── app/
-│   ├── api/          # wechat, mobile, health, research, admin, research_ui
-│   ├── core/         # config, logging, timezone
-│   ├── domain/       # enums, models, schemas
-│   ├── infra/        # db session, repos, wecom clients
-│   ├── llm/          # openclaw / ollama clients and providers
-│   ├── services/     # reminder, ingest, research and admin services
-│   └── workers/      # dispatcher and research worker
-├── docs/             # demo steps and architecture notes
-├── scripts/          # PowerShell startup/testing helpers
-├── tests/            # unit + integration tests
-├── .env.example
-├── requirements.txt
-└── README.md
+app/                  FastAPI 后端与 research 服务
+frontend/             React 工作台
+docs/                 中文文档与设计说明
+scripts/              WSL 启停、构建、打包、smoke 脚本
+tests/                主要后端测试
+artifacts/            研究报告、导出文件、前端打包产物
+data/                 本地 SQLite 数据
 ```
 
-Additional current directories worth noting:
+## 说明
 
-- `frontend/`: Vite + React research workbench
-- `scripts/`: now includes WSL startup, build and packaging helpers
-- `requirements-research-local.txt`: trimmed dependency set for the research-local profile
-
-## Quick Start
-
-### 1. Clone and install
-
-```powershell
-git clone https://github.com/AusungSi/OpenClaw-for-paper-research.git
-cd OpenClaw-for-paper-research
-python -m venv .venv
-. .\.venv\Scripts\Activate.ps1
-pip install -r requirements.txt
-```
-
-### 2. Create your local config
-
-```powershell
-Copy-Item .env.example .env
-```
-
-建议至少检查这些变量：
-
-- `OPENCLAW_ENABLED=true`
-- `OPENCLAW_BASE_URL=http://127.0.0.1:18789`
-- `OPENCLAW_GATEWAY_TOKEN=<your-token>`
-- `RESEARCH_ENABLED=true`
-- `RESEARCH_QUEUE_MODE=worker`
-- `DB_URL=sqlite:///./memomate.db`
-
-如果你只想先跑本地 research UI，企业微信相关变量可以暂时保留占位值。
-
-### 3. Start the backend
-
-```powershell
-.\scripts\start_backend.ps1
-```
-
-等价的手动命令是：
-
-```powershell
-python -m uvicorn app.main:app --host 0.0.0.0 --port 8000
-```
-
-### 4. Start the research worker
-
-```powershell
-.\scripts\start_research_worker.ps1
-```
-
-或者一键同时启动：
-
-```powershell
-.\scripts\start_all_with_worker.ps1
-```
-
-### 5. Open the local research UI
-
-- Research UI: `http://127.0.0.1:8000/research/ui`
-- Health check: `http://127.0.0.1:8000/api/v1/health`
-- Capabilities: `http://127.0.0.1:8000/api/v1/capabilities`
-- Admin overview: `http://127.0.0.1:8000/admin`
-
-本地开发时，研究 UI 可以通过 `localhost-only` 的 `/api/v1/dev/token` 自动拿到调试 token。
-
-## API Highlights
-
-### Research
-
-- `POST /api/v1/research/tasks`
-- `GET /api/v1/research/tasks`
-- `POST /api/v1/research/tasks/{task_id}/plan`
-- `POST /api/v1/research/tasks/{task_id}/search`
-- `POST /api/v1/research/tasks/{task_id}/explore/start`
-- `POST /api/v1/research/tasks/{task_id}/explore/rounds/{round_id}/propose`
-- `POST /api/v1/research/tasks/{task_id}/explore/rounds/{round_id}/select`
-- `POST /api/v1/research/tasks/{task_id}/fulltext/build`
-- `POST /api/v1/research/tasks/{task_id}/graph/build`
-- `POST /api/v1/research/tasks/{task_id}/papers/{paper_id}/summarize`
-- `GET /api/v1/research/tasks/{task_id}/graph/view`
-
-### Assistant and ops
-
-- `GET/POST /wechat`
-- `POST /api/v1/auth/pair`
-- `GET /api/v1/reminders`
-- `POST /api/v1/asr/transcribe`
-- `GET /api/v1/admin/overview`
-- `POST /api/v1/admin/chat/send`
-
-## Development Notes
-
-- `docs/README.md` 给出了 docs 目录的整理索引和主要入口。
-- `docs/PROJECT_OVERVIEW_ZH.md` 适合做中文接手文档。
-- `docs/design/前端示例.canvas` 保存了前端视觉参考样例。
-
-- `docs/RESEARCH_ARCH.md` 解释了研究任务、轮次、引文边和队列模型的设计。
-- `docs/DEMO_STEPS.md` 给出了从启动到演示的完整本地操作流程。
-- `/admin`、`/api/v1/admin/*` 和 `/api/v1/dev/*` 都限制为 localhost 访问，适合本地调试和验收。
-- `RESEARCH_WECOM_LITE_MODE=true` 时，企业微信只承担轻量入口和状态通知，复杂研究操作仍在本地 UI 完成。
-
-## Testing
-
-```powershell
-python -m pytest -q
-```
-
-测试覆盖了 research API、队列 reclaim、OpenClaw client、提醒流程、语音消息、管理台和移动端配对等主路径。
+- 旧的企业微信、提醒、移动端认证、Admin、ASR 链路仍保留在代码里，但默认不进入 `research_local` 启动链路。
+- 当前最值得优先阅读的文档是：
+  - [docs/RESEARCH_LOCAL_QUICKSTART.md](docs/RESEARCH_LOCAL_QUICKSTART.md)
+  - [docs/RESEARCH_USAGE_ZH.md](docs/RESEARCH_USAGE_ZH.md)
+  - [docs/PROJECT_OVERVIEW_ZH.md](docs/PROJECT_OVERVIEW_ZH.md)

@@ -10,6 +10,7 @@ from app.api.research import router as research_router
 from app.core.config import get_settings
 from app.domain.models import Base
 from app.infra.db import get_db
+from app.infra.repos import ResearchSessionRepo
 from app.llm.openclaw_client import LLMCallResult, LLMTaskType
 from app.services.research_service import ResearchService
 
@@ -156,6 +157,58 @@ def test_openclaw_auto_run_generates_checkpoint_and_report_events():
         final_types = [item["event_type"] for item in final_events_resp.json()["items"]]
         assert "report_chunk" in final_types
         assert "artifact" in final_types
+    finally:
+        client.close()
+        db_session.close()
+        settings.app_profile = original_profile
+
+
+def test_switch_task_same_active_task_does_not_touch_session_state():
+    settings = get_settings()
+    original_profile = settings.app_profile
+    settings.app_profile = "research_local"
+    client, db_session, service = build_client()
+    try:
+        create_resp = client.post(
+            "/api/v1/research/tasks",
+            json={"topic": "session stability task", "mode": "gpt_step", "llm_backend": "gpt", "llm_model": "gpt-test"},
+        )
+        assert create_resp.status_code == 200
+        task = create_resp.json()
+
+        user_id = 1
+        session = ResearchSessionRepo(db_session).get_or_create(user_id, page_size=service.settings.research_page_size)
+        before_updated_at = session.updated_at
+
+        switched = service.switch_task(db_session, user_id=user_id, task_id=task["task_id"])
+        assert switched.task_id == task["task_id"]
+
+        db_session.refresh(session)
+        assert session.active_task_id == task["task_id"]
+        assert session.updated_at == before_updated_at
+    finally:
+        client.close()
+        db_session.close()
+        settings.app_profile = original_profile
+
+
+def test_create_task_generates_unique_task_ids():
+    settings = get_settings()
+    original_profile = settings.app_profile
+    settings.app_profile = "research_local"
+    client, db_session, _service = build_client()
+    try:
+        first = client.post(
+            "/api/v1/research/tasks",
+            json={"topic": "first unique id", "mode": "gpt_step", "llm_backend": "gpt", "llm_model": "gpt-test"},
+        )
+        second = client.post(
+            "/api/v1/research/tasks",
+            json={"topic": "second unique id", "mode": "gpt_step", "llm_backend": "gpt", "llm_model": "gpt-test"},
+        )
+        assert first.status_code == 200
+        assert second.status_code == 200
+        assert first.json()["task_id"] != second.json()["task_id"]
     finally:
         client.close()
         db_session.close()

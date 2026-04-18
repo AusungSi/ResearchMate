@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, event
 from sqlalchemy.orm import Session, sessionmaker
 
 from app.core.config import get_settings
@@ -10,7 +10,36 @@ from app.domain.models import Base
 
 
 settings = get_settings()
-engine = create_engine(settings.db_url, future=True)
+
+
+def _build_engine():
+    db_url = settings.db_url
+    connect_args: dict[str, object] = {}
+    if db_url.startswith("sqlite"):
+        # WSL research_local runs backend + worker against the same SQLite file.
+        # A longer timeout plus WAL mode makes concurrent reads/writes much less fragile.
+        connect_args = {
+            "check_same_thread": False,
+            "timeout": 30,
+        }
+    built = create_engine(db_url, future=True, connect_args=connect_args)
+    if db_url.startswith("sqlite"):
+        @event.listens_for(built, "connect")
+        def _set_sqlite_pragmas(dbapi_connection, _connection_record):
+            cursor = dbapi_connection.cursor()
+            try:
+                cursor.execute("PRAGMA busy_timeout = 30000")
+                cursor.execute("PRAGMA foreign_keys = ON")
+                # WAL is only useful for file-backed SQLite databases.
+                if ":memory:" not in db_url:
+                    cursor.execute("PRAGMA journal_mode = WAL")
+                    cursor.execute("PRAGMA synchronous = NORMAL")
+            finally:
+                cursor.close()
+    return built
+
+
+engine = _build_engine()
 SessionLocal = sessionmaker(bind=engine, autoflush=False, autocommit=False, expire_on_commit=False)
 
 

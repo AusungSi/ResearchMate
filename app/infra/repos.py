@@ -605,6 +605,8 @@ class ResearchSessionRepo:
         return row
 
     def set_active_task(self, row: ResearchSession, task_id: str) -> ResearchSession:
+        if row.active_task_id == task_id and row.active_direction_index is None and row.page == 1:
+            return row
         row.active_task_id = task_id
         row.active_direction_index = None
         row.page = 1
@@ -614,8 +616,11 @@ class ResearchSessionRepo:
         return row
 
     def set_pagination(self, row: ResearchSession, *, direction_index: int | None, page: int) -> ResearchSession:
+        next_page = max(1, page)
+        if row.active_direction_index == direction_index and row.page == next_page:
+            return row
         row.active_direction_index = direction_index
-        row.page = max(1, page)
+        row.page = next_page
         row.updated_at = datetime.now(timezone.utc)
         self.db.add(row)
         self.db.flush()

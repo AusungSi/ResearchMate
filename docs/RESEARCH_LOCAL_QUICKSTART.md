@@ -11,13 +11,22 @@
 
 ## 当前已验证的本地链路
 
-基于 2026-04-16 的实际联调结果，已经验证通过：
+基于 `2026-04-18` 的最新联调结果，已经验证通过：
 
 - WSL 中启动 `backend + worker`
 - WSL 中安装独立 Node 工具链并启动前端 `Vite dev server`
+- WSL 中安装并启动本地 OpenClaw gateway
 - 前端通过 `/api` 代理访问本机 WSL 后端
 - `gpt_step` 的任务创建、worker 自动消费、canvas 读写、node chat
+- `gpt_step` 的 `explore/start -> propose -> select -> graph`
 - `openclaw_auto` 的 `start -> checkpoint -> guidance -> continue -> report/artifact`
+- 顺序全链路 `gpt_basic -> gpt_explore -> openclaw_auto`
+- 连续 `2` 轮 smoke 稳定性检查全部通过
+
+本轮同时验证并修复：
+
+- SQLite 在 `backend + worker` 并发访问时的锁冲突明显缓解
+- 并发建任务时的 `task_id` 冲突已修复
 
 尚未在这台机器上验证：
 
@@ -68,6 +77,31 @@ bash scripts/start_research_local_wsl.sh
 
 ```bash
 bash scripts/stop_research_local_wsl.sh
+```
+
+## OpenClaw WSL 启停
+
+如果你已经在 WSL 中装好了 OpenClaw，并在 `.env` 中填写了：
+
+```env
+OPENCLAW_ENABLED=true
+OPENCLAW_BASE_URL=http://127.0.0.1:18789
+OPENCLAW_GATEWAY_TOKEN=...
+OPENCLAW_AGENT_ID=main
+```
+
+可以直接用仓库里的脚本管理 gateway。
+
+启动：
+
+```bash
+bash scripts/start_openclaw_wsl.sh
+```
+
+停止：
+
+```bash
+bash scripts/stop_openclaw_wsl.sh
 ```
 
 ## 前端迁移到 WSL
@@ -174,9 +208,42 @@ RESEARCH_GPT_BASE_URL=https://api.openai.com/v1
 
 ```env
 OPENCLAW_ENABLED=true
-OPENCLAW_BASE_URL=...
-OPENCLAW_AGENT_ID=...
+OPENCLAW_BASE_URL=http://127.0.0.1:18789
+OPENCLAW_AGENT_ID=main
 OPENCLAW_GATEWAY_TOKEN=...
+```
+
+## Live Smoke 流程
+
+这轮已经新增：
+
+- `scripts/research_live_smoke.py`
+- `scripts/run_research_live_smoke_wsl.sh`
+
+单独跑某条链路：
+
+```bash
+bash scripts/run_research_live_smoke_wsl.sh --scenario gpt_basic
+bash scripts/run_research_live_smoke_wsl.sh --scenario gpt_explore
+bash scripts/run_research_live_smoke_wsl.sh --scenario openclaw_auto
+```
+
+顺序跑完整主链路：
+
+```bash
+bash scripts/run_research_live_smoke_wsl.sh --scenario all
+```
+
+连续跑两轮稳定性检查：
+
+```bash
+bash scripts/run_research_live_smoke_wsl.sh --scenario all --iterations 2
+```
+
+如果你希望保留 JSON 结果：
+
+```bash
+bash scripts/run_research_live_smoke_wsl.sh --scenario all --iterations 2 --json-out artifacts/research-live-smoke/all-2x.json
 ```
 
 ## 当前默认行为
@@ -223,7 +290,8 @@ OPENCLAW_GATEWAY_TOKEN=...
 ## 本次实测补充
 
 - 当前 WSL 会打印一条 localhost / NAT 警告，但不影响访问
-- SQLite 在 worker 写入期间对高频读写比较敏感，所以前端轮询接口应尽量避免无意义写操作
+- 这轮已经为 SQLite 补了 `busy_timeout / WAL`，并减少了 `research_sessions` 的无意义写入
+- 当前仍建议避免不必要的高频轮询和高频写操作
 - 当前仓库已经补了前端 WSL 脚本，不再依赖 Windows Node 才能跑开发环境
 
 ## 兼容说明

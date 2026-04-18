@@ -1,6 +1,6 @@
 # OpenClaw for Paper Research 项目说明文档
 
-生成时间：2026-04-16
+生成时间：2026-04-18
 文档状态：已同步到当前 `research_local` 重构进度
 
 ## 1. 当前项目定位
@@ -42,6 +42,26 @@
 - 原内嵌 `research_ui`
 
 这些内容没有被删除，但只有在 `legacy_full` 档位下才会重新进入启动链路。
+
+## 2.1 最新联调进度
+
+截至 `2026-04-18`，已经在当前机器上完成并验证：
+
+- WSL 中安装并运行 OpenClaw gateway
+- WSL 中运行 `backend + worker + frontend`
+- `GPT Step` live smoke：
+  - `gpt_basic`
+  - `gpt_explore`
+- `OpenClaw Auto` live smoke：
+  - `start -> checkpoint -> guidance -> continue -> report/artifact`
+- 总控 smoke 顺序跑通：
+  - `gpt_basic -> gpt_explore -> openclaw_auto`
+- 连续 `2` 轮稳定性检查全部通过
+
+这一轮顺手修复了两个真实稳定性问题：
+
+- SQLite 在 `backend + worker` 并发读写时容易出现 `database is locked`
+- 并发创建 research task 时可能发生 `task_id` 冲突
 
 ## 3. 当前技术栈
 
