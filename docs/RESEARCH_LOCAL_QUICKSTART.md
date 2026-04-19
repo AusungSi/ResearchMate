@@ -4,29 +4,29 @@
 
 - 默认运行档位：`research_local`
 - 默认目标环境：`WSL / Linux VM`
-- 默认开发形态：`backend + worker + frontend` 全部跑在 WSL
+- 默认开发形态：`backend + worker + frontend`
 - 默认入口：
   - 前端工作台：`http://127.0.0.1:5173`
   - 后端 API：`http://127.0.0.1:8000`
   - OpenClaw gateway：`http://127.0.0.1:18789`
 
-## 当前已验证的本地链路
+## 当前已验证通过的本地链路
 
 基于 `2026-04-19` 的最新联调结果，已经验证通过：
 
 - WSL 中启动 `backend + worker`
-- WSL 中安装独立 Node 工具链并启动前端 `Vite dev server`
+- WSL 中安装本地 Node 工具链并启动前端 `Vite dev server`
 - WSL 中安装并启动本地 OpenClaw gateway
 - 前端通过 `/api` 代理访问本机 WSL 后端
-- `gpt_step` 的：
+- `GPT Step` 的：
   - 任务创建
   - worker 自动消费
   - canvas 读写
   - node chat
   - `explore/start -> propose -> select -> graph`
-- `openclaw_auto` 的：
+- `OpenClaw Auto` 的：
   - `start -> checkpoint -> guidance -> continue -> report/artifact`
-- project / collection / study task：
+- `project / collection / study task`：
   - 项目创建
   - collection 创建
   - paper 加入 collection
@@ -35,18 +35,6 @@
   - 导入 Zotero collection / item 到本地 collection
 - 顺序全链路：
   - `gpt_basic -> gpt_explore -> openclaw_auto`
-- 连续 `2` 轮 smoke 稳定性检查全部通过
-
-本轮同时验证并修复：
-
-- SQLite 在 `backend + worker` 并发访问时的锁冲突明显缓解
-- 并发建任务时的 `task_id` 冲突已修复
-- 画布布局和保存逻辑改成更轻的增量同步
-
-尚未在这台机器上验证：
-
-- `docker compose up --build`
-  - 原因：当前环境没有可用 Docker
 
 ## WSL 前置条件
 
@@ -76,7 +64,7 @@ python3 /tmp/get-pip.py --user --break-system-packages
 cp .env.example .env
 ```
 
-最少建议确认这些变量：
+至少建议确认这些变量：
 
 ```env
 APP_PROFILE=research_local
@@ -89,7 +77,7 @@ RESEARCH_GPT_API_KEY=...
 RESEARCH_GPT_MODEL=gpt-5.4
 ```
 
-如果要启用 OpenClaw Auto：
+如果要启用 `OpenClaw Auto`：
 
 ```env
 OPENCLAW_ENABLED=true
@@ -107,13 +95,13 @@ ZOTERO_LIBRARY_ID=...
 ZOTERO_API_KEY=...
 ```
 
-如果你想把 OpenAlex 加入 discovery 默认源，可以额外配置：
+如果你想把 `OpenAlex` 加入 discovery 默认源，可以额外配置：
 
 ```env
 RESEARCH_SOURCES_DEFAULT=semantic_scholar,arxiv,openalex
 ```
 
-## 2. 后端和 Worker
+## 2. 后端和 worker
 
 创建 WSL Python 环境：
 
@@ -166,7 +154,7 @@ bash scripts/stop_openclaw_wsl.sh
 
 ## 4. 前端迁移到 WSL
 
-这轮已经补了无 sudo 的 WSL 前端方案。
+这一轮已经补了无 `sudo` 的 WSL 前端方案。
 
 ### 4.1 安装 WSL 本地 Node
 
@@ -214,40 +202,50 @@ bash scripts/package_frontend_wsl.sh
 artifacts/releases/research-workbench-v<version>-<timestamp>.tar.gz
 ```
 
-## 5. 前端开发说明
+## 5. 启动后先做健康检查
 
-当前 `frontend/vite.config.ts` 已配置：
+浏览器或命令行访问：
 
-- `/api -> http://127.0.0.1:8000`
+```bash
+curl http://127.0.0.1:8000/api/v1/health
+```
 
-所以前端 dev server 可以直接代理到 WSL 后端。
+重点确认：
+
+- `db_ok`
+- `profile=research_local`
+- 后端没有直接报错退出
+
+## 6. API 连通性检查
+
+如果你想先单独确认“接口通不通”，而不是直接跑整条 research 流程，推荐使用：
+
+```bash
+bash scripts/run_api_connectivity_check_wsl.sh --iterations 10 --json-out artifacts/research-api-check/current.json
+```
+
+这份检查的目标是：
+
+- 确认基础健康接口正常
+- 确认 workbench 配置接口正常
+- 确认 project / collection / task / canvas / run events / zotero config 这些核心接口可以直接访问
+
+它和 live smoke 的区别是：
+
+- `api_connectivity_check`
+  - 偏接口级别
+  - 更适合排查“接口有没有通”
+- `research_live_smoke`
+  - 偏完整业务链路
+  - 更适合排查“研究流程能不能完整跑通”
 
 补充说明：
 
-- `frontend/node_modules` 是平台相关目录
-- 如果你在 WSL 里执行过 `npm ci` 或 `npm install`，这份依赖目录就是 Linux 版本
-- 如果后续要回到 Windows 原生执行前端命令，需要先删除 `frontend/node_modules` 再重新安装
+- 这份检查会创建临时 project、collection、task。
+- 当 worker 正在持续消费任务，而底层数据库仍是 SQLite 时，连续压测可能出现少量超时。
+- 如果你要做更稳定的长期演示，建议后续迁移到 PostgreSQL。
 
-## 6. 当前默认行为
-
-- 只注册 `health` 和 `research` 主路由
-- `research_local` 下 research API 默认绑定单例本地用户，无需 JWT
-- 企业微信、提醒、移动端认证、Admin、ASR、自建通知链路默认 soft-disable
-- `gpt_step` 继续使用现有 step-by-step research API
-- `openclaw_auto` 使用：
-  - `auto/start`
-  - `checkpoint`
-  - `guidance`
-  - `continue`
-- workbench 当前支持：
-  - 项目分组
-  - 可复用 collection
-  - 左右栏折叠
-  - 全屏画布
-  - collection study task
-  - Zotero v1 导入
-
-## 7. Live Smoke 流程
+## 7. Live Smoke
 
 已提供：
 
@@ -284,13 +282,13 @@ bash scripts/run_research_live_smoke_wsl.sh --scenario all --iterations 2 --json
 
 进入前端之后，建议按这个顺序试：
 
-1. 创建一个 project
-2. 在 project 下创建一个 `GPT Step` task
-3. 等方向规划完成后，对某个 direction 开始 explore
-4. 选中几篇 paper，加入 collection
-5. 从 collection 创建一个新的 study task
-6. 创建一个 `OpenClaw Auto` task 并走到 checkpoint
-7. 提交一段 guidance，再继续到阶段报告
+1. 创建一个 `project`
+2. 在 `project` 下创建一个 `GPT Step` task
+3. 等方向规划完成后，对某个 `direction` 开始 `explore`
+4. 选中几篇 `paper`，加入 `collection`
+5. 从 `collection` 创建一个新的 `study task`
+6. 创建一个 `OpenClaw Auto` task 并走到 `checkpoint`
+7. 提交一段 `guidance`，再继续到阶段报告
 8. 如果配置了 Zotero，再导入一个 collection
 
 ## 9. 当前核心接口
@@ -298,6 +296,7 @@ bash scripts/run_research_live_smoke_wsl.sh --scenario all --iterations 2 --json
 - `GET /api/v1/research/workbench/config`
 - `GET /api/v1/research/projects`
 - `POST /api/v1/research/projects`
+- `GET /api/v1/research/projects/{project_id}`
 - `GET /api/v1/research/projects/{project_id}/collections`
 - `POST /api/v1/research/projects/{project_id}/collections`
 - `GET /api/v1/research/collections/{collection_id}`
@@ -305,6 +304,11 @@ bash scripts/run_research_live_smoke_wsl.sh --scenario all --iterations 2 --json
 - `POST /api/v1/research/collections/{collection_id}/study`
 - `POST /api/v1/research/collections/{collection_id}/summarize`
 - `POST /api/v1/research/collections/{collection_id}/graph/build`
+- `GET /api/v1/research/tasks`
+- `POST /api/v1/research/tasks`
+- `GET /api/v1/research/tasks/{task_id}`
+- `GET /api/v1/research/tasks/{task_id}/canvas`
+- `PUT /api/v1/research/tasks/{task_id}/canvas`
 - `GET /api/v1/research/integrations/zotero/config`
 - `POST /api/v1/research/integrations/zotero/import`
 

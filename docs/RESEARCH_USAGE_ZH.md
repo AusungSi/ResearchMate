@@ -1,8 +1,18 @@
-# Research Workbench 使用说明
+# Research Workbench 用户使用说明书
 
 这份文档面向当前默认主线：`research_local`。
 
 目标读者是已经把系统跑起来，接下来要实际使用工作台完成研究任务的人。
+
+如果你还没完成启动，请先看：
+
+- [RESEARCH_LOCAL_QUICKSTART.md](RESEARCH_LOCAL_QUICKSTART.md)
+
+如果你想先确认接口是否打通，再开始使用工作台，请先运行：
+
+```bash
+bash scripts/run_api_connectivity_check_wsl.sh --iterations 10
+```
 
 ## 1. 进入系统
 
@@ -11,20 +21,19 @@
 - 前端工作台：`http://127.0.0.1:5173`
 - 后端 API：`http://127.0.0.1:8000`
 
-当前 `research_local` 下不需要 JWT。
+当前 `research_local` 下不需要 JWT。  
+只要把后端、worker、前端跑起来，就可以直接进入工作台。
 
-你只要把后端、worker、前端跑起来，就可以直接进入工作台。
-
-## 2. 先理解三个核心对象
+## 2. 三个核心对象
 
 ### 2.1 项目 `project`
 
-project 是顶层研究分组。
+`project` 是顶层研究分组。
 
 适合这些场景：
 
 - 同时调研多个主题
-- 把不同任务按主题隔开
+- 把不同任务按方向隔离
 - 为同一研究方向维护多个 task 和多个 collection
 
 当前工作台左侧已经支持：
@@ -36,28 +45,28 @@ project 是顶层研究分组。
 
 ### 2.2 研究任务 `task`
 
-task 是一次实际运行的研究流程。
+`task` 是一次实际运行的研究流程。
 
 当前支持两类：
 
 - `GPT Step`
 - `OpenClaw Auto`
 
-task 可以来自：
+`task` 可以来自：
 
 - 直接输入 topic 创建
-- 从 collection 创建派生 study task
+- 从 collection 创建派生 `study task`
 
 ### 2.3 论文集合 `collection`
 
-collection 是项目级、可复用、可命名的论文集合。
+`collection` 是项目级、可复用、可命名的论文集合。
 
 它不是临时选择，而是长期保留的组织层。
 
 你可以：
 
 - 从当前任务中选中多篇 paper 加入 collection
-- 手动新建空 collection
+- 手工创建 collection
 - 从 collection 创建 study task
 - 对 collection 做总结和图谱构建
 
@@ -79,7 +88,7 @@ collection 是项目级、可复用、可命名的论文集合。
 - 由你决定先探索哪个方向
 - 由你决定何时生成 candidates
 - 由你决定选择哪个 candidate 进入下一轮
-- 节点问答只回答当前节点上下文，不会接管整个研究流程
+- 节点问答只回答当前节点上下文，不接管整条研究链
 
 ### 3.2 `OpenClaw Auto`
 
@@ -88,23 +97,22 @@ collection 是项目级、可复用、可命名的论文集合。
 适合这些场景：
 
 - 你希望 OpenClaw 先自动跑出第一版研究图谱
-- 你更关注 checkpoint 之后的引导，而不是每一步都手动点按钮
+- 你更关注 checkpoint 之后的引导，而不是每一步都手工点击
 - 你需要中间事件流、阶段报告和产物文件
 
 它的特点是：
 
 - 启动后会自动推进
 - 在 `checkpoint` 暂停
-- 你提交 guidance 后继续
-- 最终会产生阶段报告与 artifact
+- 你提交 `guidance` 后继续
+- 最终会产生阶段报告和 artifact
 
 ## 4. 推荐操作顺序
 
 ### 4.1 从 project 开始
 
-建议先在左侧创建一个新的 project。
-
-这样后面创建的 task 和 collection 会更清晰，不会全堆在默认项目里。
+建议先在左侧创建一个新的 `project`。  
+这样后面创建的 task 和 collection 会更清晰，不会全部堆在默认项目里。
 
 ### 4.2 创建一个 `GPT Step` task
 
@@ -118,8 +126,7 @@ collection 是项目级、可复用、可命名的论文集合。
 
 ### 4.3 等待方向规划
 
-任务创建后，系统会生成若干研究方向。
-
+任务创建后，系统会生成若干研究方向。  
 这一阶段你主要关注：
 
 - 方向名称是否合理
@@ -132,7 +139,7 @@ collection 是项目级、可复用、可命名的论文集合。
 
 - `继续探索`
 
-系统会创建 round，并开始为这一轮做检索。
+系统会创建 `round`，并开始为这一轮做检索。
 
 ### 4.5 生成候选方向
 
@@ -149,8 +156,7 @@ collection 是项目级、可复用、可命名的论文集合。
 
 ### 4.6 选择下一轮
 
-从 candidates 中选择一个，进入子 round。
-
+从 `candidates` 中选择一个，进入子 `round`。  
 这时你可以继续：
 
 - 深挖
@@ -170,19 +176,18 @@ collection 是项目级、可复用、可命名的论文集合。
 
 ### 5.2 从 collection 创建派生研究任务
 
-当一个 collection 已经积累到足够的论文后，可以：
+当一个 collection 已经积累到足够的论文后，可以点击：
 
-- 点击 `基于集合继续调研`
+- `基于集合继续调研`
 
-这会创建一个新的 study task。
-
-这个 task 的 seed corpus 会优先来自 collection，而不只是依赖重新检索 topic。
+这会创建一个新的 `study task`。  
+这个 task 的 `seed corpus` 会优先来自 collection，而不是只依赖重新检索 topic。
 
 适合这些场景：
 
 - 对一组相关论文继续扩展
-- 从某个筛选过的小集合出发做更深一轮研究
-- 对比不同 collection 派生出的研究路线
+- 从筛过的小集合出发做更深一轮研究
+- 对比不同 collection 派生出来的研究路线
 
 ### 5.3 collection 级动作
 
@@ -213,8 +218,7 @@ collection 是项目级、可复用、可命名的论文集合。
 
 ### 6.3 等待 checkpoint
 
-在第一个 checkpoint 到来之前，不需要手动继续点下一步。
-
+在第一个 `checkpoint` 到来之前，不需要手动点下一步。  
 此时重点关注：
 
 - 图谱是否已经形成合理骨架
@@ -227,7 +231,7 @@ collection 是项目级、可复用、可命名的论文集合。
 
 - 请优先关注某个方向
 - 请补充某类论文
-- 请更强调评估/系统/应用
+- 请更强调评估 / 系统 / 应用
 - 请给出阶段性结论与下一步建议
 
 当前首版 guidance 是自由文本，不需要 DSL。
@@ -275,9 +279,9 @@ artifacts/research/<task_id>/runs/<run_id>/
 
 工作台默认是全屏三栏：
 
-- 左侧：project / task / collection / provider 状态
+- 左侧：`project / task / collection / provider status`
 - 中间：卡片式研究画布
-- 右侧：详情、Context Chat、Run Timeline、PDF / Fulltext
+- 右侧：详情、`Context Chat`、`Run Timeline`、`PDF / Fulltext`
 
 ### 8.2 折叠与宽度
 
@@ -321,7 +325,7 @@ artifacts/research/<task_id>/runs/<run_id>/
 - 查看节点详情
 - 看 `Why it matters`
 - 进行 `Context Chat`
-- 查看 PDF / Fulltext
+- 查看 `PDF / Fulltext`
 - 看运行日志
 - 查看 collection 详情
 
@@ -338,7 +342,7 @@ artifacts/research/<task_id>/runs/<run_id>/
 当论文已有 PDF 时：
 
 - 可以在右侧打开 PDF
-- 或者通过资产接口直接访问
+- 或通过资产接口直接访问
 
 如果没有 PDF：
 
@@ -368,7 +372,7 @@ RESEARCH_GPT_BASE_URL=https://api.openai.com/v1
 
 ### 11.2 OpenClaw
 
-如果你已经在 WSL 里装好 OpenClaw，并启用了本地 gateway：
+如果你已经在 WSL 里装好了 OpenClaw，并启用了本地 gateway：
 
 ```env
 OPENCLAW_ENABLED=true
@@ -402,45 +406,39 @@ bash scripts/run_research_live_smoke_wsl.sh --scenario all
 bash scripts/run_research_live_smoke_wsl.sh --scenario all --iterations 2
 ```
 
-### 12.3 只检查 OpenClaw Auto
+### 12.3 跑 API 连通性检查
+
+```bash
+bash scripts/run_api_connectivity_check_wsl.sh --iterations 10 --json-out artifacts/research-api-check/current.json
+```
+
+### 12.4 只检查 OpenClaw Auto
 
 ```bash
 bash scripts/run_research_live_smoke_wsl.sh --scenario openclaw_auto
 ```
 
-## 13. 当前已验证进度
+## 13. 建议的使用顺序
 
-截至 `2026-04-19`，已经验证通过：
+如果你是第一次正式使用，推荐顺序是：
 
-- `gpt_basic`
-- `gpt_explore`
-- `openclaw_auto`
-- 顺序全链路 `gpt_basic -> gpt_explore -> openclaw_auto`
-- 连续 `2` 轮稳定性检查
-- project / collection / study task 主流程
-- Zotero 导入到本地 collection
+1. 先跑一次 `api_connectivity_check`，确认接口层是通的。
+2. 再跑一次 `research_live_smoke --scenario all`，确认完整 research 主链路是通的。
+3. 进入前端，新建一个 `project`。
+4. 在这个 `project` 下先创建一个 `GPT Step` task。
+5. 熟悉方向规划、探索、候选、collection。
+6. 再创建一个 `OpenClaw Auto` task，体验 `checkpoint -> guidance -> continue`。
+7. 如果你已经配置了 Zotero，再导入一个 collection 做派生 study task。
 
-同时已经修复并验证：
+## 14. 当前最适合的使用方式
 
-- SQLite 高频读写下的锁冲突问题明显缓解
-- 并发建任务时的 `task_id` 冲突问题已消除
+当前最适合的用法不是把它当成“全自动替你完成一切”的黑盒，而是把它当成一个研究工作台：
 
-## 14. 常见问题
-
-### 14.1 PowerShell 里中文偶尔乱码
-
-这通常是终端编码问题，不影响真实的 API 逻辑和数据库落库。
-
-### 14.2 WSL 会打印 localhost / NAT 警告
-
-当前实测不影响：
-
-- 前端访问
-- 后端访问
-- OpenClaw gateway 访问
-
-### 14.3 为什么没有企业微信/提醒/移动端功能
-
-因为当前默认主线是 `research_local`。
-
-这些 legacy 功能代码还在，但默认 soft-disable，不进入当前主运行链路。
+- `GPT Step`
+  - 适合你想自己掌控节奏、逐步推进时使用。
+- `OpenClaw Auto`
+  - 适合你希望先拿到一版图谱和阶段报告，再在 checkpoint 处进行引导时使用。
+- `collection`
+  - 适合把多篇相关论文组织起来，再基于这一组论文继续研究。
+- `project`
+  - 适合把不同主题、不同方向的任务隔离管理。

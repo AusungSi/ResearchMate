@@ -94,6 +94,9 @@ def create_research_task(
         llm_backend=payload.llm_backend,
         llm_model=payload.llm_model,
     )
+    # Commit before the follow-up read so the next HTTP request cannot observe
+    # a just-created task before the outer dependency finalizer commits it.
+    db.commit()
     data = research_service.get_task(db, user_id=user_id, task_id=row.task_id)
     return ResearchTaskResponse(**data)
 
@@ -252,6 +255,7 @@ def create_collection_study(
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    db.commit()
     return ResearchTaskResponse(**data)
 
 

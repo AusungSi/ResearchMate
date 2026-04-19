@@ -2,98 +2,44 @@
 
 一个面向本地 `WSL / Linux VM` 的单用户研究工作台。
 
-当前默认主线已经切到 `research_local`。项目的目标不再是“消息提醒助手”，而是把论文调研统一到一个可本地部署、可持续使用的研究工作台里。
+当前默认主线已经切到 `research_local`，目标不再是提醒助手，而是把论文调研流程收敛成一个可本地部署、可持续使用、可扩展的 research workbench。
 
 系统当前支持两种研究模式：
 
 - `GPT Step`
-  - 半自动，用户按步骤推进研究流程。
+  - 半自动、一步一步推进，用户显式决定下一步操作。
 - `OpenClaw Auto`
-  - 分阶段自治运行，在 `checkpoint` 暂停并等待用户补充 guidance。
+  - 原生自治调研，在 `checkpoint` 暂停，等待用户补充 `guidance` 后继续。
 
 ## 当前状态
 
-截至 `2026-04-19`，当前仓库已经完成并验证：
+截至 `2026-04-19`，当前仓库已经验证通过：
 
-- WSL 中运行 `backend + worker + frontend`
-- WSL 中安装并启动本地 OpenClaw gateway
-- `GPT Step` live smoke：
-  - `gpt_basic`
-  - `gpt_explore`
-- `OpenClaw Auto` live smoke：
+- `backend + worker + frontend` 可在 WSL 中启动。
+- 本地 OpenClaw gateway 可在 WSL 中启动并接入 workbench。
+- `GPT Step` 主链路可跑通：
+  - 任务创建
+  - 方向规划
+  - `explore/start`
+  - `propose/select`
+  - `graph/tree`
+  - `canvas`
+  - `node chat`
+- `OpenClaw Auto` 主链路可跑通：
   - `start -> checkpoint -> guidance -> continue -> report/artifact`
-- 总控 smoke 顺序跑通：
-  - `gpt_basic -> gpt_explore -> openclaw_auto`
-  - 连续 `2` 轮全部通过
-- 前端工作台已支持：
-  - 项目分组
-  - 可复用论文集合 collection
-  - 从 collection 创建派生 study task
+- workbench 已支持：
+  - `project`
+  - 可复用 `collection`
+  - 从 `collection` 创建派生 `study task`
   - 全屏三栏工作台
-  - 左右栏折叠和宽度持久化
-  - Zotero v1 读入到本地 collection
-
-这一阶段同时补了几项稳定性修复：
-
-- SQLite 在 `backend + worker` 并发访问时启用更友好的 `busy_timeout / WAL`
-- `task_id` 改为时间戳加短随机后缀，避免并发创建任务时撞 ID
-- 画布保存改成更轻的 diff 式同步，减少无意义写库
+  - 左右栏折叠与宽度持久化
+  - Zotero v1 导入
 
 ## 默认访问地址
 
 - 前端工作台：`http://127.0.0.1:5173`
 - 后端 API：`http://127.0.0.1:8000`
 - OpenClaw gateway：`http://127.0.0.1:18789`
-
-## 当前可见能力
-
-### 研究组织
-
-- 项目分组 `project`
-- 研究任务 `task`
-- 可复用论文集合 `collection`
-- 从 collection 创建派生研究任务
-
-### 研究模式
-
-- `GPT Step`
-  - 继续使用现有 step-by-step research pipeline
-- `OpenClaw Auto`
-  - 通过原生 OpenClaw agent / gateway 走分阶段自治流程
-
-### 工作台
-
-- 独立前端工程 `frontend/`
-- 全屏卡片式画布
-- 左右栏折叠与宽度持久化
-- 节点详情、Context Chat、Run Timeline、PDF / Fulltext 面板
-- collection 侧栏和 collection detail 面板
-
-### 文献与外部源
-
-- discovery：
-  - `Semantic Scholar`
-  - `arXiv`
-  - `OpenAlex` 可选
-- citation：
-  - `Semantic Scholar`
-  - `OpenAlex`
-  - `Crossref`
-- Zotero v1：
-  - 读取 Zotero collection / item 到本地 collection
-
-## 文档入口
-
-- [docs/RESEARCH_LOCAL_QUICKSTART.md](docs/RESEARCH_LOCAL_QUICKSTART.md)
-  - WSL 启动、OpenClaw 启停、smoke 命令
-- [docs/RESEARCH_USAGE_ZH.md](docs/RESEARCH_USAGE_ZH.md)
-  - 日常使用说明，包含 project / collection / GPT Step / OpenClaw Auto / Zotero 导入
-- [docs/PROJECT_OVERVIEW_ZH.md](docs/PROJECT_OVERVIEW_ZH.md)
-  - 当前架构、数据结构、接口与重构进度
-- [docs/ROADMAP_ZH.md](docs/ROADMAP_ZH.md)
-  - 下一步优化方向
-- [docs/README.md](docs/README.md)
-  - `docs/` 文档索引
 
 ## 快速开始
 
@@ -103,18 +49,20 @@
 cp .env.example .env
 ```
 
-至少确认这些变量：
+至少建议确认这些变量：
 
 ```env
 APP_PROFILE=research_local
 DB_URL=sqlite:///./data/memomate.db
 RESEARCH_ENABLED=true
 RESEARCH_QUEUE_MODE=worker
+RESEARCH_ARTIFACT_DIR=./artifacts/research
+RESEARCH_SAVE_BASE_DIR=./artifacts/research/saved
 RESEARCH_GPT_API_KEY=...
 RESEARCH_GPT_MODEL=gpt-5.4
 ```
 
-如果要启用真实 OpenClaw：
+如需启用 OpenClaw Auto：
 
 ```env
 OPENCLAW_ENABLED=true
@@ -123,9 +71,10 @@ OPENCLAW_GATEWAY_TOKEN=...
 OPENCLAW_AGENT_ID=main
 ```
 
-如果要启用 Zotero 导入：
+如需启用 Zotero 导入：
 
 ```env
+ZOTERO_BASE_URL=https://api.zotero.org
 ZOTERO_LIBRARY_TYPE=users
 ZOTERO_LIBRARY_ID=...
 ZOTERO_API_KEY=...
@@ -138,10 +87,16 @@ python3 -m venv .venv-wsl
 .venv-wsl/bin/python -m pip install -r requirements-research-local.txt
 ```
 
-### 3. 启动后端和 worker
+### 3. 启动后端与 worker
 
 ```bash
 bash scripts/start_research_local_wsl.sh
+```
+
+停止：
+
+```bash
+bash scripts/stop_research_local_wsl.sh
 ```
 
 ### 4. 启动前端
@@ -151,9 +106,13 @@ bash scripts/install_frontend_node_wsl.sh
 bash scripts/start_frontend_wsl.sh
 ```
 
-### 5. 启动 OpenClaw gateway
+停止：
 
-如果你已经在 WSL 中装好了 OpenClaw：
+```bash
+bash scripts/stop_frontend_wsl.sh
+```
+
+### 5. 启动 OpenClaw gateway
 
 ```bash
 bash scripts/start_openclaw_wsl.sh
@@ -165,9 +124,65 @@ bash scripts/start_openclaw_wsl.sh
 bash scripts/stop_openclaw_wsl.sh
 ```
 
-## Smoke 测试
+## 命令行自检
 
-单独跑某条链路：
+这里有两套命令，解决的是两类不同问题。
+
+### 1. API 连通性检查
+
+用于判断主要 HTTP 接口是否能直接打通，不依赖浏览器操作。
+
+在 WSL 中运行：
+
+```bash
+bash scripts/run_api_connectivity_check_wsl.sh --iterations 10 --json-out artifacts/research-api-check/current.json
+```
+
+如果你是在 Windows PowerShell 里直接发起：
+
+```powershell
+wsl.exe bash -lc 'cd /mnt/d/project/OpenClaw-for-paper-research && bash scripts/run_api_connectivity_check_wsl.sh --iterations 10 --json-out artifacts/research-api-check/current.json'
+```
+
+这份检查会直接打这些接口：
+
+- `GET /api/v1/health`
+- `GET /api/v1/research/workbench/config`
+- `GET /api/v1/research/projects`
+- `POST /api/v1/research/projects`
+- `GET /api/v1/research/projects/{project_id}`
+- `GET /api/v1/research/projects/{project_id}/collections`
+- `POST /api/v1/research/projects/{project_id}/collections`
+- `GET /api/v1/research/collections/{collection_id}`
+- `GET /api/v1/research/tasks`
+- `POST /api/v1/research/tasks`
+- `GET /api/v1/research/tasks/{task_id}`
+- `GET /api/v1/research/tasks/{task_id}/canvas`
+- `PUT /api/v1/research/tasks/{task_id}/canvas`
+- `GET /api/v1/research/tasks/{task_id}/runs/{run_id}/events`
+- `GET /api/v1/research/integrations/zotero/config`
+
+说明：
+
+- 这份检查是“接口级”检查。
+- 它会顺手创建临时 project、collection、task，用于确认写接口和读接口都正常。
+- 当 worker 正在持续消费任务、而底层仍是 SQLite 时，连续压测可能出现个别超时，这更像“当前本地并发环境下的可用性”而不是“接口完全不可用”。
+
+### 2. 全链路 smoke
+
+用于判断 research 主流程是否能完整跑通。
+
+```bash
+bash scripts/run_research_live_smoke_wsl.sh --scenario all
+```
+
+连续两轮稳定性检查：
+
+```bash
+bash scripts/run_research_live_smoke_wsl.sh --scenario all --iterations 2
+```
+
+也可以单独跑某一条链路：
 
 ```bash
 bash scripts/run_research_live_smoke_wsl.sh --scenario gpt_basic
@@ -175,17 +190,57 @@ bash scripts/run_research_live_smoke_wsl.sh --scenario gpt_explore
 bash scripts/run_research_live_smoke_wsl.sh --scenario openclaw_auto
 ```
 
-顺序跑完整主链路：
+## 日常使用入口
 
-```bash
-bash scripts/run_research_live_smoke_wsl.sh --scenario all
-```
+推荐阅读顺序：
 
-连续跑两轮稳定性检查：
+- [docs/RESEARCH_LOCAL_QUICKSTART.md](docs/RESEARCH_LOCAL_QUICKSTART.md)
+  - WSL 启动、OpenClaw 启停、API 自检、smoke 命令
+- [docs/RESEARCH_USAGE_ZH.md](docs/RESEARCH_USAGE_ZH.md)
+  - 用户使用说明书，包含 `project / task / collection / GPT Step / OpenClaw Auto / Zotero`
+- [docs/PROJECT_OVERVIEW_ZH.md](docs/PROJECT_OVERVIEW_ZH.md)
+  - 当前架构、数据结构、接口与改造进度
+- [docs/ROADMAP_ZH.md](docs/ROADMAP_ZH.md)
+  - 下一步优化方向
+- [docs/README.md](docs/README.md)
+  - `docs/` 文档索引
 
-```bash
-bash scripts/run_research_live_smoke_wsl.sh --scenario all --iterations 2
-```
+## 当前工作台能力
+
+### 研究组织
+
+- 顶层 `project`
+- 研究任务 `task`
+- 可复用命名论文集合 `collection`
+- 从 `collection` 创建派生 `study task`
+
+### 研究模式
+
+- `GPT Step`
+  - 明确动作链，逐步推进
+- `OpenClaw Auto`
+  - 原生自治研究 + checkpoint 引导
+
+### 工作台
+
+- 独立前端工程 `frontend/`
+- 全屏卡片式画布
+- 左右栏折叠与宽度持久化
+- 节点详情、Context Chat、Run Timeline、PDF / Fulltext
+- collection 侧栏和 collection detail
+
+### 外部源
+
+- discovery：
+  - `Semantic Scholar`
+  - `arXiv`
+  - `OpenAlex`
+- citation：
+  - `Semantic Scholar`
+  - `OpenAlex`
+  - `Crossref`
+- integration：
+  - Zotero v1 只做“导入”
 
 ## 仓库结构
 
@@ -193,16 +248,14 @@ bash scripts/run_research_live_smoke_wsl.sh --scenario all --iterations 2
 app/                  FastAPI 后端与 research 服务
 frontend/             React 工作台
 docs/                 中文文档与设计说明
-scripts/              WSL 启停、构建、打包、smoke 脚本
-tests/                主要后端测试
-artifacts/            研究报告、导出文件、前端打包产物
+scripts/              WSL 启停、构建、打包、API 自检、smoke 脚本
+tests/                后端测试
+artifacts/            研究报告、导出文件、前端打包产物、检查结果
 data/                 本地 SQLite 数据
 ```
 
 ## 说明
 
-- 旧的企业微信、提醒、移动端认证、Admin、ASR 链路仍保留在代码里，但默认不进入 `research_local` 启动链路。
-- 当前最值得优先阅读的文档是：
-  - [docs/RESEARCH_LOCAL_QUICKSTART.md](docs/RESEARCH_LOCAL_QUICKSTART.md)
-  - [docs/RESEARCH_USAGE_ZH.md](docs/RESEARCH_USAGE_ZH.md)
-  - [docs/PROJECT_OVERVIEW_ZH.md](docs/PROJECT_OVERVIEW_ZH.md)
+- 旧的企业微信、提醒、移动端认证、Admin、ASR、自建通知链路仍保留在代码中，但默认不进入 `research_local` 启动链路。
+- `research_local` 下 research API 默认绑定单例本地用户，无需 JWT。
+- 当前环境仍以 SQLite 为主；如果后续需要更高的并发稳定性，优先考虑迁移到 PostgreSQL。
