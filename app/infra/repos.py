@@ -29,6 +29,8 @@ from app.domain.models import (
     MobileDevice,
     PendingAction,
     ResearchCanvasState,
+    ResearchCollection,
+    ResearchCollectionItem,
     ResearchCitationFetchCache,
     ResearchDirection,
     ResearchJob,
@@ -38,6 +40,7 @@ from app.domain.models import (
     ResearchPaper,
     ResearchSeedPaper,
     ResearchPaperFulltext,
+    ResearchProject,
     ResearchRound,
     ResearchRoundCandidate,
     ResearchRoundPaper,
@@ -421,13 +424,11 @@ class ResearchTaskRepo:
         stmt = select(ResearchTask).where(and_(*filters))
         return self.db.execute(stmt).scalar_one_or_none()
 
-    def list_recent(self, user_id: int, limit: int = 10) -> list[ResearchTask]:
-        stmt = (
-            select(ResearchTask)
-            .where(ResearchTask.user_id == user_id)
-            .order_by(ResearchTask.created_at.desc())
-            .limit(limit)
-        )
+    def list_recent(self, user_id: int, limit: int = 10, project_id: int | None = None) -> list[ResearchTask]:
+        filters = [ResearchTask.user_id == user_id]
+        if project_id is not None:
+            filters.append(ResearchTask.project_id == project_id)
+        stmt = select(ResearchTask).where(and_(*filters)).order_by(ResearchTask.created_at.desc()).limit(limit)
         return list(self.db.execute(stmt).scalars().all())
 
     def list_recent_all(self, limit: int = 200) -> list[ResearchTask]:
@@ -440,6 +441,89 @@ class ResearchTaskRepo:
         self.db.add(row)
         self.db.flush()
         return row
+
+
+class ResearchProjectRepo:
+    def __init__(self, db: Session):
+        self.db = db
+
+    def create(self, row: ResearchProject) -> ResearchProject:
+        self.db.add(row)
+        self.db.flush()
+        return row
+
+    def get_default(self, user_id: int) -> ResearchProject | None:
+        stmt = (
+            select(ResearchProject)
+            .where(and_(ResearchProject.user_id == user_id, ResearchProject.is_default.is_(True)))
+            .order_by(ResearchProject.created_at.asc(), ResearchProject.id.asc())
+        )
+        return self.db.execute(stmt).scalars().first()
+
+    def get_by_project_key(self, user_id: int, project_key: str) -> ResearchProject | None:
+        stmt = select(ResearchProject).where(
+            and_(ResearchProject.user_id == user_id, ResearchProject.project_key == project_key)
+        )
+        return self.db.execute(stmt).scalar_one_or_none()
+
+    def list_for_user(self, user_id: int) -> list[ResearchProject]:
+        stmt = (
+            select(ResearchProject)
+            .where(ResearchProject.user_id == user_id)
+            .order_by(desc(ResearchProject.is_default), ResearchProject.updated_at.desc(), ResearchProject.id.desc())
+        )
+        return list(self.db.execute(stmt).scalars().all())
+
+
+class ResearchCollectionRepo:
+    def __init__(self, db: Session):
+        self.db = db
+
+    def create(self, row: ResearchCollection) -> ResearchCollection:
+        self.db.add(row)
+        self.db.flush()
+        return row
+
+    def get_by_collection_id(self, user_id: int, collection_id: str) -> ResearchCollection | None:
+        stmt = (
+            select(ResearchCollection)
+            .join(ResearchProject, ResearchCollection.project_id == ResearchProject.id)
+            .where(and_(ResearchCollection.collection_id == collection_id, ResearchProject.user_id == user_id))
+        )
+        return self.db.execute(stmt).scalar_one_or_none()
+
+    def list_for_project(self, project_id: int) -> list[ResearchCollection]:
+        stmt = (
+            select(ResearchCollection)
+            .where(ResearchCollection.project_id == project_id)
+            .order_by(ResearchCollection.updated_at.desc(), ResearchCollection.id.desc())
+        )
+        return list(self.db.execute(stmt).scalars().all())
+
+
+class ResearchCollectionItemRepo:
+    def __init__(self, db: Session):
+        self.db = db
+
+    def list_for_collection(self, collection_id: int) -> list[ResearchCollectionItem]:
+        stmt = (
+            select(ResearchCollectionItem)
+            .where(ResearchCollectionItem.collection_id == collection_id)
+            .order_by(ResearchCollectionItem.created_at.asc(), ResearchCollectionItem.id.asc())
+        )
+        return list(self.db.execute(stmt).scalars().all())
+
+    def get_by_id(self, item_id: int) -> ResearchCollectionItem | None:
+        return self.db.get(ResearchCollectionItem, item_id)
+
+    def create(self, row: ResearchCollectionItem) -> ResearchCollectionItem:
+        self.db.add(row)
+        self.db.flush()
+        return row
+
+    def delete(self, row: ResearchCollectionItem) -> None:
+        self.db.delete(row)
+        self.db.flush()
 
 
 class ResearchCanvasStateRepo:

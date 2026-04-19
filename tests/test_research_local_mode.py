@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine
@@ -10,7 +12,14 @@ from app.api.research import router as research_router
 from app.core.config import get_settings
 from app.domain.models import Base
 from app.infra.db import get_db
-from app.infra.repos import ResearchSessionRepo
+from app.infra.repos import (
+    ResearchDirectionRepo,
+    ResearchPaperFulltextRepo,
+    ResearchPaperRepo,
+    ResearchSeedPaperRepo,
+    ResearchSessionRepo,
+    ResearchTaskRepo,
+)
 from app.llm.openclaw_client import LLMCallResult, LLMTaskType
 from app.services.research_service import ResearchService
 
@@ -54,6 +63,13 @@ def build_client():
     db_session = session_local()
     app = FastAPI()
     app.state.research_service = ResearchService(openclaw_client=FakeOpenClawClient(), wecom_client=None)
+    app.state.research_service.llm_gateway.chat_text = lambda **_kwargs: LLMCallResult(
+        text="node level answer",
+        provider="fake-gateway",
+        model="fake-gateway",
+        latency_ms=1,
+        via_fallback=False,
+    )
     app.include_router(research_router)
 
     def override_db():
@@ -209,6 +225,287 @@ def test_create_task_generates_unique_task_ids():
         assert first.status_code == 200
         assert second.status_code == 200
         assert first.json()["task_id"] != second.json()["task_id"]
+    finally:
+        client.close()
+        db_session.close()
+        settings.app_profile = original_profile
+
+
+def test_workbench_config_and_gpt_step_events_are_available():
+    settings = get_settings()
+    original_profile = settings.app_profile
+    settings.app_profile = "research_local"
+    client, db_session, _service = build_client()
+    try:
+        config_resp = client.get("/api/v1/research/workbench/config")
+        assert config_resp.status_code == 200
+        config = config_resp.json()
+        assert config["default_mode"] == "gpt_step"
+        assert "gpt" in config["available_backends"]
+
+        create_resp = client.post(
+            "/api/v1/research/tasks",
+            json={"topic": "eventful task", "mode": "gpt_step", "llm_backend": "gpt", "llm_model": "gpt-test"},
+        )
+        assert create_resp.status_code == 200
+        task = create_resp.json()
+        assert task["latest_run_id"].startswith("step-")
+
+        events_resp = client.get(f"/api/v1/research/tasks/{task['task_id']}/runs/{task['latest_run_id']}/events")
+        assert events_resp.status_code == 200
+        body = events_resp.json()
+        assert body["summary"]["total"] >= 2
+        assert any(item["payload"].get("kind") == "gpt_step" for item in body["items"])
+
+        delta_resp = client.get(
+            f"/api/v1/research/tasks/{task['task_id']}/runs/{task['latest_run_id']}/events?after_seq={body['summary']['latest_seq']}"
+        )
+        assert delta_resp.status_code == 200
+        assert delta_resp.json()["items"] == []
+    finally:
+        client.close()
+        db_session.close()
+        settings.app_profile = original_profile
+
+
+def test_paper_asset_meta_reports_available_and_missing_assets(tmp_path):
+    settings = get_settings()
+    original_profile = settings.app_profile
+    settings.app_profile = "research_local"
+    client, db_session, _service = build_client()
+    try:
+        create_resp = client.post(
+            "/api/v1/research/tasks",
+            json={"topic": "asset task", "mode": "gpt_step", "llm_backend": "gpt", "llm_model": "gpt-test"},
+        )
+        assert create_resp.status_code == 200
+        task_json = create_resp.json()
+        task_row = ResearchTaskRepo(db_session).get_by_task_id(task_json["task_id"], user_id=1)
+        assert task_row is not None
+
+        direction = ResearchDirectionRepo(db_session).replace_for_task(
+            task_row,
+            [{"name": "Direction A", "queries": ["q1"], "exclude_terms": []}],
+        )[0]
+        paper = ResearchPaperRepo(db_session).replace_direction_papers(
+            direction,
+            [
+                {
+                    "paper_id": "paper:demo",
+                    "title": "Demo Paper",
+                    "title_norm": "demo paper",
+                    "authors": ["Alice"],
+                    "year": 2025,
+                    "venue": "ACL",
+                    "doi": "10.1000/demo",
+                    "url": "https://example.com/demo",
+                    "abstract": "abstract",
+                    "method_summary": "method",
+                    "source": "semantic_scholar",
+                }
+            ],
+        )[0]
+
+        pdf_path = tmp_path / "demo.pdf"
+        txt_path = tmp_path / "demo.txt"
+        pdf_path.write_bytes(b"%PDF-1.4\n%demo\n")
+        txt_path.write_text("demo fulltext", encoding="utf-8")
+        ResearchPaperFulltextRepo(db_session).upsert(
+            task_id=task_row.id,
+            paper_id=paper.paper_id,
+            status="parsed",
+            pdf_path=str(pdf_path),
+            text_path=str(txt_path),
+        )
+        ResearchPaperRepo(db_session).mark_saved(paper, md_path=str(tmp_path / "demo.md"), bib_path=str(tmp_path / "demo.bib"))
+        Path(paper.saved_path).write_text("# Demo", encoding="utf-8")
+        Path(paper.saved_bib_path).write_text("@article{demo}", encoding="utf-8")
+
+        asset_resp = client.get(f"/api/v1/research/tasks/{task_json['task_id']}/papers/{paper.paper_id}/asset/meta")
+        assert asset_resp.status_code == 200
+        body = asset_resp.json()
+        assert body["primary_kind"] == "pdf"
+        by_kind = {item["kind"]: item for item in body["items"]}
+        assert by_kind["pdf"]["status"] == "available"
+        assert by_kind["txt"]["status"] == "available"
+        assert by_kind["md"]["status"] == "available"
+        assert by_kind["bib"]["status"] == "available"
+        assert by_kind["pdf"]["download_url"].endswith("kind=pdf")
+    finally:
+        client.close()
+        db_session.close()
+        settings.app_profile = original_profile
+
+
+def test_projects_and_collections_support_study_task_creation():
+    settings = get_settings()
+    original_profile = settings.app_profile
+    settings.app_profile = "research_local"
+    client, db_session, service = build_client()
+    try:
+        project_resp = client.get("/api/v1/research/projects")
+        assert project_resp.status_code == 200
+        default_project_id = project_resp.json()["default_project_id"]
+        assert default_project_id
+
+        extra_project = client.post("/api/v1/research/projects", json={"name": "Secondary Project"})
+        assert extra_project.status_code == 200
+        second_project_id = extra_project.json()["project_id"]
+
+        task_resp = client.post(
+            "/api/v1/research/tasks",
+            json={"topic": "seed source task", "mode": "gpt_step", "llm_backend": "gpt", "llm_model": "gpt-test", "project_id": default_project_id},
+        )
+        assert task_resp.status_code == 200
+        source_task = task_resp.json()
+        task_row = ResearchTaskRepo(db_session).get_by_task_id(source_task["task_id"], user_id=1)
+        assert task_row is not None
+
+        direction = ResearchDirectionRepo(db_session).replace_for_task(
+            task_row,
+            [{"name": "Direction A", "queries": ["q1"], "exclude_terms": []}],
+        )[0]
+        paper = ResearchPaperRepo(db_session).replace_direction_papers(
+            direction,
+            [
+                {
+                    "paper_id": "paper:seed",
+                    "title": "Seed Paper",
+                    "title_norm": "seed paper",
+                    "authors": ["Alice"],
+                    "year": 2025,
+                    "venue": "ACL",
+                    "doi": "10.1000/seed",
+                    "url": "https://example.com/seed",
+                    "abstract": "seed abstract",
+                    "method_summary": "seed method",
+                    "source": "semantic_scholar",
+                }
+            ],
+        )[0]
+
+        collection_resp = client.post(
+            f"/api/v1/research/projects/{second_project_id}/collections",
+            json={"name": "My Collection"},
+        )
+        assert collection_resp.status_code == 200
+        collection_id = collection_resp.json()["collection_id"]
+
+        add_item_resp = client.post(
+            f"/api/v1/research/collections/{collection_id}/items",
+            json={"items": [{"task_id": source_task["task_id"], "paper_id": paper.paper_id}]},
+        )
+        assert add_item_resp.status_code == 200
+        assert add_item_resp.json()["item_count"] == 1
+
+        study_resp = client.post(
+            f"/api/v1/research/collections/{collection_id}/study",
+            json={"topic": "Collection derived study", "mode": "gpt_step", "llm_backend": "gpt", "llm_model": "gpt-test"},
+        )
+        assert study_resp.status_code == 200
+        study_task = study_resp.json()
+        assert study_task["project_id"] == second_project_id
+
+        service.process_one_job(db_session)
+        service.process_one_job(db_session)
+        study_row = ResearchTaskRepo(db_session).get_by_task_id(study_task["task_id"], user_id=1)
+        assert study_row is not None
+        seed_summary = ResearchSeedPaperRepo(db_session).summary_for_task(study_row.id)
+        assert seed_summary["total"] >= 1
+    finally:
+        client.close()
+        db_session.close()
+        settings.app_profile = original_profile
+
+
+def test_canvas_ui_and_provider_status_are_available():
+    settings = get_settings()
+    original_profile = settings.app_profile
+    settings.app_profile = "research_local"
+    client, db_session, _service = build_client()
+    try:
+        create_resp = client.post(
+            "/api/v1/research/tasks",
+            json={"topic": "canvas ui task", "mode": "gpt_step", "llm_backend": "gpt", "llm_model": "gpt-test"},
+        )
+        assert create_resp.status_code == 200
+        task = create_resp.json()
+
+        canvas_resp = client.get(f"/api/v1/research/tasks/{task['task_id']}/canvas")
+        assert canvas_resp.status_code == 200
+        assert canvas_resp.json()["ui"]["layout_mode"] == "elk_layered"
+
+        update_resp = client.put(
+            f"/api/v1/research/tasks/{task['task_id']}/canvas",
+            json={
+                "nodes": [],
+                "edges": [],
+                "viewport": {"x": 1, "y": 2, "zoom": 1.05},
+                "ui": {
+                    "left_sidebar_collapsed": True,
+                    "right_sidebar_collapsed": False,
+                    "left_sidebar_width": 300,
+                    "right_sidebar_width": 430,
+                    "show_minimap": True,
+                    "layout_mode": "elk_stress",
+                },
+            },
+        )
+        assert update_resp.status_code == 200
+        assert update_resp.json()["ui"]["show_minimap"] is True
+        assert update_resp.json()["ui"]["layout_mode"] == "elk_stress"
+
+        config_resp = client.get("/api/v1/research/workbench/config")
+        assert config_resp.status_code == 200
+        config = config_resp.json()
+        assert "openalex" in config["discovery_providers"]
+        assert any(item["role"] == "citation" for item in config["provider_status"])
+    finally:
+        client.close()
+        db_session.close()
+        settings.app_profile = original_profile
+
+
+def test_zotero_import_creates_collection(monkeypatch):
+    settings = get_settings()
+    original_profile = settings.app_profile
+    settings.app_profile = "research_local"
+    client, db_session, service = build_client()
+    try:
+        settings.zotero_library_id = "12345"
+
+        def fake_http_get_json(url, *, headers=None, params=None):
+            if url.endswith("/collections/ABCD"):
+                return {"data": {"name": "Zotero Demo"}}
+            return [
+                {
+                    "data": {
+                        "title": "Imported Paper",
+                        "creators": [{"firstName": "Ada", "lastName": "Lovelace"}],
+                        "date": "2024",
+                        "publicationTitle": "Nature",
+                        "DOI": "10.1000/zotero",
+                        "url": "https://example.com/zotero",
+                        "abstractNote": "imported abstract",
+                    }
+                }
+            ]
+
+        monkeypatch.setattr(service, "_http_get_json", fake_http_get_json)
+
+        projects = client.get("/api/v1/research/projects")
+        assert projects.status_code == 200
+        default_project_id = projects.json()["default_project_id"]
+
+        import_resp = client.post(
+            "/api/v1/research/integrations/zotero/import",
+            json={"project_id": default_project_id, "collection_key": "ABCD"},
+        )
+        assert import_resp.status_code == 200
+        body = import_resp.json()
+        assert body["imported"] == 1
+        assert body["collection"]["name"] == "Zotero Demo"
+        assert body["collection"]["item_count"] == 1
     finally:
         client.close()
         db_session.close()

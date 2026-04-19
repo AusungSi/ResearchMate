@@ -7,7 +7,15 @@ from sqlalchemy.orm import Session
 
 from app.api.mobile import get_current_user_id
 from app.domain.schemas import (
+    ResearchCollectionAddItemsRequest,
+    ResearchCollectionGraphResponse,
+    ResearchCollectionListResponse,
+    ResearchCollectionCreateRequest,
+    ResearchCollectionResponse,
+    ResearchCollectionSummaryResponse,
+    ResearchCollectionStudyRequest,
     ResearchPaperDetailResponse,
+    ResearchPaperAssetResponse,
     ResearchExportResponse,
     ResearchAutoRunResponse,
     ResearchCanvasRequest,
@@ -38,12 +46,19 @@ from app.domain.schemas import (
     ResearchRoundSelectResponse,
     ResearchSearchResponse,
     ResearchSavedPaperListResponse,
+    ResearchProjectCreateRequest,
+    ResearchProjectListResponse,
+    ResearchProjectResponse,
     ResearchTaskCreateRequest,
     ResearchTaskListResponse,
     ResearchTaskPlanResponse,
     ResearchTaskResponse,
     ResearchTaskSearchEnqueueResponse,
     ResearchTaskSearchRequest,
+    ResearchWorkbenchConfigResponse,
+    ResearchZoteroConfigResponse,
+    ResearchZoteroImportRequest,
+    ResearchZoteroImportResponse,
 )
 from app.infra.db import get_db
 from app.services.research_service import ResearchService
@@ -73,6 +88,7 @@ def create_research_task(
         db,
         user_id=user_id,
         topic=payload.topic,
+        project_id=payload.project_id,
         constraints=constraints,
         mode=payload.mode,
         llm_backend=payload.llm_backend,
@@ -85,12 +101,221 @@ def create_research_task(
 @router.get("/tasks", response_model=ResearchTaskListResponse)
 def list_research_tasks(
     limit: int = Query(default=10, ge=1, le=50),
+    project_id: str | None = Query(default=None),
     user_id: int = Depends(get_current_user_id),
     db: Session = Depends(get_db),
     research_service: ResearchService = Depends(get_research_service),
 ) -> ResearchTaskListResponse:
-    items = research_service.list_tasks(db, user_id=user_id, limit=limit)
+    items = research_service.list_tasks(db, user_id=user_id, limit=limit, project_id=project_id)
     return ResearchTaskListResponse(items=[ResearchTaskResponse(**x) for x in items], total=len(items))
+
+
+@router.get("/workbench/config", response_model=ResearchWorkbenchConfigResponse)
+def get_workbench_config(
+    research_service: ResearchService = Depends(get_research_service),
+) -> ResearchWorkbenchConfigResponse:
+    return ResearchWorkbenchConfigResponse(**research_service.get_workbench_config())
+
+
+@router.get("/projects", response_model=ResearchProjectListResponse)
+def list_projects(
+    user_id: int = Depends(get_current_user_id),
+    db: Session = Depends(get_db),
+    research_service: ResearchService = Depends(get_research_service),
+) -> ResearchProjectListResponse:
+    return ResearchProjectListResponse(**research_service.list_projects(db, user_id=user_id))
+
+
+@router.post("/projects", response_model=ResearchProjectResponse)
+def create_project(
+    payload: ResearchProjectCreateRequest,
+    user_id: int = Depends(get_current_user_id),
+    db: Session = Depends(get_db),
+    research_service: ResearchService = Depends(get_research_service),
+) -> ResearchProjectResponse:
+    return ResearchProjectResponse(**research_service.create_project(db, user_id=user_id, name=payload.name, description=payload.description))
+
+
+@router.get("/projects/{project_id}", response_model=ResearchProjectResponse)
+def get_project(
+    project_id: str,
+    user_id: int = Depends(get_current_user_id),
+    db: Session = Depends(get_db),
+    research_service: ResearchService = Depends(get_research_service),
+) -> ResearchProjectResponse:
+    try:
+        data = research_service.get_project(db, user_id=user_id, project_id=project_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    return ResearchProjectResponse(**data)
+
+
+@router.get("/projects/{project_id}/collections", response_model=ResearchCollectionListResponse)
+def list_project_collections(
+    project_id: str,
+    user_id: int = Depends(get_current_user_id),
+    db: Session = Depends(get_db),
+    research_service: ResearchService = Depends(get_research_service),
+) -> ResearchCollectionListResponse:
+    try:
+        data = research_service.list_collections(db, user_id=user_id, project_id=project_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    return ResearchCollectionListResponse(
+        items=[ResearchCollectionResponse(**item) for item in data["items"]],
+        total=data["total"],
+    )
+
+
+@router.post("/projects/{project_id}/collections", response_model=ResearchCollectionResponse)
+def create_project_collection(
+    project_id: str,
+    payload: ResearchCollectionCreateRequest,
+    user_id: int = Depends(get_current_user_id),
+    db: Session = Depends(get_db),
+    research_service: ResearchService = Depends(get_research_service),
+) -> ResearchCollectionResponse:
+    try:
+        data = research_service.create_collection(
+            db,
+            user_id=user_id,
+            project_id=project_id,
+            name=payload.name,
+            description=payload.description,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return ResearchCollectionResponse(**data)
+
+
+@router.get("/collections/{collection_id}", response_model=ResearchCollectionResponse)
+def get_collection(
+    collection_id: str,
+    user_id: int = Depends(get_current_user_id),
+    db: Session = Depends(get_db),
+    research_service: ResearchService = Depends(get_research_service),
+) -> ResearchCollectionResponse:
+    try:
+        data = research_service.get_collection(db, user_id=user_id, collection_id=collection_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    return ResearchCollectionResponse(**data)
+
+
+@router.post("/collections/{collection_id}/items", response_model=ResearchCollectionResponse)
+def add_collection_items(
+    collection_id: str,
+    payload: ResearchCollectionAddItemsRequest,
+    user_id: int = Depends(get_current_user_id),
+    db: Session = Depends(get_db),
+    research_service: ResearchService = Depends(get_research_service),
+) -> ResearchCollectionResponse:
+    try:
+        data = research_service.add_collection_items(db, user_id=user_id, collection_id=collection_id, items=[item.model_dump() for item in payload.items])
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return ResearchCollectionResponse(**data)
+
+
+@router.delete("/collections/{collection_id}/items/{item_id}", response_model=ResearchCollectionResponse)
+def delete_collection_item(
+    collection_id: str,
+    item_id: int,
+    user_id: int = Depends(get_current_user_id),
+    db: Session = Depends(get_db),
+    research_service: ResearchService = Depends(get_research_service),
+) -> ResearchCollectionResponse:
+    try:
+        data = research_service.remove_collection_item(db, user_id=user_id, collection_id=collection_id, item_id=item_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    return ResearchCollectionResponse(**data)
+
+
+@router.post("/collections/{collection_id}/study", response_model=ResearchTaskResponse)
+def create_collection_study(
+    collection_id: str,
+    payload: ResearchCollectionStudyRequest,
+    user_id: int = Depends(get_current_user_id),
+    db: Session = Depends(get_db),
+    research_service: ResearchService = Depends(get_research_service),
+) -> ResearchTaskResponse:
+    try:
+        data = research_service.create_study_from_collection(
+            db,
+            user_id=user_id,
+            collection_id=collection_id,
+            topic=payload.topic,
+            mode=payload.mode,
+            llm_backend=payload.llm_backend,
+            llm_model=payload.llm_model,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return ResearchTaskResponse(**data)
+
+
+@router.post("/collections/{collection_id}/summarize", response_model=ResearchCollectionSummaryResponse)
+def summarize_collection(
+    collection_id: str,
+    user_id: int = Depends(get_current_user_id),
+    db: Session = Depends(get_db),
+    research_service: ResearchService = Depends(get_research_service),
+) -> ResearchCollectionSummaryResponse:
+    try:
+        data = research_service.summarize_collection(db, user_id=user_id, collection_id=collection_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return ResearchCollectionSummaryResponse(**data)
+
+
+@router.post("/collections/{collection_id}/graph/build", response_model=ResearchCollectionGraphResponse)
+def build_collection_graph(
+    collection_id: str,
+    user_id: int = Depends(get_current_user_id),
+    db: Session = Depends(get_db),
+    research_service: ResearchService = Depends(get_research_service),
+) -> ResearchCollectionGraphResponse:
+    try:
+        data = research_service.build_collection_graph(db, user_id=user_id, collection_id=collection_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return ResearchCollectionGraphResponse(**data)
+
+
+@router.get("/integrations/zotero/config", response_model=ResearchZoteroConfigResponse)
+def get_zotero_config(
+    research_service: ResearchService = Depends(get_research_service),
+) -> ResearchZoteroConfigResponse:
+    return ResearchZoteroConfigResponse(**research_service.get_zotero_config())
+
+
+@router.post("/integrations/zotero/import", response_model=ResearchZoteroImportResponse)
+def import_zotero_collection(
+    payload: ResearchZoteroImportRequest,
+    user_id: int = Depends(get_current_user_id),
+    db: Session = Depends(get_db),
+    research_service: ResearchService = Depends(get_research_service),
+) -> ResearchZoteroImportResponse:
+    try:
+        data = research_service.import_zotero_collection(
+            db,
+            user_id=user_id,
+            project_id=payload.project_id,
+            collection_key=payload.collection_key,
+            collection_name=payload.collection_name,
+            library_type=payload.library_type,
+            library_id=payload.library_id,
+            api_key=payload.api_key,
+            limit=payload.limit,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return ResearchZoteroImportResponse(
+        project_id=data["project_id"],
+        collection=ResearchCollectionResponse(**data["collection"]),
+        imported=data["imported"],
+    )
 
 
 @router.get("/tasks/{task_id}", response_model=ResearchTaskResponse)
@@ -459,6 +684,26 @@ def get_paper_asset(
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     return FileResponse(path=path, filename=Path(path).name)
+
+
+@router.get("/tasks/{task_id}/papers/{paper_id:path}/asset/meta", response_model=ResearchPaperAssetResponse)
+def get_paper_asset_meta(
+    task_id: str,
+    paper_id: str,
+    user_id: int = Depends(get_current_user_id),
+    db: Session = Depends(get_db),
+    research_service: ResearchService = Depends(get_research_service),
+) -> ResearchPaperAssetResponse:
+    try:
+        data = research_service.get_paper_assets(
+            db,
+            user_id=user_id,
+            task_id=task_id,
+            paper_token=paper_id,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    return ResearchPaperAssetResponse(**data)
 
 
 @router.get("/tasks/{task_id}/papers/{paper_id:path}", response_model=ResearchPaperDetailResponse)

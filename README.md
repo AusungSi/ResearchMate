@@ -2,16 +2,18 @@
 
 一个面向本地 `WSL / Linux VM` 的单用户研究工作台。
 
-当前主线已经切到 `research_local`，核心目标是把论文调研过程统一到一个本地可运行的工作台里，支持两种模式：
+当前默认主线已经切到 `research_local`。项目的目标不再是“消息提醒助手”，而是把论文调研统一到一个可本地部署、可持续使用的研究工作台里。
+
+系统当前支持两种研究模式：
 
 - `GPT Step`
-  - 半自动，用户逐步决定下一步研究动作。
+  - 半自动，用户按步骤推进研究流程。
 - `OpenClaw Auto`
   - 分阶段自治运行，在 `checkpoint` 暂停并等待用户补充 guidance。
 
 ## 当前状态
 
-截至 `2026-04-18`，当前仓库已经完成并验证：
+截至 `2026-04-19`，当前仓库已经完成并验证：
 
 - WSL 中运行 `backend + worker + frontend`
 - WSL 中安装并启动本地 OpenClaw gateway
@@ -20,14 +22,22 @@
   - `gpt_explore`
 - `OpenClaw Auto` live smoke：
   - `start -> checkpoint -> guidance -> continue -> report/artifact`
-- 总控 smoke 脚本顺序跑通：
+- 总控 smoke 顺序跑通：
   - `gpt_basic -> gpt_explore -> openclaw_auto`
   - 连续 `2` 轮全部通过
+- 前端工作台已支持：
+  - 项目分组
+  - 可复用论文集合 collection
+  - 从 collection 创建派生 study task
+  - 全屏三栏工作台
+  - 左右栏折叠和宽度持久化
+  - Zotero v1 读入到本地 collection
 
-这轮还补了两个稳定性修复：
+这一阶段同时补了几项稳定性修复：
 
-- SQLite 在 `backend + worker` 同时访问时启用更友好的 `busy_timeout / WAL`
+- SQLite 在 `backend + worker` 并发访问时启用更友好的 `busy_timeout / WAL`
 - `task_id` 改为时间戳加短随机后缀，避免并发创建任务时撞 ID
+- 画布保存改成更轻的 diff 式同步，减少无意义写库
 
 ## 默认访问地址
 
@@ -35,12 +45,49 @@
 - 后端 API：`http://127.0.0.1:8000`
 - OpenClaw gateway：`http://127.0.0.1:18789`
 
+## 当前可见能力
+
+### 研究组织
+
+- 项目分组 `project`
+- 研究任务 `task`
+- 可复用论文集合 `collection`
+- 从 collection 创建派生研究任务
+
+### 研究模式
+
+- `GPT Step`
+  - 继续使用现有 step-by-step research pipeline
+- `OpenClaw Auto`
+  - 通过原生 OpenClaw agent / gateway 走分阶段自治流程
+
+### 工作台
+
+- 独立前端工程 `frontend/`
+- 全屏卡片式画布
+- 左右栏折叠与宽度持久化
+- 节点详情、Context Chat、Run Timeline、PDF / Fulltext 面板
+- collection 侧栏和 collection detail 面板
+
+### 文献与外部源
+
+- discovery：
+  - `Semantic Scholar`
+  - `arXiv`
+  - `OpenAlex` 可选
+- citation：
+  - `Semantic Scholar`
+  - `OpenAlex`
+  - `Crossref`
+- Zotero v1：
+  - 读取 Zotero collection / item 到本地 collection
+
 ## 文档入口
 
 - [docs/RESEARCH_LOCAL_QUICKSTART.md](docs/RESEARCH_LOCAL_QUICKSTART.md)
   - WSL 启动、OpenClaw 启停、smoke 命令
 - [docs/RESEARCH_USAGE_ZH.md](docs/RESEARCH_USAGE_ZH.md)
-  - 日常使用说明，包含 GPT Step 和 OpenClaw Auto
+  - 日常使用说明，包含 project / collection / GPT Step / OpenClaw Auto / Zotero 导入
 - [docs/PROJECT_OVERVIEW_ZH.md](docs/PROJECT_OVERVIEW_ZH.md)
   - 当前架构、数据结构、接口与重构进度
 - [docs/ROADMAP_ZH.md](docs/ROADMAP_ZH.md)
@@ -74,6 +121,14 @@ OPENCLAW_ENABLED=true
 OPENCLAW_BASE_URL=http://127.0.0.1:18789
 OPENCLAW_GATEWAY_TOKEN=...
 OPENCLAW_AGENT_ID=main
+```
+
+如果要启用 Zotero 导入：
+
+```env
+ZOTERO_LIBRARY_TYPE=users
+ZOTERO_LIBRARY_ID=...
+ZOTERO_API_KEY=...
 ```
 
 ### 2. 安装 research-local 依赖
@@ -131,43 +186,6 @@ bash scripts/run_research_live_smoke_wsl.sh --scenario all
 ```bash
 bash scripts/run_research_live_smoke_wsl.sh --scenario all --iterations 2
 ```
-
-脚本会输出 JSON 摘要，并在有 `--json-out` 时保存到文件。
-
-## 当前推荐使用方式
-
-### GPT Step
-
-适合需要人工控节奏的调研：
-
-1. 创建 task
-2. 等待方向规划
-3. 选择方向开始 explore
-4. 生成 candidates
-5. 选择下一轮
-6. 需要时查看图谱、PDF、node chat
-
-### OpenClaw Auto
-
-适合让 OpenClaw 自行跑第一阶段研究：
-
-1. 创建 `openclaw_auto` task
-2. 启动 auto run
-3. 等待 checkpoint
-4. 输入 guidance
-5. 继续自动研究
-6. 查看阶段报告和 artifact
-
-## 关键脚本
-
-- `scripts/start_research_local_wsl.sh`
-- `scripts/stop_research_local_wsl.sh`
-- `scripts/start_frontend_wsl.sh`
-- `scripts/stop_frontend_wsl.sh`
-- `scripts/start_openclaw_wsl.sh`
-- `scripts/stop_openclaw_wsl.sh`
-- `scripts/research_live_smoke.py`
-- `scripts/run_research_live_smoke_wsl.sh`
 
 ## 仓库结构
 

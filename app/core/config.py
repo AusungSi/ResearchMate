@@ -139,6 +139,10 @@ class Settings(BaseSettings):
     research_summary_enabled: bool = True
     research_summary_max_chars: int = 8000
     semantic_scholar_api_key: str = ""
+    zotero_base_url: str = "https://api.zotero.org"
+    zotero_library_type: str = "users"
+    zotero_library_id: str = ""
+    zotero_api_key: str = ""
 
 
 @lru_cache(maxsize=1)

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 
-from sqlalchemy import create_engine, event
+from sqlalchemy import create_engine, event, inspect, text
 from sqlalchemy.orm import Session, sessionmaker
 
 from app.core.config import get_settings
@@ -45,6 +45,19 @@ SessionLocal = sessionmaker(bind=engine, autoflush=False, autocommit=False, expi
 
 def init_db() -> None:
     Base.metadata.create_all(bind=engine)
+    _run_lightweight_schema_updates()
+
+
+def _run_lightweight_schema_updates() -> None:
+    if not str(settings.db_url).startswith("sqlite"):
+        return
+    inspector = inspect(engine)
+    if "research_tasks" not in inspector.get_table_names():
+        return
+    columns = {column["name"] for column in inspector.get_columns("research_tasks")}
+    with engine.begin() as connection:
+        if "project_id" not in columns:
+            connection.execute(text("ALTER TABLE research_tasks ADD COLUMN project_id INTEGER"))
 
 
 @contextmanager

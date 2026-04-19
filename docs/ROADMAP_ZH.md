@@ -7,18 +7,20 @@
 - `OpenClaw Auto`
 - `WSL / Linux VM`
 - 独立前端工作台
+- `project / collection / study task`
+- Zotero v1 导入
 
 ## P0：继续做稳当前主链路
 
-### 1. 前端事件同步改成更实时
+### 1. 完成 Docker Compose 的真实验收
 
-当前前端主要依赖轮询。
+当前 Compose 文件已经在仓库里，但还缺完整实机验收。
 
-下一步建议：
+建议补：
 
-- 为 run events 增加 SSE 或 WebSocket
-- checkpoint、report、artifact 到达时立即刷新
-- 减少对 SQLite 的高频轮询压力
+- `docker compose up --build` 全链路验证
+- volume、端口、前端构建产物检查
+- Compose 下的 smoke 脚本
 
 ### 2. 补齐更完整的 live 测试与 CI
 
@@ -35,7 +37,7 @@
 - `busy_timeout`
 - `WAL`
 - 减少 session 无意义写入
-- 修复 task_id 并发碰撞
+- 修复 `task_id` 并发碰撞
 
 下一步仍建议：
 
@@ -45,7 +47,16 @@
 
 ## P1：把前端工作台做完整
 
-### 4. 右侧详情区继续深化
+### 4. 继续打磨 project / collection 体验
+
+当前已经支持 project、collection、study task，但还可以继续补：
+
+- collection compare
+- collection 批量筛选与标签
+- collection 导出
+- project 级概览面板
+
+### 5. 右侧详情区继续深化
 
 建议优先补：
 
@@ -54,7 +65,7 @@
 - 更好的 `Why it matters`
 - report 节点和 checkpoint 节点的专用展示
 
-### 5. PDF / Fulltext 体验继续增强
+### 6. PDF / Fulltext 体验继续增强
 
 可以继续补：
 
@@ -63,18 +74,19 @@
 - Fulltext 与节点上下文联动
 - `Need upload` 的交互完善
 
-### 6. 画布交互继续打磨
+### 7. 画布交互继续打磨
 
 下一步可以优化：
 
 - 手工节点编辑器
 - group/reference/question 节点的专用样式
-- 布局自动整理
-- 视口记忆与多视图切换
+- 多选后的批量操作条
+- 更智能的自动布局与手工布局混排
+- bundle 拆分，减小前端主包体积
 
 ## P1：让 OpenClaw Auto 更像真正的自治研究流程
 
-### 7. 扩展 checkpoint 之后的阶段编排
+### 8. 扩展 checkpoint 之后的阶段编排
 
 当前已经实现：
 
@@ -91,7 +103,7 @@
 - 让 OpenClaw 在多个阶段中持续扩图
 - 增加阶段间总结与对比
 
-### 8. 强化事件协议和可观测性
+### 9. 强化事件协议和可观测性
 
 建议增加：
 
@@ -102,16 +114,16 @@
 
 ## P1：让 GPT Step 更适合真实研究
 
-### 9. 丰富 step-by-step 动作
+### 10. 丰富 step-by-step 动作
 
 可以优先补：
 
 - compare selected papers
-- 方向收藏与集合管理
+- 从 collection 继续生成多个研究分支
 - 多轮探索中的“回退到上一轮”
 - 更细粒度的 candidate 解释
 
-### 10. 节点上下文问答更贴近研究场景
+### 11. 节点上下文问答更贴近研究场景
 
 建议扩展：
 
@@ -122,39 +134,38 @@
 
 ## P2：外部数据和文献生态接入
 
-### 11. Zotero 接入
+### 12. Zotero phase 2
 
-这是你已经明确提过的方向。
+这一轮已经有 Zotero v1 读入，下一步建议：
 
-建议接入顺序：
+1. 导入更多 metadata 字段
+2. 支持 annotation / note 映射
+3. 支持从本地 collection 导出 Zotero 友好格式
+4. 再评估是否做双向同步
 
-1. 导出到 Zotero 友好的 Bib / JSON
-2. 读取 Zotero collection
-3. 将 Zotero 条目映射成 reference/paper 节点
-4. 支持从 Zotero 反向同步注释
-
-### 12. 更稳定的检索与引文 provider
+### 13. 更稳定的检索与引文 provider
 
 建议补：
 
-- provider 状态显示
+- provider 状态显示细化
 - 限流与重试策略
 - source provenance
 - metadata 归一化
+- OpenAlex discovery 的更完整支持
+
+### 14. 论文概览图 / 说明图
+
+这是已经明确想做、但本轮未纳入的方向。
+
+建议下一阶段做成：
+
+- `report_visual` artifact
+- 模板化 SVG / PNG 生成
+- 与 report 节点和 collection summary 联动
 
 ## P2：工程化和发布能力
 
-### 13. 完成 Docker Compose 的真实验收
-
-当前 Compose 文件已经在仓库里，但还缺完整实机验收。
-
-建议补：
-
-- `docker compose up --build` 全链路验证
-- volume、端口、前端构建产物检查
-- Compose 下的 smoke 脚本
-
-### 14. 打包和发布标准化
+### 15. 打包和发布标准化
 
 建议补：
 
@@ -163,13 +174,21 @@
 - 一键导出部署包
 - 环境变量模板分层
 
+### 16. 文档继续收敛
+
+建议继续：
+
+- 持续同步 README 和 `docs/`
+- 明确区分“已验证”和“已设计未做”
+- 逐步弱化 legacy 内容在主文档中的存在感
+
 ## 推荐的优先级顺序
 
 最建议的下一步顺序是：
 
-1. 前端实时事件同步
+1. Docker Compose 实机验收
 2. 更完整的 live smoke / CI
 3. 继续压缩 SQLite 并发风险
-4. 完善右侧详情、PDF、compare 等研究工作台交互
+4. 完善 project / collection / compare 等研究工作台交互
 5. 深化 OpenClaw Auto 的阶段式自治流程
-6. 再做 Zotero 接入
+6. 做 Zotero phase 2 和 report visual

@@ -370,8 +370,132 @@ class AdminChatSendResponse(BaseModel):
     errors: dict[str, str | None] = Field(default_factory=dict)
 
 
+class ResearchProjectCreateRequest(BaseModel):
+    name: str = Field(min_length=1, max_length=255)
+    description: str | None = None
+
+
+class ResearchProjectResponse(BaseModel):
+    project_id: str
+    name: str
+    description: str | None = None
+    is_default: bool = False
+    task_count: int = 0
+    collection_count: int = 0
+    created_at: datetime
+    updated_at: datetime
+
+
+class ResearchProjectListResponse(BaseModel):
+    items: list[ResearchProjectResponse] = Field(default_factory=list)
+    total: int = 0
+    default_project_id: str | None = None
+
+
+class ResearchCollectionCreateRequest(BaseModel):
+    name: str = Field(min_length=1, max_length=255)
+    description: str | None = None
+
+
+class ResearchCollectionAddItemInput(BaseModel):
+    task_id: str | None = None
+    paper_id: str | None = None
+    title: str | None = None
+    authors: list[str] = Field(default_factory=list)
+    year: int | None = None
+    venue: str | None = None
+    doi: str | None = None
+    url: str | None = None
+    source: str | None = None
+    metadata: dict = Field(default_factory=dict)
+
+
+class ResearchCollectionItemResponse(BaseModel):
+    item_id: int
+    task_id: str | None = None
+    paper_id: str | None = None
+    title: str
+    authors: list[str] = Field(default_factory=list)
+    year: int | None = None
+    venue: str | None = None
+    doi: str | None = None
+    url: str | None = None
+    source: str
+    metadata: dict = Field(default_factory=dict)
+    created_at: datetime
+    updated_at: datetime
+
+
+class ResearchCollectionResponse(BaseModel):
+    collection_id: str
+    project_id: str
+    name: str
+    description: str | None = None
+    source_type: str = "manual"
+    source_ref: str | None = None
+    summary_text: str | None = None
+    item_count: int = 0
+    items: list[ResearchCollectionItemResponse] = Field(default_factory=list)
+    created_at: datetime
+    updated_at: datetime
+
+
+class ResearchCollectionListResponse(BaseModel):
+    items: list[ResearchCollectionResponse] = Field(default_factory=list)
+    total: int = 0
+
+
+class ResearchCollectionAddItemsRequest(BaseModel):
+    items: list[ResearchCollectionAddItemInput] = Field(default_factory=list)
+
+
+class ResearchCollectionSummaryResponse(BaseModel):
+    collection_id: str
+    summary_text: str
+    item_count: int = 0
+
+
+class ResearchCollectionStudyRequest(BaseModel):
+    topic: str | None = None
+    mode: ResearchRunMode = ResearchRunMode.GPT_STEP
+    llm_backend: ResearchLLMBackend = ResearchLLMBackend.GPT
+    llm_model: str | None = None
+
+
+class ResearchCollectionGraphResponse(BaseModel):
+    collection_id: str
+    nodes: list[dict] = Field(default_factory=list)
+    edges: list[dict] = Field(default_factory=list)
+    stats: dict = Field(default_factory=dict)
+
+
+class ResearchZoteroConfigResponse(BaseModel):
+    enabled: bool = False
+    base_url: str | None = None
+    library_type: str | None = None
+    library_id: str | None = None
+    has_api_key: bool = False
+
+
+class ResearchZoteroImportRequest(BaseModel):
+    project_id: str
+    collection_key: str | None = None
+    collection_name: str | None = None
+    library_type: str | None = None
+    library_id: str | None = None
+    api_key: str | None = None
+    limit: int | None = None
+
+
+class ResearchZoteroImportResponse(BaseModel):
+    project_id: str
+    collection: ResearchCollectionResponse
+    imported: int = 0
+
+
 class ResearchTaskCreateRequest(BaseModel):
     topic: str
+    project_id: str | None = None
     year_from: int | None = None
     year_to: int | None = None
     top_n: int | None = None
@@ -599,6 +723,8 @@ class ResearchPaperItem(BaseModel):
 
 class ResearchTaskResponse(BaseModel):
     task_id: str
+    project_id: str | None = None
+    project_name: str | None = None
     topic: str
     status: str
     mode: ResearchRunMode = ResearchRunMode.GPT_STEP
@@ -651,11 +777,52 @@ class ResearchCanvasRequest(BaseModel):
     nodes: list[ResearchCanvasNode] = Field(default_factory=list)
     edges: list[ResearchCanvasEdge] = Field(default_factory=list)
     viewport: dict = Field(default_factory=lambda: {"x": 0, "y": 0, "zoom": 1})
+    ui: dict = Field(default_factory=dict)
 
 
 class ResearchCanvasResponse(ResearchCanvasRequest):
     task_id: str
     updated_at: datetime | None = None
+
+
+class ResearchProviderStatusItem(BaseModel):
+    key: str
+    role: str
+    enabled: bool = True
+    configured: bool = False
+    detail: str | None = None
+
+
+class ResearchWorkbenchConfigResponse(BaseModel):
+    default_mode: ResearchRunMode = ResearchRunMode.GPT_STEP
+    default_backend: ResearchLLMBackend = ResearchLLMBackend.GPT
+    default_gpt_model: str | None = None
+    default_openclaw_model: str | None = None
+    openclaw_enabled: bool = False
+    available_modes: list[str] = Field(default_factory=list)
+    available_backends: list[str] = Field(default_factory=list)
+    discovery_providers: list[str] = Field(default_factory=list)
+    citation_providers: list[str] = Field(default_factory=list)
+    provider_status: list[ResearchProviderStatusItem] = Field(default_factory=list)
+    layout_defaults: dict = Field(default_factory=dict)
+    default_canvas_ui: dict = Field(default_factory=dict)
+
+
+class ResearchRunPhaseSummary(BaseModel):
+    key: str
+    label: str
+    event_count: int = 0
+    started_seq: int = 0
+    latest_seq: int = 0
+
+
+class ResearchRunSummary(BaseModel):
+    total: int = 0
+    latest_seq: int = 0
+    phases: list[ResearchRunPhaseSummary] = Field(default_factory=list)
+    latest_checkpoint: dict | None = None
+    latest_report: dict | None = None
+    artifacts: list[dict] = Field(default_factory=list)
 
 
 class ResearchRunEventItem(BaseModel):
@@ -671,6 +838,22 @@ class ResearchRunEventsResponse(BaseModel):
     task_id: str
     run_id: str
     items: list[ResearchRunEventItem] = Field(default_factory=list)
+    summary: ResearchRunSummary = Field(default_factory=ResearchRunSummary)
+
+
+class ResearchPaperAssetItem(BaseModel):
+    kind: str
+    status: str
+    filename: str | None = None
+    path: str | None = None
+    download_url: str | None = None
+
+
+class ResearchPaperAssetResponse(BaseModel):
+    task_id: str
+    paper_id: str
+    primary_kind: str | None = None
+    items: list[ResearchPaperAssetItem] = Field(default_factory=list)
 
 
 class ResearchNodeChatRequest(BaseModel):

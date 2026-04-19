@@ -53,6 +53,7 @@ class User(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
 
     reminders: Mapped[list["Reminder"]] = relationship(back_populates="user")
+    research_projects: Mapped[list["ResearchProject"]] = relationship(back_populates="user")
     research_tasks: Mapped[list["ResearchTask"]] = relationship(back_populates="user")
 
 
@@ -164,12 +165,73 @@ class VoiceRecord(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
 
 
+class ResearchProject(Base):
+    __tablename__ = "research_projects"
+    __table_args__ = (UniqueConstraint("user_id", "project_key", name="uq_research_project_user_key"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    project_key: Mapped[str] = mapped_column(String(64), nullable=False)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), nullable=False)
+    name: Mapped[str] = mapped_column(String(255), nullable=False)
+    description: Mapped[str | None] = mapped_column(Text, nullable=True)
+    is_default: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+    user: Mapped["User"] = relationship(back_populates="research_projects")
+    tasks: Mapped[list["ResearchTask"]] = relationship(back_populates="project")
+    collections: Mapped[list["ResearchCollection"]] = relationship(back_populates="project")
+
+
+class ResearchCollection(Base):
+    __tablename__ = "research_collections"
+    __table_args__ = (UniqueConstraint("project_id", "name", name="uq_research_collection_project_name"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    collection_id: Mapped[str] = mapped_column(String(64), unique=True, nullable=False)
+    project_id: Mapped[int] = mapped_column(ForeignKey("research_projects.id"), nullable=False)
+    name: Mapped[str] = mapped_column(String(255), nullable=False)
+    description: Mapped[str | None] = mapped_column(Text, nullable=True)
+    source_type: Mapped[str] = mapped_column(String(32), nullable=False, default="manual")
+    source_ref: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    summary_text: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+    project: Mapped["ResearchProject"] = relationship(back_populates="collections")
+    items: Mapped[list["ResearchCollectionItem"]] = relationship(back_populates="collection")
+
+
+class ResearchCollectionItem(Base):
+    __tablename__ = "research_collection_items"
+    __table_args__ = (UniqueConstraint("collection_id", "paper_id", name="uq_research_collection_item_collection_paper"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    collection_id: Mapped[int] = mapped_column(ForeignKey("research_collections.id"), nullable=False)
+    source_task_id: Mapped[int | None] = mapped_column(ForeignKey("research_tasks.id"), nullable=True)
+    paper_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    doi: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    title: Mapped[str] = mapped_column(Text, nullable=False)
+    title_norm: Mapped[str] = mapped_column(String(512), nullable=False)
+    authors_json: Mapped[str] = mapped_column(Text, nullable=False, default="[]")
+    year: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    venue: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    url: Mapped[str | None] = mapped_column(Text, nullable=True)
+    source: Mapped[str] = mapped_column(String(64), nullable=False, default="manual")
+    metadata_json: Mapped[str] = mapped_column(Text, nullable=False, default="{}")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+    collection: Mapped["ResearchCollection"] = relationship(back_populates="items")
+
+
 class ResearchTask(Base):
     __tablename__ = "research_tasks"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     task_id: Mapped[str] = mapped_column(String(64), unique=True, nullable=False)
     user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), nullable=False)
+    project_id: Mapped[int | None] = mapped_column(ForeignKey("research_projects.id"), nullable=True)
     topic: Mapped[str] = mapped_column(Text, nullable=False)
     constraints_json: Mapped[str] = mapped_column(Text, default="{}", nullable=False)
     mode: Mapped[ResearchRunMode] = mapped_column(
@@ -196,6 +258,7 @@ class ResearchTask(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
 
     user: Mapped["User"] = relationship(back_populates="research_tasks")
+    project: Mapped["ResearchProject | None"] = relationship(back_populates="tasks")
     directions: Mapped[list["ResearchDirection"]] = relationship(back_populates="task")
     seed_papers: Mapped[list["ResearchSeedPaper"]] = relationship(back_populates="task")
     jobs: Mapped[list["ResearchJob"]] = relationship(back_populates="task")

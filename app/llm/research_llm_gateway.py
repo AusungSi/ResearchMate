@@ -131,10 +131,15 @@ class ResearchLLMGateway:
             "max_tokens": max_tokens,
         }
         started = perf_counter()
-        with httpx.Client(timeout=max(5, int(self.settings.research_gpt_timeout_seconds))) as client:
-            resp = client.post(base_url, headers=headers, json=payload)
-            resp.raise_for_status()
-            data = resp.json()
+        try:
+            with httpx.Client(timeout=max(5, int(self.settings.research_gpt_timeout_seconds))) as client:
+                resp = client.post(base_url, headers=headers, json=payload)
+                resp.raise_for_status()
+                data = resp.json()
+        except Exception:
+            text = self._fallback_response(prompt)
+            return ResearchLLMResponse(text=text, provider="template_fallback", model=chosen_model, latency_ms=0)
+
         content = ""
         choices = data.get("choices") or []
         if choices:

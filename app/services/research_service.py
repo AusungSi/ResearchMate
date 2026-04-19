@@ -14,6 +14,7 @@ import re
 
 import httpx
 import orjson
+from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session
 
 from app.core.config import get_settings
@@ -31,9 +32,18 @@ from app.domain.enums import (
     ResearchRoundStatus,
     ResearchTaskStatus,
 )
-from app.domain.models import ResearchRound, ResearchTask, User
+from app.domain.models import (
+    ResearchCollection,
+    ResearchCollectionItem,
+    ResearchProject,
+    ResearchRound,
+    ResearchTask,
+    User,
+)
 from app.infra.repos import (
     ResearchCanvasStateRepo,
+    ResearchCollectionItemRepo,
+    ResearchCollectionRepo,
     ResearchCitationFetchCacheRepo,
     ResearchCitationEdgeRepo,
     ResearchDirectionRepo,
@@ -45,6 +55,7 @@ from app.infra.repos import (
     ResearchRoundCandidateRepo,
     ResearchRoundPaperRepo,
     ResearchRoundRepo,
+    ResearchProjectRepo,
     ResearchRunEventRepo,
     ResearchSeedPaperRepo,
     ResearchSearchCacheRepo,
@@ -118,6 +129,7 @@ class ResearchService:
         *,
         user_id: int,
         topic: str,
+        project_id: str | None = None,
         constraints: dict | None = None,
         mode: str | ResearchRunMode = ResearchRunMode.GPT_STEP,
         llm_backend: str | ResearchLLMBackend = ResearchLLMBackend.GPT,
@@ -125,6 +137,7 @@ class ResearchService:
     ) -> ResearchTask:
         task_repo = ResearchTaskRepo(db)
         session_repo = ResearchSessionRepo(db)
+        project = self._get_or_create_project(db, user_id=user_id, project_id=project_id)
         now = datetime.now(timezone.utc)
         task_id = self._next_task_id()
         mode_text = mode.value if isinstance(mode, ResearchRunMode) else str(mode)
@@ -137,6 +150,7 @@ class ResearchService:
         row = ResearchTask(
             task_id=task_id,
             user_id=user_id,
+            project_id=project.id,
             topic=topic.strip(),
             constraints_json=orjson.dumps(constraints or {}).decode("utf-8"),
             mode=mode_value,
@@ -149,11 +163,34 @@ class ResearchService:
         )
         task_repo.create(row)
         if mode_value == ResearchRunMode.GPT_STEP:
+            self._emit_step_progress(
+                db,
+                task=row,
+                step="task_created",
+                title="任务已创建",
+                message="研究任务已创建，系统会按 GPT Step 流程逐步推进。",
+                status="created",
+                details={
+                    "mode": mode_value.value,
+                    "llm_backend": backend_value.value,
+                    "llm_model": row.llm_model,
+                    "project_id": project.project_key,
+                },
+            )
+        if mode_value == ResearchRunMode.GPT_STEP:
             ResearchJobRepo(db).enqueue(
                 row.id,
                 ResearchJobType.PLAN,
                 {"topic": row.topic, "constraints": constraints or {}},
                 queue_name=self.settings.research_queue_name,
+            )
+            self._emit_step_progress(
+                db,
+                task=row,
+                step="plan_queued",
+                title="方向规划已排队",
+                message="正在准备方向规划任务。",
+                status="queued",
             )
         session = session_repo.get_or_create(user_id, page_size=self.settings.research_page_size)
         session_repo.set_active_task(session, row.task_id)
@@ -183,6 +220,15 @@ class ResearchService:
         task.updated_at = datetime.now(timezone.utc)
         db.add(task)
         db.flush()
+        self._emit_step_progress(
+            db,
+            task=task,
+            step="search_queued",
+            title=f"方向 {direction_index} 检索已排队",
+            message=f"正在为方向 {direction_index} 准备检索任务。",
+            status="queued",
+            details=payload,
+        )
         return task
 
     def enqueue_plan(self, db: Session, *, user_id: int, task_id: str, force: bool = False) -> tuple[ResearchTask, bool]:
@@ -202,6 +248,15 @@ class ResearchService:
         task.updated_at = datetime.now(timezone.utc)
         db.add(task)
         db.flush()
+        self._emit_step_progress(
+            db,
+            task=task,
+            step="plan_queued",
+            title="方向规划已排队",
+            message="正在为当前任务生成研究方向。",
+            status="queued",
+            details={"force": bool(force)},
+        )
         return task, True
 
     def enqueue_fulltext_build(
@@ -229,6 +284,15 @@ class ResearchService:
         task.updated_at = datetime.now(timezone.utc)
         db.add(task)
         db.flush()
+        self._emit_step_progress(
+            db,
+            task=task,
+            step="fulltext_queued",
+            title="全文处理已排队",
+            message="正在准备抓取与解析论文全文。",
+            status="queued",
+            details={"force": bool(force), "paper_count": len(paper_filter := [str(x).strip() for x in (paper_ids or []) if str(x).strip()])},
+        )
         return task, True
 
     def enqueue_graph_build(
@@ -267,6 +331,15 @@ class ResearchService:
         task.updated_at = datetime.now(timezone.utc)
         db.add(task)
         db.flush()
+        self._emit_step_progress(
+            db,
+            task=task,
+            step="graph_queued",
+            title="图谱构建已排队",
+            message="正在准备构建研究图谱。",
+            status="queued",
+            details=payload,
+        )
         return task, True
 
     def start_exploration(
@@ -321,6 +394,15 @@ class ResearchService:
         task.updated_at = datetime.now(timezone.utc)
         db.add(task)
         db.flush()
+        self._emit_step_progress(
+            db,
+            task=task,
+            step="exploration_started",
+            title="探索轮次已创建",
+            message=f"已为方向 {direction_index} 创建第 1 轮探索。",
+            status="queued",
+            details={"direction_index": direction_index, "round_id": round_row.id},
+        )
         return task, round_row
 
     def propose_round_candidates(
@@ -358,7 +440,7 @@ class ResearchService:
             candidate_count=candidate_n,
         )
         repo = ResearchRoundCandidateRepo(db)
-        rows = repo.replace_for_round(round_row.id, generated)
+        rows = self._run_with_locked_retry(db, lambda: repo.replace_for_round(round_row.id, generated))
         out = []
         for row in rows:
             out.append(
@@ -375,6 +457,15 @@ class ResearchService:
         round_row.updated_at = datetime.now(timezone.utc)
         db.add(round_row)
         db.flush()
+        self._emit_step_progress(
+            db,
+            task=task,
+            step="candidates_generated",
+            title="候选方向已生成",
+            message=f"第 {round_row.id} 轮已生成 {len(out)} 个候选方向。",
+            status="done",
+            details={"round_id": round_row.id, "action": action_norm, "candidate_count": len(out)},
+        )
         return {"task_id": task.task_id, "round_id": round_row.id, "action": action_norm, "candidates": out}
 
     def select_round_candidate(
@@ -427,6 +518,15 @@ class ResearchService:
         task.updated_at = datetime.now(timezone.utc)
         db.add(task)
         db.flush()
+        self._emit_step_progress(
+            db,
+            task=task,
+            step="candidate_selected",
+            title="候选方向已选中",
+            message=f"已从第 {parent.id} 轮派生新的探索轮次。",
+            status="queued",
+            details={"parent_round_id": parent.id, "child_round_id": child.id, "candidate_id": candidate.id},
+        )
         return {
             "task_id": task.task_id,
             "parent_round_id": parent.id,
@@ -488,6 +588,15 @@ class ResearchService:
         task.updated_at = datetime.now(timezone.utc)
         db.add(task)
         db.flush()
+        self._emit_step_progress(
+            db,
+            task=task,
+            step="next_round_created",
+            title="下一轮探索已创建",
+            message=f"已根据新的探索意图创建第 {child.id} 轮。",
+            status="queued",
+            details={"parent_round_id": parent.id, "child_round_id": child.id},
+        )
         return {
             "task_id": task.task_id,
             "parent_round_id": parent.id,
@@ -700,8 +809,317 @@ class ResearchService:
             ResearchSessionRepo(db).set_active_task(session, row.task_id)
         return row
 
-    def list_tasks(self, db: Session, *, user_id: int, limit: int = 10) -> list[dict]:
-        rows = ResearchTaskRepo(db).list_recent(user_id=user_id, limit=limit)
+    def list_projects(self, db: Session, *, user_id: int) -> dict:
+        repo = ResearchProjectRepo(db)
+        default_project = self._get_or_create_project(db, user_id=user_id)
+        rows = repo.list_for_user(user_id)
+        return {
+            "items": [self._project_to_dict(db, row) for row in rows],
+            "total": len(rows),
+            "default_project_id": default_project.project_key if default_project else None,
+        }
+
+    def create_project(self, db: Session, *, user_id: int, name: str, description: str | None = None) -> dict:
+        repo = ResearchProjectRepo(db)
+        now = datetime.now(timezone.utc)
+        project = ResearchProject(
+            project_key=f"project-{uuid4().hex[:10]}",
+            user_id=user_id,
+            name=name.strip()[:255],
+            description=(description or "").strip() or None,
+            is_default=False,
+            created_at=now,
+            updated_at=now,
+        )
+        repo.create(project)
+        return self._project_to_dict(db, project)
+
+    def get_project(self, db: Session, *, user_id: int, project_id: str) -> dict:
+        row = self._get_or_create_project(db, user_id=user_id, project_id=project_id)
+        return self._project_to_dict(db, row)
+
+    def list_collections(self, db: Session, *, user_id: int, project_id: str) -> dict:
+        project = self._get_or_create_project(db, user_id=user_id, project_id=project_id)
+        rows = ResearchCollectionRepo(db).list_for_project(project.id)
+        return {"items": [self._collection_to_dict(db, row, include_items=False) for row in rows], "total": len(rows)}
+
+    def create_collection(
+        self,
+        db: Session,
+        *,
+        user_id: int,
+        project_id: str,
+        name: str,
+        description: str | None = None,
+        source_type: str = "manual",
+        source_ref: str | None = None,
+    ) -> dict:
+        project = self._get_or_create_project(db, user_id=user_id, project_id=project_id)
+        now = datetime.now(timezone.utc)
+        row = ResearchCollection(
+            collection_id=f"collection-{uuid4().hex[:10]}",
+            project_id=project.id,
+            name=name.strip()[:255],
+            description=(description or "").strip() or None,
+            source_type=(source_type or "manual").strip()[:32] or "manual",
+            source_ref=(source_ref or "").strip()[:255] or None,
+            created_at=now,
+            updated_at=now,
+        )
+        ResearchCollectionRepo(db).create(row)
+        return self._collection_to_dict(db, row)
+
+    def get_collection(self, db: Session, *, user_id: int, collection_id: str) -> dict:
+        row = ResearchCollectionRepo(db).get_by_collection_id(user_id=user_id, collection_id=collection_id)
+        if not row:
+            raise ValueError("collection not found")
+        return self._collection_to_dict(db, row)
+
+    def add_collection_items(self, db: Session, *, user_id: int, collection_id: str, items: list[dict]) -> dict:
+        collection = ResearchCollectionRepo(db).get_by_collection_id(user_id=user_id, collection_id=collection_id)
+        if not collection:
+            raise ValueError("collection not found")
+        item_repo = ResearchCollectionItemRepo(db)
+        existing = item_repo.list_for_collection(collection.id)
+        existing_keys = {
+            (
+                (item.paper_id or "").strip().lower(),
+                (item.doi or "").strip().lower(),
+                (item.title_norm or "").strip().lower(),
+            )
+            for item in existing
+        }
+
+        for payload in items:
+            normalized = self._resolve_collection_item_payload(db, collection=collection, payload=payload)
+            key = (
+                (normalized.get("paper_id") or "").strip().lower(),
+                (normalized.get("doi") or "").strip().lower(),
+                (normalized.get("title_norm") or "").strip().lower(),
+            )
+            if key in existing_keys:
+                continue
+            now = datetime.now(timezone.utc)
+            row = ResearchCollectionItem(
+                collection_id=collection.id,
+                source_task_id=normalized.get("source_task_id"),
+                paper_id=normalized.get("paper_id"),
+                doi=normalized.get("doi"),
+                title=normalized["title"],
+                title_norm=normalized["title_norm"],
+                authors_json=orjson.dumps(normalized.get("authors") or []).decode("utf-8"),
+                year=normalized.get("year"),
+                venue=normalized.get("venue"),
+                url=normalized.get("url"),
+                source=normalized.get("source") or "manual",
+                metadata_json=orjson.dumps(normalized.get("metadata") or {}).decode("utf-8"),
+                created_at=now,
+                updated_at=now,
+            )
+            item_repo.create(row)
+            existing_keys.add(key)
+
+        collection.updated_at = datetime.now(timezone.utc)
+        db.add(collection)
+        db.flush()
+        return self._collection_to_dict(db, collection)
+
+    def remove_collection_item(self, db: Session, *, user_id: int, collection_id: str, item_id: int) -> dict:
+        collection = ResearchCollectionRepo(db).get_by_collection_id(user_id=user_id, collection_id=collection_id)
+        if not collection:
+            raise ValueError("collection not found")
+        row = ResearchCollectionItemRepo(db).get_by_id(item_id)
+        if not row or row.collection_id != collection.id:
+            raise ValueError("collection item not found")
+        ResearchCollectionItemRepo(db).delete(row)
+        collection.updated_at = datetime.now(timezone.utc)
+        db.add(collection)
+        db.flush()
+        return self._collection_to_dict(db, collection)
+
+    def create_study_from_collection(
+        self,
+        db: Session,
+        *,
+        user_id: int,
+        collection_id: str,
+        topic: str | None = None,
+        mode: str | ResearchRunMode = ResearchRunMode.GPT_STEP,
+        llm_backend: str | ResearchLLMBackend = ResearchLLMBackend.GPT,
+        llm_model: str | None = None,
+    ) -> dict:
+        collection = ResearchCollectionRepo(db).get_by_collection_id(user_id=user_id, collection_id=collection_id)
+        if not collection:
+            raise ValueError("collection not found")
+        items = ResearchCollectionItemRepo(db).list_for_collection(collection.id)
+        if not items:
+            raise ValueError("collection is empty")
+        task = self.create_task(
+            db,
+            user_id=user_id,
+            project_id=collection.project.project_key,
+            topic=(topic or f"{collection.name} 集合研究").strip(),
+            constraints={
+                "seed_collection_id": collection.collection_id,
+                "derived_from_collection_id": collection.collection_id,
+                "sources": list(_resolve_sources(None, self.settings.research_sources_default)),
+            },
+            mode=mode,
+            llm_backend=llm_backend,
+            llm_model=llm_model,
+        )
+        return self.get_task(db, user_id=user_id, task_id=task.task_id)
+
+    def summarize_collection(self, db: Session, *, user_id: int, collection_id: str) -> dict:
+        collection = ResearchCollectionRepo(db).get_by_collection_id(user_id=user_id, collection_id=collection_id)
+        if not collection:
+            raise ValueError("collection not found")
+        items = ResearchCollectionItemRepo(db).list_for_collection(collection.id)
+        summary = self._summarize_collection_items(collection.name, items)
+        collection.summary_text = summary
+        collection.updated_at = datetime.now(timezone.utc)
+        db.add(collection)
+        db.flush()
+        return {
+            "collection_id": collection.collection_id,
+            "summary_text": summary,
+            "item_count": len(items),
+        }
+
+    def build_collection_graph(self, db: Session, *, user_id: int, collection_id: str) -> dict:
+        collection = ResearchCollectionRepo(db).get_by_collection_id(user_id=user_id, collection_id=collection_id)
+        if not collection:
+            raise ValueError("collection not found")
+        items = ResearchCollectionItemRepo(db).list_for_collection(collection.id)
+        collection_node_id = f"collection:{collection.collection_id}"
+        nodes = [
+            {
+                "id": collection_node_id,
+                "type": "group",
+                "label": collection.name,
+                "summary": collection.summary_text or self._summarize_collection_items(collection.name, items),
+            }
+        ]
+        edges = []
+        for index, item in enumerate(items, start=1):
+            node_id = item.paper_id or f"collection-item:{item.id}"
+            nodes.append(
+                {
+                    "id": node_id,
+                    "type": "paper",
+                    "label": item.title,
+                    "year": item.year,
+                    "venue": item.venue,
+                    "source": item.source,
+                    "summary": _load_json_dict(item.metadata_json).get("abstract") or item.title,
+                }
+            )
+            edges.append(
+                {
+                    "source": collection_node_id,
+                    "target": node_id,
+                    "type": "collection_paper",
+                    "weight": 1.0,
+                }
+            )
+            if index > 1:
+                prev = items[index - 2]
+                prev_id = prev.paper_id or f"collection-item:{prev.id}"
+                edges.append(
+                    {
+                        "source": prev_id,
+                        "target": node_id,
+                        "type": "collection_sequence",
+                        "weight": 0.5,
+                    }
+                )
+        return {
+            "collection_id": collection.collection_id,
+            "nodes": nodes,
+            "edges": edges,
+            "stats": {"node_count": len(nodes), "edge_count": len(edges), "item_count": len(items)},
+        }
+
+    def get_zotero_config(self) -> dict:
+        return {
+            "enabled": bool(self.settings.zotero_base_url and (self.settings.zotero_library_id or self.settings.zotero_api_key)),
+            "base_url": self.settings.zotero_base_url,
+            "library_type": self.settings.zotero_library_type,
+            "library_id": self.settings.zotero_library_id or None,
+            "has_api_key": bool(self.settings.zotero_api_key.strip()),
+        }
+
+    def import_zotero_collection(
+        self,
+        db: Session,
+        *,
+        user_id: int,
+        project_id: str,
+        collection_key: str | None = None,
+        collection_name: str | None = None,
+        library_type: str | None = None,
+        library_id: str | None = None,
+        api_key: str | None = None,
+        limit: int | None = None,
+    ) -> dict:
+        project = self._get_or_create_project(db, user_id=user_id, project_id=project_id)
+        base_url = self.settings.zotero_base_url.rstrip("/")
+        lib_type = (library_type or self.settings.zotero_library_type or "users").strip()
+        lib_id = (library_id or self.settings.zotero_library_id or "").strip()
+        token = (api_key or self.settings.zotero_api_key or "").strip()
+        if not base_url or not lib_id:
+            raise ValueError("zotero is not configured")
+
+        headers = {"Zotero-API-Version": "3"}
+        if token:
+            headers["Zotero-API-Key"] = token
+
+        target_name = (collection_name or "").strip()
+        source_ref = collection_key or lib_id
+        if collection_key:
+            collection_resp = self._http_get_json(
+                f"{base_url}/{lib_type}/{quote_plus(lib_id)}/collections/{quote_plus(collection_key)}",
+                headers=headers,
+            )
+            if isinstance(collection_resp, dict):
+                data = collection_resp.get("data") if isinstance(collection_resp.get("data"), dict) else collection_resp
+                target_name = target_name or str(data.get("name") or f"Zotero {collection_key}")
+            items_resp = self._http_get_json(
+                f"{base_url}/{lib_type}/{quote_plus(lib_id)}/collections/{quote_plus(collection_key)}/items/top",
+                headers=headers,
+                params={"limit": max(1, min(200, int(limit or 100)))},
+            )
+        else:
+            target_name = target_name or "Zotero 导入"
+            items_resp = self._http_get_json(
+                f"{base_url}/{lib_type}/{quote_plus(lib_id)}/items/top",
+                headers=headers,
+                params={"limit": max(1, min(200, int(limit or 100)))},
+            )
+
+        collection = self.create_collection(
+            db,
+            user_id=user_id,
+            project_id=project.project_key,
+            name=target_name,
+            description="Imported from Zotero",
+            source_type="zotero",
+            source_ref=source_ref,
+        )
+        raw_items = items_resp if isinstance(items_resp, list) else []
+        normalized_items = [self._normalize_zotero_item(item) for item in raw_items]
+        normalized_items = [item for item in normalized_items if item]
+        updated = self.add_collection_items(
+            db,
+            user_id=user_id,
+            collection_id=collection["collection_id"],
+            items=normalized_items,
+        )
+        return {"project_id": project.project_key, "collection": updated, "imported": len(normalized_items)}
+
+    def list_tasks(self, db: Session, *, user_id: int, limit: int = 10, project_id: str | None = None) -> list[dict]:
+        project_row = self._get_or_create_project(db, user_id=user_id, project_id=project_id) if project_id else None
+        rows = ResearchTaskRepo(db).list_recent(user_id=user_id, limit=limit, project_id=project_row.id if project_row else None)
         return [self._task_to_dict(db, row) for row in rows]
 
     def get_task(self, db: Session, *, user_id: int, task_id: str) -> dict:
@@ -716,6 +1134,80 @@ class ResearchService:
             return None
         return self._task_to_dict(db, row)
 
+    def get_workbench_config(self) -> dict:
+        discovery_providers = ["semantic_scholar", "arxiv", "openalex"]
+        citation_providers = _resolve_citation_sources(None, self.settings.research_citation_sources_default)
+        provider_status = [
+            {
+                "key": "semantic_scholar",
+                "role": "discovery",
+                "enabled": True,
+                "configured": bool(self.settings.semantic_scholar_api_key.strip()),
+                "detail": "API key optional",
+            },
+            {
+                "key": "arxiv",
+                "role": "discovery",
+                "enabled": True,
+                "configured": True,
+                "detail": "Public feed",
+            },
+            {
+                "key": "openalex",
+                "role": "discovery",
+                "enabled": True,
+                "configured": True,
+                "detail": "Public API",
+            },
+            {
+                "key": "semantic_scholar",
+                "role": "citation",
+                "enabled": "semantic_scholar" in citation_providers,
+                "configured": bool(self.settings.semantic_scholar_api_key.strip()),
+                "detail": "Citation graph source",
+            },
+            {
+                "key": "openalex",
+                "role": "citation",
+                "enabled": "openalex" in citation_providers,
+                "configured": True,
+                "detail": "Citation graph source",
+            },
+            {
+                "key": "crossref",
+                "role": "citation",
+                "enabled": "crossref" in citation_providers,
+                "configured": True,
+                "detail": "Citation fallback",
+            },
+            {
+                "key": "zotero",
+                "role": "integration",
+                "enabled": True,
+                "configured": bool(self.settings.zotero_library_id.strip()),
+                "detail": "Import only",
+            },
+        ]
+        return {
+            "default_mode": ResearchRunMode.GPT_STEP.value,
+            "default_backend": ResearchLLMBackend.GPT.value,
+            "default_gpt_model": self.settings.research_gpt_model or None,
+            "default_openclaw_model": self.settings.openclaw_agent_id or "openclaw",
+            "openclaw_enabled": bool(self.settings.openclaw_enabled),
+            "available_modes": [item.value for item in ResearchRunMode],
+            "available_backends": [item.value for item in ResearchLLMBackend],
+            "discovery_providers": discovery_providers,
+            "citation_providers": citation_providers,
+            "provider_status": provider_status,
+            "layout_defaults": {
+                "layout_mode": "elk_layered",
+                "spacing_x": 420,
+                "spacing_y": 240,
+                "paper_ring_spacing": 340,
+            },
+            "default_canvas_ui": self._default_canvas_ui(),
+        }
+
     def get_canvas_state(self, db: Session, *, user_id: int, task_id: str) -> dict:
         task = self.switch_task(db, user_id=user_id, task_id=task_id, remember_active=False)
         repo = ResearchCanvasStateRepo(db)
@@ -727,6 +1219,7 @@ class ResearchService:
                 "nodes": list(state.get("nodes") or []),
                 "edges": list(state.get("edges") or []),
                 "viewport": dict(state.get("viewport") or {"x": 0, "y": 0, "zoom": 1}),
+                "ui": dict(state.get("ui") or self._default_canvas_ui()),
                 "updated_at": row.updated_at,
             }
         graph = self.get_graph_snapshot(
@@ -744,6 +1237,7 @@ class ResearchService:
             "nodes": list(state.get("nodes") or []),
             "edges": list(state.get("edges") or []),
             "viewport": dict(state.get("viewport") or {"x": 0, "y": 0, "zoom": 1}),
+            "ui": dict(state.get("ui") or self._default_canvas_ui()),
             "updated_at": saved.updated_at,
         }
 
@@ -753,13 +1247,15 @@ class ResearchService:
             "nodes": list(state.get("nodes") or []),
             "edges": list(state.get("edges") or []),
             "viewport": dict(state.get("viewport") or {"x": 0, "y": 0, "zoom": 1}),
+            "ui": {**self._default_canvas_ui(), **dict(state.get("ui") or {})},
         }
-        row = ResearchCanvasStateRepo(db).upsert(task.id, payload)
+        row = self._run_with_locked_retry(db, lambda: ResearchCanvasStateRepo(db).upsert(task.id, payload))
         return {
             "task_id": task.task_id,
             "nodes": payload["nodes"],
             "edges": payload["edges"],
             "viewport": payload["viewport"],
+            "ui": payload["ui"],
             "updated_at": row.updated_at,
         }
 
@@ -797,15 +1293,18 @@ class ResearchService:
             temperature=0.2,
             max_tokens=900,
         )
-        row = repo.create(
-            task_id=task.id,
-            node_id=node_id,
-            thread_id=thread,
-            question=question,
-            answer=result.text,
-            provider=result.provider,
-            model=result.model,
-            context=context,
+        row = self._run_with_locked_retry(
+            db,
+            lambda: repo.create(
+                task_id=task.id,
+                node_id=node_id,
+                thread_id=thread,
+                question=question,
+                answer=result.text,
+                provider=result.provider,
+                model=result.model,
+                context=context,
+            ),
         )
         history_rows = repo.list_for_node(task_id=task.id, node_id=node_id, thread_id=thread, limit=50)
         return {
@@ -852,6 +1351,49 @@ class ResearchService:
                 return str(Path(candidate))
         raise ValueError("asset not found")
 
+    def get_paper_assets(
+        self,
+        db: Session,
+        *,
+        user_id: int,
+        task_id: str,
+        paper_token: str,
+    ) -> dict:
+        task = self.switch_task(db, user_id=user_id, task_id=task_id)
+        paper = ResearchPaperRepo(db).get_by_token(task.id, paper_token)
+        if not paper:
+            raise ValueError("paper not found")
+        fulltext = ResearchPaperFulltextRepo(db).get(task.id, _paper_token(paper))
+        items = []
+        for kind, path_value in (
+            ("pdf", fulltext.pdf_path if fulltext else None),
+            ("txt", fulltext.text_path if fulltext else None),
+            ("md", paper.saved_path),
+            ("bib", paper.saved_bib_path),
+        ):
+            path_text = str(path_value).strip() if path_value else None
+            exists = bool(path_text and Path(path_text).exists())
+            items.append(
+                {
+                    "kind": kind,
+                    "status": "available" if exists else "missing",
+                    "filename": Path(path_text).name if exists and path_text else None,
+                    "path": path_text if exists else None,
+                    "download_url": (
+                        f"/api/v1/research/tasks/{quote_plus(task.task_id)}/papers/{quote_plus(paper_token)}/asset?kind={kind}"
+                        if exists
+                        else None
+                    ),
+                }
+            )
+        primary = next((item["kind"] for item in items if item["status"] == "available"), None)
+        return {
+            "task_id": task.task_id,
+            "paper_id": _paper_token(paper),
+            "primary_kind": primary,
+            "items": items,
+        }
+
     def start_auto_research(self, db: Session, *, user_id: int, task_id: str) -> dict:
         task = self.switch_task(db, user_id=user_id, task_id=task_id)
         if task.mode != ResearchRunMode.OPENCLAW_AUTO:
@@ -896,10 +1438,16 @@ class ResearchService:
     ) -> dict:
         task = self.switch_task(db, user_id=user_id, task_id=task_id, remember_active=False)
         rows = ResearchRunEventRepo(db).list_for_run(task_id=task.id, run_id=run_id, after_seq=after_seq, limit=limit)
+        summary_rows = (
+            rows
+            if after_seq is None and len(rows) < limit
+            else ResearchRunEventRepo(db).list_for_run(task_id=task.id, run_id=run_id, limit=1000)
+        )
         return {
             "task_id": task.task_id,
             "run_id": run_id,
             "items": [self._run_event_to_dict(task.task_id, row) for row in rows],
+            "summary": self._summarize_run_events(summary_rows),
         }
 
     def submit_run_guidance(
@@ -1144,6 +1692,15 @@ class ResearchService:
         md_path.write_text(self._render_saved_paper_markdown(task, paper), encoding="utf-8")
         bib_path.write_text(self._render_bib([paper]), encoding="utf-8")
         row = paper_repo.mark_saved(paper, md_path=str(md_path), bib_path=str(bib_path))
+        self._emit_step_progress(
+            db,
+            task=task,
+            step="paper_saved",
+            title="论文已保存",
+            message=f"已保存论文《{row.title[:48]}》。",
+            status="done",
+            details={"paper_id": _paper_token(row)},
+        )
         return {
             "task_id": task.task_id,
             "paper_id": _paper_token(row),
@@ -1175,6 +1732,15 @@ class ResearchService:
         task.updated_at = datetime.now(timezone.utc)
         db.add(task)
         db.flush()
+        self._emit_step_progress(
+            db,
+            task=task,
+            step="paper_summary_queued",
+            title="论文总结已排队",
+            message=f"正在为论文《{paper.title[:48]}》生成要点总结。",
+            status="queued",
+            details={"paper_id": _paper_token(paper)},
+        )
         return {
             "task_id": task.task_id,
             "paper_id": _paper_token(paper),
@@ -1371,6 +1937,15 @@ class ResearchService:
         task.updated_at = datetime.now(timezone.utc)
         db.add(task)
         db.flush()
+        self._emit_step_progress(
+            db,
+            task=task,
+            step="plan_completed",
+            title="方向规划完成",
+            message=f"已生成 {len(directions)} 个研究方向。",
+            status="done",
+            details={"direction_count": len(directions)},
+        )
         lines = [f"调研任务 {task.task_id} 方向已生成："]
         for idx, item in enumerate(directions, start=1):
             lines.append(f"{idx}. {item['name']}")
@@ -1467,6 +2042,19 @@ class ResearchService:
         task.updated_at = datetime.now(timezone.utc)
         db.add(task)
         db.flush()
+        self._emit_step_progress(
+            db,
+            task=task,
+            step="search_completed",
+            title="论文检索完成",
+            message=(
+                f"方向 {direction_index} 的第 {round_id} 轮探索已完成，新增 {len(rows)} 篇论文。"
+                if round_id
+                else f"方向 {direction_index} 检索完成，收录 {len(rows)} 篇论文。"
+            ),
+            status="done",
+            details={"direction_index": direction_index, "round_id": round_id, "paper_count": len(rows)},
+        )
         if round_id:
             msg = (
                 f"已完成方向 {direction_index} 的第 {round_id} 轮检索，新增 {len(rows)} 篇。"
@@ -1570,6 +2158,15 @@ class ResearchService:
         db.add(task)
         db.flush()
         summary = fulltext_repo.summary_for_task(task.id)
+        self._emit_step_progress(
+            db,
+            task=task,
+            step="fulltext_completed",
+            title="全文处理完成",
+            message=f"已解析 {summary.get('parsed', 0)} 篇全文，仍有 {summary.get('need_upload', 0)} 篇需要补传。",
+            status="done",
+            details=summary,
+        )
         self._notify_user(
             db,
             task.user_id,
@@ -1612,6 +2209,15 @@ class ResearchService:
             task.updated_at = datetime.now(timezone.utc)
             db.add(task)
             db.flush()
+            self._emit_step_progress(
+                db,
+                task=task,
+                step="tree_graph_completed",
+                title="树状图已生成",
+                message=f"已生成 {len(tree['nodes'])} 个节点、{len(tree['edges'])} 条连线的树状图。",
+                status="done",
+                details=tree["stats"],
+            )
             return
 
         paper_repo = ResearchPaperRepo(db)
@@ -1774,6 +2380,15 @@ class ResearchService:
         task.updated_at = datetime.now(timezone.utc)
         db.add(task)
         db.flush()
+        self._emit_step_progress(
+            db,
+            task=task,
+            step="citation_graph_completed",
+            title="图谱构建完成",
+            message=f"已生成 {stats.get('node_count', 0)} 个节点、{stats.get('edge_count', 0)} 条连线。",
+            status="done",
+            details={"view": view, **stats},
+        )
         self._notify_user(
             db,
             task.user_id,
@@ -1838,6 +2453,15 @@ class ResearchService:
         task.updated_at = datetime.now(timezone.utc)
         db.add(task)
         db.flush()
+        self._emit_step_progress(
+            db,
+            task=task,
+            step="paper_summary_completed",
+            title="论文要点已生成",
+            message=f"已为论文《{paper.title[:48]}》生成关键要点。",
+            status="done",
+            details={"paper_id": paper_key, "source": source},
+        )
 
     def _run_auto_research_job(
         self,
@@ -2007,6 +2631,36 @@ class ResearchService:
         db.add(task)
         db.flush()
 
+    def _step_run_id(self, task: ResearchTask | str) -> str:
+        task_id = task.task_id if isinstance(task, ResearchTask) else str(task).strip()
+        return f"step-{task_id}"
+
+    def _emit_step_progress(
+        self,
+        db: Session,
+        *,
+        task: ResearchTask,
+        step: str,
+        title: str,
+        message: str,
+        status: str,
+        details: dict | None = None,
+    ) -> dict:
+        return self._emit_run_event(
+            db,
+            task=task,
+            run_id=self._step_run_id(task),
+            event_type=ResearchRunEventType.PROGRESS,
+            payload={
+                "kind": "gpt_step",
+                "step": step,
+                "title": title,
+                "message": message,
+                "status": status,
+                "details": details or {},
+            },
+        )
+
     def _emit_run_event(
         self,
         db: Session,
@@ -2028,6 +2682,89 @@ class ResearchService:
             },
         )
         return self._run_event_to_dict(task.task_id, row)
+
+    def _summarize_run_events(self, rows) -> dict:
+        phase_map: dict[str, dict] = {}
+        latest_checkpoint: dict | None = None
+        latest_report: dict | None = None
+        artifacts: list[dict] = []
+        latest_seq = 0
+        for row in rows:
+            data = _load_json_dict(row.payload_json)
+            payload = _load_json_dict(data.get("payload"))
+            event_type = str(data.get("event_type") or row.event_type.value)
+            latest_seq = max(latest_seq, int(row.seq or 0))
+            phase_key, phase_label = self._phase_summary_key(event_type, payload)
+            if phase_key:
+                current = phase_map.setdefault(
+                    phase_key,
+                    {
+                        "key": phase_key,
+                        "label": phase_label,
+                        "event_count": 0,
+                        "started_seq": row.seq,
+                        "latest_seq": row.seq,
+                    },
+                )
+                current["event_count"] += 1
+                current["latest_seq"] = row.seq
+            if event_type == ResearchRunEventType.CHECKPOINT.value:
+                latest_checkpoint = payload
+            elif event_type == ResearchRunEventType.REPORT_CHUNK.value:
+                latest_report = payload
+            elif event_type == ResearchRunEventType.ARTIFACT.value:
+                artifacts.append(payload)
+        return {
+            "total": len(rows),
+            "latest_seq": latest_seq,
+            "phases": list(phase_map.values()),
+            "latest_checkpoint": latest_checkpoint,
+            "latest_report": latest_report,
+            "artifacts": artifacts[-10:],
+        }
+
+    def _phase_summary_key(self, event_type: str, payload: dict) -> tuple[str, str]:
+        if payload.get("kind") == "gpt_step":
+            step = str(payload.get("step") or event_type).strip() or event_type
+            return step, self._step_label(step)
+        if event_type == ResearchRunEventType.CHECKPOINT.value:
+            return "checkpoint", "Checkpoint"
+        if event_type == ResearchRunEventType.REPORT_CHUNK.value:
+            return "report", "阶段报告"
+        if event_type == ResearchRunEventType.ARTIFACT.value:
+            return "artifact", "产出物"
+        phase = str(payload.get("phase") or "").strip().lower()
+        if phase:
+            return phase, phase.replace("_", " ").title()
+        if event_type in {
+            ResearchRunEventType.NODE_UPSERT.value,
+            ResearchRunEventType.EDGE_UPSERT.value,
+            ResearchRunEventType.PAPER_UPSERT.value,
+        }:
+            return "graph_sync", "图谱同步"
+        return event_type, event_type.replace("_", " ").title()
+
+    def _step_label(self, step: str) -> str:
+        labels = {
+            "task_created": "任务创建",
+            "plan_queued": "方向规划排队",
+            "plan_completed": "方向规划完成",
+            "search_queued": "论文检索排队",
+            "search_completed": "论文检索完成",
+            "exploration_started": "开始探索",
+            "candidates_generated": "候选生成",
+            "candidate_selected": "候选已选",
+            "next_round_created": "下一轮探索",
+            "graph_queued": "图谱构建排队",
+            "tree_graph_completed": "树状图完成",
+            "citation_graph_completed": "图谱构建完成",
+            "fulltext_queued": "全文处理排队",
+            "fulltext_completed": "全文处理完成",
+            "paper_saved": "论文保存",
+            "paper_summary_queued": "论文总结排队",
+            "paper_summary_completed": "论文总结完成",
+        }
+        return labels.get(step, step.replace("_", " "))
 
     def _latest_guidance_text(self, db: Session, *, task_id: int, run_id: str) -> str:
         rows = ResearchRunEventRepo(db).list_for_run(task_id=task_id, run_id=run_id, limit=200)
@@ -2124,7 +2861,22 @@ class ResearchService:
                     "hidden": False,
                 }
             )
-        return {"nodes": nodes, "edges": edges, "viewport": {"x": 0, "y": 0, "zoom": 1}}
+        return {
+            "nodes": nodes,
+            "edges": edges,
+            "viewport": {"x": 0, "y": 0, "zoom": 1},
+            "ui": self._default_canvas_ui(),
+        }
+
+    def _default_canvas_ui(self) -> dict:
+        return {
+            "left_sidebar_collapsed": False,
+            "right_sidebar_collapsed": False,
+            "left_sidebar_width": 320,
+            "right_sidebar_width": 420,
+            "show_minimap": False,
+            "layout_mode": "elk_layered",
+        }
 
     def _search_with_cache(
         self,
@@ -2225,6 +2977,11 @@ class ResearchService:
         if source_key == "arxiv":
             papers, status, error = _normalize_source_response(
                 self._search_arxiv(query, top_n=top_n, constraints=constraints)
+            )
+            return SearchFetchResult(papers=papers, status=status, error=error)
+        if source_key == "openalex":
+            papers, status, error = _normalize_source_response(
+                self._search_openalex(query, top_n=top_n, constraints=constraints)
             )
             return SearchFetchResult(papers=papers, status=status, error=error)
         return SearchFetchResult(papers=[], status="unsupported_source", error=f"unsupported_source:{source_key}")
@@ -2848,6 +3605,27 @@ class ResearchService:
         }
 
     def _build_seed_corpus_for_task(self, db: Session, *, task: ResearchTask, constraints: dict) -> list:
+        seed_collection_id = str(constraints.get("seed_collection_id") or "").strip()
+        if seed_collection_id:
+            collection = ResearchCollectionRepo(db).get_by_collection_id(user_id=task.user_id, collection_id=seed_collection_id)
+            if collection:
+                items = ResearchCollectionItemRepo(db).list_for_collection(collection.id)
+                seed_items = [
+                    {
+                        "paper_id": item.paper_id,
+                        "title": item.title,
+                        "title_norm": item.title_norm,
+                        "authors": _load_json_list(item.authors_json),
+                        "year": item.year,
+                        "venue": item.venue,
+                        "doi": item.doi,
+                        "url": item.url,
+                        "abstract": _load_json_dict(item.metadata_json).get("abstract"),
+                        "source": item.source,
+                    }
+                    for item in items
+                ]
+                return ResearchSeedPaperRepo(db).replace_for_task(task.id, seed_items)
         top_n = max(10, min(120, int(self.settings.research_seed_topn_default)))
         constraints_seed = {
             "year_from": constraints.get("year_from"),
@@ -2855,7 +3633,11 @@ class ResearchService:
             "sources": constraints.get("sources"),
         }
         sources = _resolve_sources(constraints_seed.get("sources"), self.settings.research_sources_default)
-        ordered_sources = [src for src in ("semantic_scholar", "arxiv") if src in sources] or ["semantic_scholar", "arxiv"]
+        ordered_sources = [src for src in ("semantic_scholar", "arxiv", "openalex") if src in sources] or [
+            "semantic_scholar",
+            "arxiv",
+            "openalex",
+        ]
 
         collected: list[dict] = []
         per_source = max(10, min(100, top_n))
@@ -3212,6 +3994,71 @@ class ResearchService:
             return papers, "ok_empty", None
         return papers, "ok", None
 
+    def _search_openalex(self, query: str, *, top_n: int, constraints: dict) -> tuple[list[dict], str, str | None]:
+        params = {
+            "search": query,
+            "per-page": max(1, min(100, top_n)),
+            "select": "id,display_name,publication_year,primary_location,doi,abstract_inverted_index,authorships",
+        }
+        year_from = _to_int_or_none(constraints.get("year_from"))
+        year_to = _to_int_or_none(constraints.get("year_to"))
+        if year_from or year_to:
+            lower = year_from or 1900
+            upper = year_to or datetime.now().year
+            params["filter"] = f"from_publication_date:{lower}-01-01,to_publication_date:{upper}-12-31"
+        try:
+            with httpx.Client(timeout=20, trust_env=False) as client:
+                resp = client.get("https://api.openalex.org/works", params=params)
+            if resp.status_code >= 400:
+                if 500 <= resp.status_code < 600:
+                    return [], "http_5xx", f"http_{resp.status_code}"
+                return [], f"http_{resp.status_code}", f"http_{resp.status_code}"
+            payload = resp.json()
+        except httpx.TimeoutException as exc:
+            return [], "timeout", str(exc)
+        except Exception as exc:
+            return [], "transport_error", str(exc)
+        results = payload.get("results") if isinstance(payload, dict) else []
+        papers = []
+        for item in results or []:
+            if not isinstance(item, dict):
+                continue
+            title = str(item.get("display_name") or "").strip()
+            if not title:
+                continue
+            primary_location = item.get("primary_location") if isinstance(item.get("primary_location"), dict) else {}
+            source = primary_location.get("source") if isinstance(primary_location.get("source"), dict) else {}
+            url = primary_location.get("landing_page_url") or primary_location.get("pdf_url")
+            authorships = item.get("authorships") if isinstance(item.get("authorships"), list) else []
+            authors = []
+            for authorship in authorships:
+                author = authorship.get("author") if isinstance(authorship, dict) and isinstance(authorship.get("author"), dict) else {}
+                name = str(author.get("display_name") or "").strip()
+                if name:
+                    authors.append(name)
+            abstract = _openalex_abstract_to_text(item.get("abstract_inverted_index"))
+            doi = str(item.get("doi") or "").strip()
+            if doi.startswith("https://doi.org/"):
+                doi = doi.replace("https://doi.org/", "", 1)
+            papers.append(
+                {
+                    "paper_id": _normalize_openalex_id(item.get("id")),
+                    "title": title,
+                    "title_norm": _normalize_title(title),
+                    "authors": authors,
+                    "year": _to_int_or_none(item.get("publication_year")),
+                    "venue": str(source.get("display_name") or "").strip() or "OpenAlex",
+                    "doi": doi or None,
+                    "url": str(url or "").strip() or None,
+                    "abstract": abstract or None,
+                    "source": "openalex",
+                    "relevance_score": None,
+                }
+            )
+        if not papers:
+            return [], "ok_empty", None
+        return papers, "ok", None
+
     def _dedupe_papers(self, papers: list[dict]) -> list[dict]:
         by_doi: dict[str, dict] = {}
         by_title: list[dict] = []
@@ -3235,6 +4082,7 @@ class ResearchService:
         return merged
 
     def _task_to_dict(self, db: Session, row: ResearchTask) -> dict:
+        row = self._ensure_task_project(db, row)
         directions = ResearchDirectionRepo(db).list_for_task(row.id)
         papers_total = sum(x.papers_count for x in directions)
         job_repo = ResearchJobRepo(db)
@@ -3257,6 +4105,8 @@ class ResearchService:
             }
         return {
             "task_id": row.task_id,
+            "project_id": row.project.project_key if row.project else None,
+            "project_name": row.project.name if row.project else None,
             "topic": row.topic,
             "status": row.status.value,
             "mode": row.mode.value,
@@ -3289,6 +4139,199 @@ class ResearchService:
             "created_at": row.created_at,
             "updated_at": row.updated_at,
         }
+
+    def _project_to_dict(self, db: Session, row: ResearchProject) -> dict:
+        task_count = len(ResearchTaskRepo(db).list_recent(user_id=row.user_id, limit=500, project_id=row.id))
+        collection_count = len(ResearchCollectionRepo(db).list_for_project(row.id))
+        return {
+            "project_id": row.project_key,
+            "name": row.name,
+            "description": row.description,
+            "is_default": row.is_default,
+            "task_count": task_count,
+            "collection_count": collection_count,
+            "created_at": row.created_at,
+            "updated_at": row.updated_at,
+        }
+
+    def _collection_to_dict(self, db: Session, row: ResearchCollection, *, include_items: bool = True) -> dict:
+        item_rows = ResearchCollectionItemRepo(db).list_for_collection(row.id)
+        return {
+            "collection_id": row.collection_id,
+            "project_id": row.project.project_key,
+            "name": row.name,
+            "description": row.description,
+            "source_type": row.source_type,
+            "source_ref": row.source_ref,
+            "summary_text": row.summary_text,
+            "item_count": len(item_rows),
+            "items": [self._collection_item_to_dict(item) for item in item_rows] if include_items else [],
+            "created_at": row.created_at,
+            "updated_at": row.updated_at,
+        }
+
+    def _collection_item_to_dict(self, row: ResearchCollectionItem) -> dict:
+        metadata = _load_json_dict(row.metadata_json)
+        source_task_id = None
+        if row.source_task_id:
+            source_task_id = None
+        return {
+            "item_id": row.id,
+            "task_id": metadata.get("task_id") or source_task_id,
+            "paper_id": row.paper_id,
+            "title": row.title,
+            "authors": _load_json_list(row.authors_json),
+            "year": row.year,
+            "venue": row.venue,
+            "doi": row.doi,
+            "url": row.url,
+            "source": row.source,
+            "metadata": metadata,
+            "created_at": row.created_at,
+            "updated_at": row.updated_at,
+        }
+
+    def _get_or_create_project(
+        self,
+        db: Session,
+        *,
+        user_id: int,
+        project_id: str | None = None,
+    ) -> ResearchProject:
+        repo = ResearchProjectRepo(db)
+        if project_id:
+            row = repo.get_by_project_key(user_id=user_id, project_key=project_id.strip())
+            if not row:
+                raise ValueError("project not found")
+            return row
+        default_row = repo.get_default(user_id=user_id)
+        if default_row:
+            return default_row
+        now = datetime.now(timezone.utc)
+        row = ResearchProject(
+            project_key="project-default",
+            user_id=user_id,
+            name="默认研究项目",
+            description="自动创建的默认项目，用于承接未分组的研究任务。",
+            is_default=True,
+            created_at=now,
+            updated_at=now,
+        )
+        repo.create(row)
+        return row
+
+    def _ensure_task_project(self, db: Session, row: ResearchTask) -> ResearchTask:
+        if row.project_id is not None:
+            return row
+        project = self._get_or_create_project(db, user_id=row.user_id)
+        row.project_id = project.id
+        row.updated_at = datetime.now(timezone.utc)
+        db.add(row)
+        db.flush()
+        return row
+
+    def _resolve_collection_item_payload(self, db: Session, *, collection: ResearchCollection, payload: dict) -> dict:
+        task_token = str(payload.get("task_id") or "").strip()
+        paper_token = str(payload.get("paper_id") or "").strip()
+        if task_token and paper_token:
+            task = ResearchTaskRepo(db).get_by_task_id(task_token, user_id=collection.project.user_id)
+            if not task:
+                raise ValueError(f"task not found: {task_token}")
+            paper = ResearchPaperRepo(db).get_by_token(task.id, paper_token)
+            if not paper:
+                raise ValueError(f"paper not found: {paper_token}")
+            return {
+                "source_task_id": task.id,
+                "paper_id": _paper_token(paper),
+                "doi": (paper.doi or "").strip().lower() or None,
+                "title": paper.title,
+                "title_norm": paper.title_norm,
+                "authors": _load_json_list(paper.authors_json),
+                "year": paper.year,
+                "venue": paper.venue,
+                "url": paper.url,
+                "source": paper.source,
+                "metadata": {
+                    "task_id": task.task_id,
+                    "abstract": paper.abstract,
+                    "method_summary": paper.method_summary,
+                },
+            }
+        title = str(payload.get("title") or "").strip()
+        if not title:
+            raise ValueError("collection item title is required")
+        doi = str(payload.get("doi") or "").strip().lower() or None
+        return {
+            "source_task_id": None,
+            "paper_id": paper_token or None,
+            "doi": doi,
+            "title": title,
+            "title_norm": _normalize_title(title),
+            "authors": payload.get("authors") or [],
+            "year": _to_int_or_none(payload.get("year")),
+            "venue": str(payload.get("venue") or "").strip() or None,
+            "url": str(payload.get("url") or "").strip() or None,
+            "source": str(payload.get("source") or "manual").strip() or "manual",
+            "metadata": payload.get("metadata") or {},
+        }
+
+    def _summarize_collection_items(self, name: str, items: list[ResearchCollectionItem]) -> str:
+        if not items:
+            return f"集合「{name}」目前还没有论文。"
+        top_venues: dict[str, int] = {}
+        years: list[int] = []
+        for item in items:
+            if item.venue:
+                top_venues[item.venue] = top_venues.get(item.venue, 0) + 1
+            if item.year:
+                years.append(int(item.year))
+        venue_text = "、".join([venue for venue, _count in sorted(top_venues.items(), key=lambda pair: pair[1], reverse=True)[:3]]) or "来源未标注"
+        if years:
+            year_text = f"{min(years)}-{max(years)}"
+        else:
+            year_text = "年份未标注"
+        return f"集合「{name}」共包含 {len(items)} 篇论文，时间范围 {year_text}，主要来源/期刊包括 {venue_text}。适合继续做集合级总结、派生 study task 或构建专题图谱。"
+
+    def _normalize_zotero_item(self, item: dict) -> dict | None:
+        data = item.get("data") if isinstance(item, dict) and isinstance(item.get("data"), dict) else item
+        if not isinstance(data, dict):
+            return None
+        title = str(data.get("title") or "").strip()
+        if not title:
+            return None
+        creators = data.get("creators") if isinstance(data.get("creators"), list) else []
+        authors = []
+        for creator in creators:
+            if not isinstance(creator, dict):
+                continue
+            first = str(creator.get("firstName") or "").strip()
+            last = str(creator.get("lastName") or "").strip()
+            name = " ".join(part for part in (first, last) if part).strip() or str(creator.get("name") or "").strip()
+            if name:
+                authors.append(name)
+        year = _extract_year_from_text(str(data.get("date") or "").strip())
+        return {
+            "title": title,
+            "authors": authors,
+            "year": year,
+            "venue": str(data.get("publicationTitle") or data.get("proceedingsTitle") or "").strip() or None,
+            "doi": str(data.get("DOI") or "").strip() or None,
+            "url": str(data.get("url") or "").strip() or None,
+            "source": "zotero",
+            "metadata": {
+                "item_type": data.get("itemType"),
+                "zotero_key": data.get("key"),
+                "abstract": data.get("abstractNote"),
+            },
+        }
+
+    @staticmethod
+    def _http_get_json(url: str, *, headers: dict[str, str] | None = None, params: dict | None = None):
+        with httpx.Client(timeout=30, trust_env=False) as client:
+            response = client.get(url, headers=headers or {}, params=params or {})
+        if response.status_code >= 400:
+            raise ValueError(f"http_{response.status_code}")
+        return response.json()
 
     def _fallback_directions(self, topic: str) -> list[dict]:
         base = topic.strip()
@@ -3341,6 +4384,19 @@ class ResearchService:
         ok, error = self.wecom_client.send_text(user.wecom_user_id, content)
         if not ok:
             logger.warning("research_notify_failed user_id=%s error=%s", user_id, error)
+
+    @staticmethod
+    def _run_with_locked_retry(db: Session, operation: Callable[[], object], *, attempts: int = 4, base_delay_seconds: float = 0.2):
+        for attempt in range(max(1, attempts)):
+            try:
+                return operation()
+            except OperationalError as exc:
+                message = str(exc).lower()
+                if "database is locked" not in message or attempt >= attempts - 1:
+                    raise
+                db.rollback()
+                sleep(base_delay_seconds * (attempt + 1))
+        raise RuntimeError("sqlite retry exhausted")
 
     @staticmethod
     def _task_status_for_retry(job_type: ResearchJobType) -> ResearchTaskStatus:
@@ -3574,7 +4630,7 @@ def _normalize_title(title: str) -> str:
 
 
 def _resolve_sources(sources: object, default_sources: str) -> set[str]:
-    allowed = {"semantic_scholar", "arxiv"}
+    allowed = {"semantic_scholar", "arxiv", "openalex"}
     values: list[str] = []
     if isinstance(sources, str):
         values = [item.strip().lower() for item in sources.split(",") if item.strip()]
@@ -3583,6 +4639,32 @@ def _resolve_sources(sources: object, default_sources: str) -> set[str]:
     if not values:
         values = [item.strip().lower() for item in default_sources.split(",") if item.strip()]
     return {item for item in values if item in allowed}
+
+
+def _extract_year_from_text(value: str) -> int | None:
+    match = re.search(r"(19|20)\d{2}", value or "")
+    if not match:
+        return None
+    try:
+        return int(match.group(0))
+    except Exception:
+        return None
+
+
+def _openalex_abstract_to_text(value: object) -> str:
+    if not isinstance(value, dict):
+        return ""
+    words: list[tuple[int, str]] = []
+    for token, positions in value.items():
+        if not isinstance(token, str) or not isinstance(positions, list):
+            continue
+        for pos in positions:
+            if isinstance(pos, int):
+                words.append((pos, token))
+    if not words:
+        return ""
+    words.sort(key=lambda item: item[0])
+    return " ".join(token for _pos, token in words)
 
 
 def _resolve_citation_sources(sources: object, default_sources: str) -> list[str]:
