@@ -67,6 +67,16 @@
 - SQLite 在 `backend + worker` 并发读写时容易出现 `database is locked`
 - 并发创建 research task 时可能发生 `task_id` 冲突
 
+这一轮还额外补上了 demo 交付底座：
+
+- 静态展示 Demo：
+  - `scripts/seed_embodied_demo.py`
+  - `scripts/demo_showcase.py --mode static`
+- 动态 Showcase：
+  - `scripts/demo_showcase.py --mode live`
+  - `scripts/demo_showcase.py --mode all`
+- Demo 主题固定为“具身智能 / Embodied AI”
+
 ## 4. 当前技术栈
 
 ### 后端

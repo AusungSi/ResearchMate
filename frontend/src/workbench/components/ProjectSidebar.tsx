@@ -3,17 +3,23 @@ import type {
   ActionStatus,
   Backend,
   CollectionSummary,
+  ExportRecord,
+  ProjectDashboard,
   ProjectSummary,
   TaskMode,
   TaskSummary,
   WorkbenchConfig,
   ZoteroConfig,
 } from "../types";
-import { autoStatusLabel, backendLabel, modeLabel } from "../utils";
+import { autoStatusLabel, backendLabel, formatDateTime, modeLabel } from "../utils";
 import { Badge, SmallButton } from "./shared";
 
-export function ProjectSidebar(props: {
+type ExportFormat = "md" | "bib" | "json" | "csljson";
+
+type Props = {
   config?: WorkbenchConfig | null;
+  dashboard?: ProjectDashboard | null;
+  currentExports?: ExportRecord[];
   zoteroConfig?: ZoteroConfig | null;
   projects: ProjectSummary[];
   tasks: TaskSummary[];
@@ -30,8 +36,11 @@ export function ProjectSidebar(props: {
   onCreateCollection: (payload: { name: string; description: string }) => void;
   onCreateTask: (payload: { topic: string; mode: TaskMode; llm_backend: Backend; llm_model: string }) => void;
   onQuickAction: (action: "plan" | "search_first" | "build_graph" | "build_fulltext" | "auto_start") => void;
-  onImportZotero: () => void;
-}) {
+  onImportZoteroFile: () => void;
+  onExport: (format: ExportFormat) => void;
+};
+
+export function ProjectSidebar(props: Props) {
   const [topic, setTopic] = useState("");
   const [projectName, setProjectName] = useState("");
   const [collectionName, setCollectionName] = useState("");
@@ -69,17 +78,64 @@ export function ProjectSidebar(props: {
         <div className="text-xs font-semibold uppercase tracking-[0.18em] text-slate-400">Research Workbench</div>
         <div className="mt-2 text-2xl font-semibold tracking-tight text-slate-900">研究工作台</div>
         <p className="mt-2 text-sm leading-6 text-slate-500">
-          现在按「项目 → 任务 → Collection」组织研究。`GPT Step` 适合半自动推进，`OpenClaw Auto` 会在 Checkpoint 暂停等待你的引导。
+          用项目、任务、Collection 来组织研究。`GPT Step` 适合半自动逐步推进，`OpenClaw Auto`
+          适合自治探索并在 checkpoint 接受你的引导。
         </p>
       </div>
 
       <section className="rounded-3xl border border-slate-200 bg-white p-4">
+        <div className="text-sm font-medium text-slate-900">项目概览</div>
+        {props.dashboard ? (
+          <div className="mt-3 space-y-3">
+            <div className="grid grid-cols-2 gap-2">
+              <MetricCard label="任务数" value={String(props.dashboard.task_count)} />
+              <MetricCard label="Collections" value={String(props.dashboard.collection_count)} />
+              <MetricCard label="论文数" value={String(props.dashboard.paper_count)} />
+              <MetricCard label="已保存" value={String(props.dashboard.saved_paper_count)} />
+            </div>
+
+            {props.dashboard.recent_runs.length ? (
+              <div className="rounded-2xl border border-slate-200 bg-slate-50 p-3">
+                <div className="text-xs font-semibold uppercase tracking-[0.16em] text-slate-400">Recent Runs</div>
+                <div className="mt-2 space-y-2">
+                  {props.dashboard.recent_runs.slice(0, 3).map((item) => (
+                    <div key={`${item.task_id}:${item.run_id}`} className="rounded-xl bg-white px-3 py-2">
+                      <div className="text-sm font-medium text-slate-900">{item.topic}</div>
+                      <div className="mt-1 text-xs text-slate-500">
+                        {modeLabel(item.mode)} · {autoStatusLabel(item.auto_status)} · {formatDateTime(item.updated_at)}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            ) : null}
+
+            {props.dashboard.recent_exports.length ? (
+              <div className="rounded-2xl border border-slate-200 bg-slate-50 p-3">
+                <div className="text-xs font-semibold uppercase tracking-[0.16em] text-slate-400">Recent Exports</div>
+                <div className="mt-2 space-y-2">
+                  {props.dashboard.recent_exports.slice(0, 3).map((item) => (
+                    <div key={item.id} className="rounded-xl bg-white px-3 py-2 text-xs text-slate-600">
+                      <div className="font-medium text-slate-900">{item.format.toUpperCase()}</div>
+                      <div className="mt-1">{item.status}</div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            ) : null}
+          </div>
+        ) : (
+          <div className="mt-3 rounded-2xl bg-slate-50 p-3 text-sm text-slate-500">正在读取项目概览…</div>
+        )}
+      </section>
+
+      <section className="mt-4 rounded-3xl border border-slate-200 bg-white p-4">
         <div className="text-sm font-medium text-slate-900">新建研究任务</div>
         <textarea
           className="mt-3 h-28 w-full rounded-2xl border border-slate-200 bg-slate-50 px-3 py-3 text-sm outline-none"
           value={topic}
           onChange={(event) => setTopic(event.target.value)}
-          placeholder="输入你的研究主题，例如：多智能体论文调研系统的架构与交互设计"
+          placeholder="例如：围绕具身智能中的 world model、动作规划和多模态策略学习做一轮调研"
         />
         <div className="mt-3 grid grid-cols-2 gap-2">
           <select className="rounded-2xl border border-slate-200 bg-white px-3 py-2 text-sm" value={mode} onChange={(event) => setMode(event.target.value as TaskMode)}>
@@ -110,33 +166,19 @@ export function ProjectSidebar(props: {
             setTopic("");
           }}
         >
-          在当前项目下创建任务
+          创建研究任务
         </button>
-        {props.actionStatus ? (
-          <div
-            className={`mt-3 rounded-2xl px-3 py-2 text-xs ${
-              props.actionStatus.tone === "success"
-                ? "bg-emerald-50 text-emerald-700"
-                : props.actionStatus.tone === "warning"
-                  ? "bg-amber-50 text-amber-700"
-                  : props.actionStatus.tone === "danger"
-                    ? "bg-rose-50 text-rose-700"
-                    : "bg-slate-50 text-slate-600"
-            }`}
-          >
-            {props.actionStatus.text}
-          </div>
-        ) : null}
+        {props.actionStatus ? <ActionMessage status={props.actionStatus} /> : null}
       </section>
 
       <section className="mt-4 rounded-3xl border border-slate-200 bg-white p-4">
-        <div className="text-sm font-medium text-slate-900">项目分组</div>
+        <div className="text-sm font-medium text-slate-900">项目列表</div>
         <div className="mt-3 flex gap-2">
           <input
             className="flex-1 rounded-2xl border border-slate-200 bg-slate-50 px-3 py-2 text-sm outline-none"
             value={projectName}
             onChange={(event) => setProjectName(event.target.value)}
-            placeholder="新建项目名称"
+            placeholder="输入新的项目名"
           />
           <SmallButton
             tone="solid"
@@ -146,7 +188,7 @@ export function ProjectSidebar(props: {
               setProjectName("");
             }}
           >
-            新建
+            创建
           </SmallButton>
         </div>
         <div className="mt-3 space-y-2">
@@ -172,7 +214,7 @@ export function ProjectSidebar(props: {
 
       <section className="mt-4 rounded-3xl border border-slate-200 bg-white p-4">
         <div className="flex items-center justify-between">
-          <div className="text-sm font-medium text-slate-900">当前项目 Collections</div>
+          <div className="text-sm font-medium text-slate-900">Collections</div>
           {activeProject ? <div className="text-xs text-slate-400">{activeProject.name}</div> : null}
         </div>
         <div className="mt-3 flex gap-2">
@@ -180,7 +222,7 @@ export function ProjectSidebar(props: {
             className="flex-1 rounded-2xl border border-slate-200 bg-slate-50 px-3 py-2 text-sm outline-none"
             value={collectionName}
             onChange={(event) => setCollectionName(event.target.value)}
-            placeholder="新建 collection"
+            placeholder="输入 Collection 名称"
           />
           <SmallButton
             tone="solid"
@@ -190,12 +232,18 @@ export function ProjectSidebar(props: {
               setCollectionName("");
             }}
           >
-            新建
+            创建
           </SmallButton>
         </div>
         <div className="mt-3 flex flex-wrap gap-2">
-          <SmallButton onClick={props.onImportZotero}>导入 Zotero</SmallButton>
-          {props.zoteroConfig?.enabled ? <Badge tone="green">Zotero 已配置</Badge> : <Badge tone="amber">Zotero 未配置</Badge>}
+          <SmallButton onClick={props.onImportZoteroFile}>导入 Zotero 文件</SmallButton>
+          <Badge tone="green">本地导入导出可用</Badge>
+          <Badge tone={props.zoteroConfig?.legacy_web_api_configured ? "blue" : "amber"}>
+            {props.zoteroConfig?.legacy_web_api_configured ? "Zotero Web API 已配置（兼容模式）" : "Zotero Web API 未配置（兼容模式）"}
+          </Badge>
+        </div>
+        <div className="mt-2 text-xs leading-5 text-slate-500">
+          支持导入 `{props.zoteroConfig?.import_formats?.join(" / ") || "CSL JSON / BibTeX"}`，默认导入当前项目；导入后会生成一个新的 collection。
         </div>
         <div className="mt-3 space-y-2">
           {props.collections.map((collection) => (
@@ -212,14 +260,14 @@ export function ProjectSidebar(props: {
               </div>
             </button>
           ))}
-          {!props.collections.length ? <div className="rounded-2xl bg-slate-50 p-3 text-sm text-slate-500">这个项目下还没有 collection。</div> : null}
+          {!props.collections.length ? <div className="rounded-2xl bg-slate-50 p-3 text-sm text-slate-500">当前项目还没有 collection。</div> : null}
         </div>
       </section>
 
       <section className="mt-4 rounded-3xl border border-slate-200 bg-white p-4">
         <div className="flex items-center justify-between">
           <div className="text-sm font-medium text-slate-900">任务列表</div>
-          <div className="text-xs text-slate-400">{props.activeTask ? modeLabel(props.activeTask.mode) : "未选择任务"}</div>
+          <div className="text-xs text-slate-400">{props.activeTask ? modeLabel(props.activeTask.mode) : "未选中任务"}</div>
         </div>
         <div className="mt-3 space-y-2">
           {props.tasks.map((task) => (
@@ -232,7 +280,7 @@ export function ProjectSidebar(props: {
             >
               <div className="text-sm font-medium">{task.topic}</div>
               <div className={`mt-1 text-xs ${task.task_id === props.activeTaskId ? "text-slate-300" : "text-slate-500"}`}>
-                {modeLabel(task.mode)} · 状态 {task.status} · 自动 {autoStatusLabel(task.auto_status)}
+                {modeLabel(task.mode)} · 状态 {task.status} · 自动流 {autoStatusLabel(task.auto_status)}
               </div>
               <div className={`mt-1 text-[11px] ${task.task_id === props.activeTaskId ? "text-slate-400" : "text-slate-400"}`}>
                 {backendLabel(task.llm_backend)}
@@ -240,14 +288,14 @@ export function ProjectSidebar(props: {
               </div>
             </button>
           ))}
-          {!props.tasks.length ? <div className="rounded-2xl bg-slate-50 p-3 text-sm text-slate-500">当前项目下还没有任务。</div> : null}
+          {!props.tasks.length ? <div className="rounded-2xl bg-slate-50 p-3 text-sm text-slate-500">当前项目还没有研究任务。</div> : null}
         </div>
       </section>
 
       <section className="mt-4 rounded-3xl border border-slate-200 bg-white p-4">
         <div className="flex items-center justify-between">
           <div className="text-sm font-medium text-slate-900">快捷动作</div>
-          <div className="text-xs text-slate-400">{props.activeTask ? props.activeTask.task_id : "未选中"}</div>
+          <div className="text-xs text-slate-400">{props.activeTask ? props.activeTask.task_id : "未选中任务"}</div>
         </div>
         <div className="mt-3 grid gap-2 text-sm">
           <SmallButton disabled={!props.activeTask} onClick={() => props.onQuickAction("plan")}>
@@ -264,28 +312,85 @@ export function ProjectSidebar(props: {
           </SmallButton>
           {props.activeTask?.mode === "openclaw_auto" ? (
             <SmallButton tone="solid" onClick={() => props.onQuickAction("auto_start")}>
-              启动自动研究
+              启动 OpenClaw Auto
             </SmallButton>
           ) : null}
         </div>
       </section>
 
       <section className="mt-4 rounded-3xl border border-slate-200 bg-white p-4">
-        <div className="text-sm font-medium text-slate-900">数据源与配置</div>
+        <div className="flex items-center justify-between">
+          <div className="text-sm font-medium text-slate-900">任务导出</div>
+          <div className="text-xs text-slate-400">{props.activeTask ? props.activeTask.task_id : "未选中任务"}</div>
+        </div>
+        <div className="mt-3 flex flex-wrap gap-2">
+          <SmallButton disabled={!props.activeTask} onClick={() => props.onExport("md")}>
+            导出 MD
+          </SmallButton>
+          <SmallButton disabled={!props.activeTask} onClick={() => props.onExport("bib")}>
+            导出 BibTeX
+          </SmallButton>
+          <SmallButton disabled={!props.activeTask} onClick={() => props.onExport("csljson")}>
+            导出 CSL JSON
+          </SmallButton>
+          <SmallButton disabled={!props.activeTask} onClick={() => props.onExport("json")}>
+            导出 JSON
+          </SmallButton>
+        </div>
+        {props.currentExports?.length ? (
+          <div className="mt-3 space-y-2">
+            {props.currentExports.slice(0, 3).map((item) => (
+              <div key={item.id} className="rounded-2xl border border-slate-200 bg-slate-50 p-3 text-xs text-slate-600">
+                <div className="font-medium text-slate-900">
+                  {item.format.toUpperCase()} · {item.status}
+                </div>
+                <div className="mt-1 break-all">{item.output_path || item.error || "暂无导出路径"}</div>
+              </div>
+            ))}
+          </div>
+        ) : null}
+      </section>
+
+      <section className="mt-4 rounded-3xl border border-slate-200 bg-white p-4">
+        <div className="text-sm font-medium text-slate-900">Provider 状态</div>
         <div className="mt-3 flex flex-wrap gap-2">
           {props.config?.provider_status.map((item) => (
-            <Badge key={`${item.role}-${item.key}`} tone={item.configured ? "green" : item.enabled ? "amber" : "slate"}>
-              {item.key} · {item.role}
-            </Badge>
+            <span key={`${item.role}-${item.key}`} title={item.detail || undefined}>
+              <Badge tone={item.configured ? "green" : item.enabled ? "amber" : "slate"}>
+                {item.key} · {item.role}
+              </Badge>
+            </span>
           ))}
         </div>
         <div className="mt-3 space-y-2 text-sm leading-6 text-slate-600">
-          <p>Discovery：{props.config?.discovery_providers.join(" / ") || "-"}</p>
-          <p>Citation：{props.config?.citation_providers.join(" / ") || "-"}</p>
-          <p>GPT 模式请在 `.env` 中填写 `RESEARCH_GPT_API_KEY`。</p>
-          <p>OpenClaw 模式需要 `OPENCLAW_ENABLED=true` 以及本地 gateway 配置。</p>
+          <p>Discovery: {props.config?.discovery_providers.join(" / ") || "-"}</p>
+          <p>Citation: {props.config?.citation_providers.join(" / ") || "-"}</p>
+          <p>GPT API Key 请在 `.env` 中填写 `RESEARCH_GPT_API_KEY`。</p>
+          <p>OpenClaw 兼容模式请按现有 `.env` 中的 `OPENCLAW_*` 配置。</p>
         </div>
       </section>
     </aside>
   );
+}
+
+function MetricCard(props: { label: string; value: string }) {
+  return (
+    <div className="rounded-2xl border border-slate-200 bg-slate-50 p-3">
+      <div className="text-xs text-slate-500">{props.label}</div>
+      <div className="mt-1 text-lg font-semibold text-slate-900">{props.value}</div>
+    </div>
+  );
+}
+
+function ActionMessage(props: { status: ActionStatus }) {
+  const className =
+    props.status.tone === "success"
+      ? "bg-emerald-50 text-emerald-700"
+      : props.status.tone === "warning"
+        ? "bg-amber-50 text-amber-700"
+        : props.status.tone === "danger"
+          ? "bg-rose-50 text-rose-700"
+          : "bg-slate-50 text-slate-600";
+
+  return <div className={`mt-3 rounded-2xl px-3 py-2 text-xs ${className}`}>{props.status.text}</div>;
 }

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, File, HTTPException, Query, Request, UploadFile
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, Request, UploadFile
 from fastapi.responses import FileResponse, HTMLResponse
 from pathlib import Path
 from sqlalchemy.orm import Session
@@ -11,12 +11,16 @@ from app.domain.schemas import (
     ResearchCollectionGraphResponse,
     ResearchCollectionListResponse,
     ResearchCollectionCreateRequest,
+    ResearchCollectionRemoveItemsRequest,
     ResearchCollectionResponse,
     ResearchCollectionSummaryResponse,
     ResearchCollectionStudyRequest,
+    ResearchCompareRequest,
+    ResearchCompareResponse,
     ResearchPaperDetailResponse,
     ResearchPaperAssetResponse,
     ResearchExportResponse,
+    ResearchExportListResponse,
     ResearchAutoRunResponse,
     ResearchCanvasRequest,
     ResearchCanvasResponse,
@@ -47,6 +51,7 @@ from app.domain.schemas import (
     ResearchSearchResponse,
     ResearchSavedPaperListResponse,
     ResearchProjectCreateRequest,
+    ResearchProjectDashboardResponse,
     ResearchProjectListResponse,
     ResearchProjectResponse,
     ResearchTaskCreateRequest,
@@ -153,6 +158,20 @@ def get_project(
     return ResearchProjectResponse(**data)
 
 
+@router.get("/projects/{project_id}/dashboard", response_model=ResearchProjectDashboardResponse)
+def get_project_dashboard(
+    project_id: str,
+    user_id: int = Depends(get_current_user_id),
+    db: Session = Depends(get_db),
+    research_service: ResearchService = Depends(get_research_service),
+) -> ResearchProjectDashboardResponse:
+    try:
+        data = research_service.get_project_dashboard(db, user_id=user_id, project_id=project_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    return ResearchProjectDashboardResponse(**data)
+
+
 @router.get("/projects/{project_id}/collections", response_model=ResearchCollectionListResponse)
 def list_project_collections(
     project_id: str,
@@ -194,12 +213,20 @@ def create_project_collection(
 @router.get("/collections/{collection_id}", response_model=ResearchCollectionResponse)
 def get_collection(
     collection_id: str,
+    offset: int = Query(default=0, ge=0),
+    limit: int = Query(default=50, ge=1, le=200),
     user_id: int = Depends(get_current_user_id),
     db: Session = Depends(get_db),
     research_service: ResearchService = Depends(get_research_service),
 ) -> ResearchCollectionResponse:
     try:
-        data = research_service.get_collection(db, user_id=user_id, collection_id=collection_id)
+        data = research_service.get_collection(
+            db,
+            user_id=user_id,
+            collection_id=collection_id,
+            offset=offset,
+            limit=limit,
+        )
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     return ResearchCollectionResponse(**data)
@@ -230,6 +257,26 @@ def delete_collection_item(
 ) -> ResearchCollectionResponse:
     try:
         data = research_service.remove_collection_item(db, user_id=user_id, collection_id=collection_id, item_id=item_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    return ResearchCollectionResponse(**data)
+
+
+@router.post("/collections/{collection_id}/items/remove", response_model=ResearchCollectionResponse)
+def remove_collection_items(
+    collection_id: str,
+    payload: ResearchCollectionRemoveItemsRequest,
+    user_id: int = Depends(get_current_user_id),
+    db: Session = Depends(get_db),
+    research_service: ResearchService = Depends(get_research_service),
+) -> ResearchCollectionResponse:
+    try:
+        data = research_service.remove_collection_items(
+            db,
+            user_id=user_id,
+            collection_id=collection_id,
+            item_ids=payload.item_ids,
+        )
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     return ResearchCollectionResponse(**data)
@@ -287,6 +334,26 @@ def build_collection_graph(
     return ResearchCollectionGraphResponse(**data)
 
 
+@router.post("/collections/{collection_id}/compare", response_model=ResearchCompareResponse)
+def compare_collection(
+    collection_id: str,
+    payload: ResearchCompareRequest,
+    user_id: int = Depends(get_current_user_id),
+    db: Session = Depends(get_db),
+    research_service: ResearchService = Depends(get_research_service),
+) -> ResearchCompareResponse:
+    try:
+        data = research_service.compare_collection(
+            db,
+            user_id=user_id,
+            collection_id=collection_id,
+            focus=payload.focus,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return ResearchCompareResponse(**data)
+
+
 @router.get("/integrations/zotero/config", response_model=ResearchZoteroConfigResponse)
 def get_zotero_config(
     research_service: ResearchService = Depends(get_research_service),
@@ -319,6 +386,44 @@ def import_zotero_collection(
         project_id=data["project_id"],
         collection=ResearchCollectionResponse(**data["collection"]),
         imported=data["imported"],
+        total_items=data.get("total_items", data["imported"]),
+        imported_items=data.get("imported_items", data["imported"]),
+        deduped_items=data.get("deduped_items", 0),
+        linked_existing_papers=data.get("linked_existing_papers", 0),
+        format=data.get("format"),
+    )
+
+
+@router.post("/integrations/zotero/import-local", response_model=ResearchZoteroImportResponse)
+async def import_zotero_local_file(
+    file: UploadFile = File(...),
+    project_id: str | None = Form(default=None),
+    collection_name: str | None = Form(default=None),
+    user_id: int = Depends(get_current_user_id),
+    db: Session = Depends(get_db),
+    research_service: ResearchService = Depends(get_research_service),
+) -> ResearchZoteroImportResponse:
+    try:
+        content = await file.read()
+        data = research_service.import_zotero_local_file(
+            db,
+            user_id=user_id,
+            project_id=project_id,
+            filename=file.filename or "zotero-import",
+            content=content,
+            collection_name=collection_name,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return ResearchZoteroImportResponse(
+        project_id=data["project_id"],
+        collection=ResearchCollectionResponse(**data["collection"]),
+        imported=data["imported"],
+        total_items=data["total_items"],
+        imported_items=data["imported_items"],
+        deduped_items=data["deduped_items"],
+        linked_existing_papers=data["linked_existing_papers"],
+        format=data["format"],
     )
 
 
@@ -668,6 +773,27 @@ def get_saved_papers(
     return ResearchSavedPaperListResponse(**data)
 
 
+@router.post("/tasks/{task_id}/papers/compare", response_model=ResearchCompareResponse)
+def compare_task_papers(
+    task_id: str,
+    payload: ResearchCompareRequest,
+    user_id: int = Depends(get_current_user_id),
+    db: Session = Depends(get_db),
+    research_service: ResearchService = Depends(get_research_service),
+) -> ResearchCompareResponse:
+    try:
+        data = research_service.compare_task_papers(
+            db,
+            user_id=user_id,
+            task_id=task_id,
+            paper_ids=payload.paper_ids,
+            focus=payload.focus,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return ResearchCompareResponse(**data)
+
+
 @router.get("/tasks/{task_id}/papers/{paper_id:path}/asset")
 def get_paper_asset(
     task_id: str,
@@ -707,6 +833,26 @@ def get_paper_asset_meta(
         )
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
+    return ResearchPaperAssetResponse(**data)
+
+
+@router.post("/tasks/{task_id}/papers/{paper_id:path}/visual/build", response_model=ResearchPaperAssetResponse)
+def rebuild_paper_visual(
+    task_id: str,
+    paper_id: str,
+    user_id: int = Depends(get_current_user_id),
+    db: Session = Depends(get_db),
+    research_service: ResearchService = Depends(get_research_service),
+) -> ResearchPaperAssetResponse:
+    try:
+        data = research_service.rebuild_paper_visual_assets(
+            db,
+            user_id=user_id,
+            task_id=task_id,
+            paper_token=paper_id,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     return ResearchPaperAssetResponse(**data)
 
 
@@ -810,6 +956,49 @@ def export_task(
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     return ResearchExportResponse(task_id=task_id, format=format, path=path)
+
+
+@router.get("/collections/{collection_id}/export", response_model=ResearchExportResponse)
+def export_collection(
+    collection_id: str,
+    format: str = Query(default="bib"),
+    user_id: int = Depends(get_current_user_id),
+    db: Session = Depends(get_db),
+    research_service: ResearchService = Depends(get_research_service),
+) -> ResearchExportResponse:
+    try:
+        path = research_service.export_collection(db, user_id=user_id, collection_id=collection_id, fmt=format)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return ResearchExportResponse(collection_id=collection_id, format=format, path=path)
+
+
+@router.get("/tasks/{task_id}/exports", response_model=ResearchExportListResponse)
+def list_task_exports(
+    task_id: str,
+    user_id: int = Depends(get_current_user_id),
+    db: Session = Depends(get_db),
+    research_service: ResearchService = Depends(get_research_service),
+) -> ResearchExportListResponse:
+    try:
+        data = research_service.list_exports(db, user_id=user_id, task_id=task_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return ResearchExportListResponse(**data)
+
+
+@router.get("/collections/{collection_id}/exports", response_model=ResearchExportListResponse)
+def list_collection_exports(
+    collection_id: str,
+    user_id: int = Depends(get_current_user_id),
+    db: Session = Depends(get_db),
+    research_service: ResearchService = Depends(get_research_service),
+) -> ResearchExportListResponse:
+    try:
+        data = research_service.list_collection_exports(db, user_id=user_id, collection_id=collection_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return ResearchExportListResponse(**data)
 
 
 @router.post("/tasks/{task_id}/fulltext/build", response_model=ResearchFulltextBuildResponse)

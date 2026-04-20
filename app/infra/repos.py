@@ -29,10 +29,13 @@ from app.domain.models import (
     MobileDevice,
     PendingAction,
     ResearchCanvasState,
+    ResearchCompareReport,
     ResearchCollection,
+    ResearchCollectionExportRecord,
     ResearchCollectionItem,
     ResearchCitationFetchCache,
     ResearchDirection,
+    ResearchExportRecord,
     ResearchJob,
     ResearchCitationEdge,
     ResearchGraphSnapshot,
@@ -513,6 +516,20 @@ class ResearchCollectionItemRepo:
         )
         return list(self.db.execute(stmt).scalars().all())
 
+    def list_for_collection_page(self, collection_id: int, *, offset: int = 0, limit: int = 50) -> list[ResearchCollectionItem]:
+        stmt = (
+            select(ResearchCollectionItem)
+            .where(ResearchCollectionItem.collection_id == collection_id)
+            .order_by(ResearchCollectionItem.created_at.asc(), ResearchCollectionItem.id.asc())
+            .offset(max(0, int(offset)))
+            .limit(max(1, min(200, int(limit))))
+        )
+        return list(self.db.execute(stmt).scalars().all())
+
+    def count_for_collection(self, collection_id: int) -> int:
+        stmt = select(func.count(ResearchCollectionItem.id)).where(ResearchCollectionItem.collection_id == collection_id)
+        return int(self.db.execute(stmt).scalar() or 0)
+
     def get_by_id(self, item_id: int) -> ResearchCollectionItem | None:
         return self.db.get(ResearchCollectionItem, item_id)
 
@@ -524,6 +541,139 @@ class ResearchCollectionItemRepo:
     def delete(self, row: ResearchCollectionItem) -> None:
         self.db.delete(row)
         self.db.flush()
+
+    def delete_many(self, rows: list[ResearchCollectionItem]) -> int:
+        deleted = 0
+        for row in rows:
+            self.db.delete(row)
+            deleted += 1
+        self.db.flush()
+        return deleted
+
+
+class ResearchExportRecordRepo:
+    def __init__(self, db: Session):
+        self.db = db
+
+    def create(
+        self,
+        *,
+        task_id: int,
+        project_id: int | None,
+        fmt: str,
+        output_path: str | None,
+        status: str,
+        error: str | None = None,
+    ) -> ResearchExportRecord:
+        row = ResearchExportRecord(
+            task_id=task_id,
+            project_id=project_id,
+            format=(fmt or "md")[:16],
+            output_path=output_path,
+            status=(status or "success")[:16],
+            error=(error[:2000] if error else None),
+            created_at=datetime.now(timezone.utc),
+        )
+        self.db.add(row)
+        self.db.flush()
+        return row
+
+    def list_for_task(self, task_id: int, *, limit: int = 50) -> list[ResearchExportRecord]:
+        stmt = (
+            select(ResearchExportRecord)
+            .where(ResearchExportRecord.task_id == task_id)
+            .order_by(ResearchExportRecord.created_at.desc(), ResearchExportRecord.id.desc())
+            .limit(max(1, min(200, int(limit))))
+        )
+        return list(self.db.execute(stmt).scalars().all())
+
+    def list_recent_for_project(self, project_id: int, *, limit: int = 20) -> list[ResearchExportRecord]:
+        stmt = (
+            select(ResearchExportRecord)
+            .where(ResearchExportRecord.project_id == project_id)
+            .order_by(ResearchExportRecord.created_at.desc(), ResearchExportRecord.id.desc())
+            .limit(max(1, min(200, int(limit))))
+        )
+        return list(self.db.execute(stmt).scalars().all())
+
+
+class ResearchCollectionExportRecordRepo:
+    def __init__(self, db: Session):
+        self.db = db
+
+    def create(
+        self,
+        *,
+        collection_id: int,
+        fmt: str,
+        output_path: str | None,
+        status: str,
+        error: str | None = None,
+    ) -> ResearchCollectionExportRecord:
+        row = ResearchCollectionExportRecord(
+            collection_id=collection_id,
+            format=(fmt or "bib")[:16],
+            output_path=output_path,
+            status=(status or "success")[:16],
+            error=(error[:2000] if error else None),
+            created_at=datetime.now(timezone.utc),
+        )
+        self.db.add(row)
+        self.db.flush()
+        return row
+
+    def list_for_collection(self, collection_id: int, *, limit: int = 50) -> list[ResearchCollectionExportRecord]:
+        stmt = (
+            select(ResearchCollectionExportRecord)
+            .where(ResearchCollectionExportRecord.collection_id == collection_id)
+            .order_by(ResearchCollectionExportRecord.created_at.desc(), ResearchCollectionExportRecord.id.desc())
+            .limit(max(1, min(200, int(limit))))
+        )
+        return list(self.db.execute(stmt).scalars().all())
+
+
+class ResearchCompareReportRepo:
+    def __init__(self, db: Session):
+        self.db = db
+
+    def create(
+        self,
+        *,
+        report_id: str,
+        project_id: int | None,
+        task_id: int | None,
+        collection_id: int | None,
+        scope: str,
+        title: str,
+        focus: str | None,
+        overview: str,
+        common_points: list[str],
+        differences: list[str],
+        recommended_next_steps: list[str],
+        items: list[dict],
+    ) -> ResearchCompareReport:
+        row = ResearchCompareReport(
+            report_id=report_id[:64],
+            project_id=project_id,
+            task_id=task_id,
+            collection_id=collection_id,
+            scope=scope[:32],
+            title=title[:255],
+            focus=(focus or "").strip() or None,
+            overview=overview.strip(),
+            common_points_json=orjson.dumps(common_points or []).decode("utf-8"),
+            differences_json=orjson.dumps(differences or []).decode("utf-8"),
+            recommended_next_steps_json=orjson.dumps(recommended_next_steps or []).decode("utf-8"),
+            items_json=orjson.dumps(items or []).decode("utf-8"),
+            created_at=datetime.now(timezone.utc),
+        )
+        self.db.add(row)
+        self.db.flush()
+        return row
+
+    def get_by_report_id(self, report_id: str) -> ResearchCompareReport | None:
+        stmt = select(ResearchCompareReport).where(ResearchCompareReport.report_id == report_id)
+        return self.db.execute(stmt).scalar_one_or_none()
 
 
 class ResearchCanvasStateRepo:

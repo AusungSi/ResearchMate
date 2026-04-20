@@ -278,6 +278,26 @@ bash scripts/run_research_live_smoke_wsl.sh --scenario all --iterations 2
 bash scripts/run_research_live_smoke_wsl.sh --scenario all --iterations 2 --json-out artifacts/research-live-smoke/all-2x.json
 ```
 
+### 静态展示 Demo 与动态 Showcase
+
+如果你要先准备一套可以直接展示的“具身智能 / Embodied AI”工作区：
+
+```bash
+bash scripts/run_demo_showcase_wsl.sh --mode static --json-out artifacts/demo/showcase-static.json
+```
+
+如果你要现场顺序跑完整动态流程：
+
+```bash
+bash scripts/run_demo_showcase_wsl.sh --mode live --json-out artifacts/demo/showcase-live.json
+```
+
+如果你希望两套都一次准备好：
+
+```bash
+bash scripts/run_demo_showcase_wsl.sh --mode all --json-out artifacts/demo/showcase-all.json
+```
+
 ## 8. 初次启动后建议验证的功能
 
 进入前端之后，建议按这个顺序试：

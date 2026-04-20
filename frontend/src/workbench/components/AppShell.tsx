@@ -3,7 +3,7 @@ import type { ReactNode } from "react";
 
 type ResizeTarget = "left" | "right" | null;
 
-export function AppShell(props: {
+type Props = {
   sidebar: ReactNode;
   canvas: ReactNode;
   detail: ReactNode;
@@ -15,7 +15,9 @@ export function AppShell(props: {
   onToggleRight: () => void;
   onResizeLeft: (width: number) => void;
   onResizeRight: (width: number) => void;
-}) {
+};
+
+export function AppShell(props: Props) {
   useEffect(() => {
     let resizeTarget: ResizeTarget = null;
 

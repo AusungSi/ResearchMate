@@ -15,8 +15,12 @@ describe("RunTimeline", () => {
           total: 2,
           latest_seq: 2,
           phases: [],
+          phase_groups: [],
           latest_checkpoint: null,
           latest_report: null,
+          latest_report_excerpt: null,
+          guidance_history: [],
+          step_cards: [],
           artifacts: [],
         }}
         events={[
@@ -45,7 +49,7 @@ describe("RunTimeline", () => {
 
     expect(screen.getByText("自动研究时间线")).toBeInTheDocument();
     expect(screen.getByText("Checkpoint")).toBeInTheDocument();
-    fireEvent.change(screen.getByPlaceholderText(/Checkpoint 引导/), { target: { value: "请更关注 citation graph" } });
+    fireEvent.change(screen.getByPlaceholderText(/checkpoint 引导/i), { target: { value: "请更关注 citation graph" } });
     fireEvent.click(screen.getByText("提交引导"));
     expect(onGuidance).toHaveBeenCalledWith("请更关注 citation graph");
   });

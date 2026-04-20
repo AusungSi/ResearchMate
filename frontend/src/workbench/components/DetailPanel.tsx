@@ -15,6 +15,7 @@ type Props = {
   onOpenPdf: () => void;
   onSavePaper: () => void;
   onSummarizePaper: () => void;
+  onRebuildVisual: () => void;
   onSearchDirection: (directionIndex: number) => void;
   onStartExplore: (directionIndex: number) => void;
   onBuildGraph: (directionIndex?: number, roundId?: number) => void;
@@ -31,6 +32,21 @@ const ACTION_OPTIONS = [
   { value: "converge", label: "收敛到核心问题" },
 ];
 
+function assetByKind(assets: PaperAssetResponse | null, kind: string) {
+  return assets?.items.find((item) => item.kind === kind && item.status === "available") || null;
+}
+
+function PreviewBox(props: { title: string; url?: string | null; emptyText: string }) {
+  if (!props.url) {
+    return <div className="rounded-2xl border border-dashed border-slate-200 bg-slate-50 p-4 text-sm text-slate-500">{props.emptyText}</div>;
+  }
+  return (
+    <div className="overflow-hidden rounded-2xl border border-slate-200 bg-slate-50">
+      <img src={props.url} alt={props.title} className="h-48 w-full object-contain bg-white" />
+    </div>
+  );
+}
+
 export function DetailPanel(props: Props) {
   const [feedback, setFeedback] = useState("");
   const [nextIntent, setNextIntent] = useState("");
@@ -40,7 +56,10 @@ export function DetailPanel(props: Props) {
   const directionIndex = typeof nodeData?.direction_index === "number" ? nodeData.direction_index : null;
   const roundId = inferRoundId(node?.id || "", nodeData || undefined);
   const isPaper = isPaperNode(node?.id);
-  const primaryPdf = useMemo(() => props.paperAssets?.items.find((item) => item.kind === "pdf" && item.status === "available"), [props.paperAssets]);
+  const pdfAsset = useMemo(() => assetByKind(props.paperAssets, "pdf"), [props.paperAssets]);
+  const figureAsset = useMemo(() => assetByKind(props.paperAssets, "figure"), [props.paperAssets]);
+  const visualAsset = useMemo(() => assetByKind(props.paperAssets, "visual"), [props.paperAssets]);
+  const preferredPreviewUrl = figureAsset?.download_url || visualAsset?.download_url || props.paperDetail?.preview_url || null;
 
   useEffect(() => {
     setFeedback("");
@@ -55,7 +74,7 @@ export function DetailPanel(props: Props) {
         title={nodeData?.label || "请选择一个节点"}
         description={
           node
-            ? "右侧会根据节点类型切换动作面板、局部问答、PDF / 全文和运行日志。"
+            ? "右侧会根据节点类型切换动作面板、局部问答、资产和运行日志。"
             : "选中主题、方向、轮次或论文节点后，这里会显示对应信息。"
         }
       />
@@ -67,6 +86,9 @@ export function DetailPanel(props: Props) {
           {directionIndex ? <Badge tone="green">{`方向 ${directionIndex}`}</Badge> : null}
           {isPaper && props.paperDetail?.year ? <Badge tone="amber">{String(props.paperDetail.year)}</Badge> : null}
           {props.paperDetail?.venue ? <Badge tone="blue">{props.paperDetail.venue}</Badge> : null}
+          {props.paperDetail?.preview_kind ? (
+            <Badge tone="violet">{props.paperDetail.preview_kind === "figure" ? "主图预览" : "展示图预览"}</Badge>
+          ) : null}
         </div>
       ) : null}
 
@@ -96,7 +118,7 @@ export function DetailPanel(props: Props) {
 
       {directionIndex ? (
         <div className="mt-4 rounded-2xl border border-slate-200 bg-white p-3">
-          <div className="text-xs font-semibold uppercase tracking-[0.16em] text-slate-400">Direction Actions</div>
+          <div className="text-xs font-semibold uppercase tracking-[0.16em] text-slate-400">方向动作</div>
           <div className="mt-3 flex flex-wrap gap-2">
             <SmallButton tone="solid" onClick={() => props.onSearchDirection(directionIndex)}>
               检索方向
@@ -109,7 +131,7 @@ export function DetailPanel(props: Props) {
 
       {roundId ? (
         <div className="mt-4 rounded-2xl border border-slate-200 bg-white p-3">
-          <div className="text-xs font-semibold uppercase tracking-[0.16em] text-slate-400">Round Actions</div>
+          <div className="text-xs font-semibold uppercase tracking-[0.16em] text-slate-400">轮次动作</div>
           <select
             className="mt-3 w-full rounded-2xl border border-slate-200 bg-slate-50 px-3 py-2 text-sm"
             value={candidateAction}
@@ -125,11 +147,11 @@ export function DetailPanel(props: Props) {
             className="mt-2 h-20 w-full rounded-2xl border border-slate-200 bg-slate-50 px-3 py-3 text-sm outline-none"
             value={feedback}
             onChange={(event) => setFeedback(event.target.value)}
-            placeholder="补充这一轮的目标、限制条件，或希望扩展的分支..."
+            placeholder="补充这一轮的目标、限制条件，或你希望扩展的分支..."
           />
           <div className="mt-3 flex flex-wrap gap-2">
             <SmallButton tone="solid" onClick={() => props.onProposeCandidates(roundId, candidateAction, feedback)}>
-              生成候选
+              生成候选方向
             </SmallButton>
             <SmallButton onClick={() => props.onBuildGraph(undefined, roundId)}>构建图谱</SmallButton>
           </div>
@@ -167,16 +189,40 @@ export function DetailPanel(props: Props) {
 
       {isPaper ? (
         <div className="mt-4 rounded-2xl border border-slate-200 bg-white p-3">
-          <div className="text-xs font-semibold uppercase tracking-[0.16em] text-slate-400">Paper Actions</div>
+          <div className="text-xs font-semibold uppercase tracking-[0.16em] text-slate-400">论文动作</div>
           <div className="mt-3 flex flex-wrap gap-2">
-            <SmallButton tone="solid" disabled={!primaryPdf} onClick={props.onOpenPdf}>
+            <SmallButton tone="solid" disabled={!pdfAsset} onClick={props.onOpenPdf}>
               Open PDF
             </SmallButton>
             <SmallButton onClick={() => props.onAskPreset("请总结这篇论文的方法、贡献和局限。")}>Ask Model</SmallButton>
             <SmallButton onClick={props.onSavePaper}>Save</SmallButton>
             <SmallButton onClick={props.onSummarizePaper}>生成要点</SmallButton>
+            <SmallButton onClick={props.onRebuildVisual}>重建展示图</SmallButton>
           </div>
-          <div className="mt-3 space-y-2 text-sm text-slate-600">
+
+          <div className="mt-4">
+            <div className="text-xs font-semibold uppercase tracking-[0.16em] text-slate-400">Paper Visual</div>
+            <div className="mt-3 space-y-3">
+              <div>
+                <div className="mb-2 text-sm font-medium text-slate-900">主图 / 展示图预览</div>
+                <PreviewBox title={props.paperDetail?.title || "paper preview"} url={preferredPreviewUrl} emptyText="当前还没有可展示图片。若论文已有 PDF，可以点击“重建展示图”尝试生成。" />
+              </div>
+              <div className="grid gap-3 md:grid-cols-2">
+                <div className="rounded-2xl border border-slate-200 bg-slate-50 p-3">
+                  <div className="text-sm font-medium text-slate-900">Main Figure</div>
+                  <div className="mt-1 text-xs text-slate-500">{figureAsset ? "已提取主图" : "未提取到主图"}</div>
+                </div>
+                <div className="rounded-2xl border border-slate-200 bg-slate-50 p-3">
+                  <div className="text-sm font-medium text-slate-900">Paper Visual</div>
+                  <div className="mt-1 text-xs text-slate-500">
+                    {visualAsset ? "已生成模板展示图" : props.paperDetail?.visual_status || "尚未生成"}
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div className="mt-4 space-y-2 text-sm text-slate-600">
             {props.paperDetail?.doi ? <div>DOI: {props.paperDetail.doi}</div> : null}
             {props.paperDetail?.url ? (
               <a className="text-blue-600 underline underline-offset-2" href={props.paperDetail.url} rel="noreferrer" target="_blank">
@@ -200,6 +246,12 @@ export function DetailPanel(props: Props) {
               </div>
             ) : null}
           </div>
+        </div>
+      ) : null}
+
+      {node && props.mode === "openclaw_auto" ? (
+        <div className="mt-4 rounded-2xl border border-slate-200 bg-slate-50 p-3 text-sm text-slate-600">
+          OpenClaw Auto 模式下，节点问答只处理当前节点上下文，不会接管整条自动研究流程。
         </div>
       ) : null}
     </div>

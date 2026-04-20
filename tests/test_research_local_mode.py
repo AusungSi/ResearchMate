@@ -1,6 +1,10 @@
 from __future__ import annotations
 
 from pathlib import Path
+import struct
+import zlib
+
+import fitz
 
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
@@ -10,15 +14,19 @@ from sqlalchemy.pool import StaticPool
 
 from app.api.research import router as research_router
 from app.core.config import get_settings
+from app.demo.embodied_ai_seed import seed_embodied_ai_demo
 from app.domain.models import Base
 from app.infra.db import get_db
 from app.infra.repos import (
     ResearchDirectionRepo,
     ResearchPaperFulltextRepo,
     ResearchPaperRepo,
+    ResearchRoundPaperRepo,
+    ResearchRoundRepo,
     ResearchSeedPaperRepo,
     ResearchSessionRepo,
     ResearchTaskRepo,
+    UserRepo,
 )
 from app.llm.openclaw_client import LLMCallResult, LLMTaskType
 from app.services.research_service import ResearchService
@@ -77,6 +85,54 @@ def build_client():
 
     app.dependency_overrides[get_db] = override_db
     return TestClient(app), db_session, app.state.research_service
+
+
+def _png_bytes(width: int = 240, height: int = 160, color: tuple[int, int, int] = (46, 109, 246)) -> bytes:
+    r, g, b = color
+    raw = b"".join(b"\x00" + bytes([r, g, b]) * width for _ in range(height))
+    compressed = zlib.compress(raw)
+
+    def chunk(tag: bytes, data: bytes) -> bytes:
+        return (
+            struct.pack(">I", len(data))
+            + tag
+            + data
+            + struct.pack(">I", zlib.crc32(tag + data) & 0xFFFFFFFF)
+        )
+
+    ihdr = struct.pack(">IIBBBBB", width, height, 8, 2, 0, 0, 0)
+    return b"".join(
+        [
+            b"\x89PNG\r\n\x1a\n",
+            chunk(b"IHDR", ihdr),
+            chunk(b"IDAT", compressed),
+            chunk(b"IEND", b""),
+        ]
+    )
+
+
+def _pdf_with_image_bytes() -> bytes:
+    doc = fitz.open()
+    page = doc.new_page(width=612, height=792)
+    page.insert_text((72, 64), "Image PDF", fontsize=18)
+    page.insert_image(fitz.Rect(72, 120, 540, 420), stream=_png_bytes())
+    out = doc.tobytes()
+    doc.close()
+    return out
+
+
+def _pdf_without_image_bytes() -> bytes:
+    doc = fitz.open()
+    page = doc.new_page(width=612, height=792)
+    page.insert_text((72, 72), "Text only PDF for paper visual fallback", fontsize=18)
+    page.insert_textbox(
+        fitz.Rect(72, 120, 520, 420),
+        "This PDF intentionally has no embedded raster figure so the service should fall back to the SVG template visual.",
+        fontsize=12,
+    )
+    out = doc.tobytes()
+    doc.close()
+    return out
 
 
 def test_research_local_without_jwt_supports_canvas_and_node_chat():
@@ -397,6 +453,7 @@ def test_projects_and_collections_support_study_task_creation():
         )
         assert add_item_resp.status_code == 200
         assert add_item_resp.json()["item_count"] == 1
+        assert add_item_resp.json()["items"][0]["task_id"] == source_task["task_id"]
 
         study_resp = client.post(
             f"/api/v1/research/collections/{collection_id}/study",
@@ -412,6 +469,68 @@ def test_projects_and_collections_support_study_task_creation():
         assert study_row is not None
         seed_summary = ResearchSeedPaperRepo(db_session).summary_for_task(study_row.id)
         assert seed_summary["total"] >= 1
+    finally:
+        client.close()
+        db_session.close()
+        settings.app_profile = original_profile
+
+
+def test_embodied_demo_seed_static_workspace_is_readable():
+    settings = get_settings()
+    original_profile = settings.app_profile
+    settings.app_profile = "research_local"
+    client, db_session, service = build_client()
+    try:
+        user = UserRepo(db_session).get_or_create(
+            settings.research_local_user_id,
+            timezone_name=settings.default_timezone,
+            locale=settings.research_local_user_locale,
+        )
+        first = seed_embodied_ai_demo(db_session, user_id=int(user.id), service=service)
+        second = seed_embodied_ai_demo(db_session, user_id=int(user.id), service=service)
+        assert first["initialized"] is True
+        assert second["initialized"] is False
+
+        project_resp = client.get("/api/v1/research/projects")
+        assert project_resp.status_code == 200
+        assert any(item["project_id"] == "demo-embodied-ai" for item in project_resp.json()["items"])
+
+        tasks_resp = client.get("/api/v1/research/tasks")
+        assert tasks_resp.status_code == 200
+        task_ids = {item["task_id"] for item in tasks_resp.json()["items"]}
+        assert "demo-gpt-embodied" in task_ids
+        assert "demo-auto-embodied" in task_ids
+
+        collection_resp = client.get("/api/v1/research/collections/collection-demo-embodied-core")
+        assert collection_resp.status_code == 200
+        collection = collection_resp.json()
+        assert collection["item_count"] >= 4
+        assert {item["task_id"] for item in collection["items"]} == {"demo-gpt-embodied", "demo-auto-embodied"}
+
+        canvas_resp = client.get("/api/v1/research/tasks/demo-gpt-embodied/canvas")
+        assert canvas_resp.status_code == 200
+        canvas = canvas_resp.json()
+        assert any(node["type"] == "report" for node in canvas["nodes"])
+        assert any(edge["data"].get("kind") == "manual" for edge in canvas["edges"])
+
+        exports_resp = client.get("/api/v1/research/tasks/demo-gpt-embodied/exports")
+        assert exports_resp.status_code == 200
+        assert len(exports_resp.json()["items"]) >= 2
+
+        asset_resp = client.get("/api/v1/research/tasks/demo-gpt-embodied/papers/paper:gpt:wm-core/asset/meta")
+        assert asset_resp.status_code == 200
+        asset = asset_resp.json()
+        assert asset["primary_kind"] == "visual"
+        assert any(item["kind"] == "visual" and item["status"] == "available" for item in asset["items"])
+        assert any(item["kind"] == "txt" and item["status"] == "available" for item in asset["items"])
+
+        events_resp = client.get("/api/v1/research/tasks/demo-auto-embodied/runs/run-demo-embodied-auto/events")
+        assert events_resp.status_code == 200
+        summary = events_resp.json()["summary"]
+        assert summary["latest_checkpoint"]["checkpoint_id"] == "cp-embodied-stage-1"
+        assert summary["latest_report_excerpt"]
+        assert len(summary["guidance_history"]) >= 1
+        assert len(summary["artifacts"]) >= 1
     finally:
         client.close()
         db_session.close()
@@ -510,3 +629,340 @@ def test_zotero_import_creates_collection(monkeypatch):
         client.close()
         db_session.close()
         settings.app_profile = original_profile
+
+
+def test_zotero_config_reports_local_first_mode():
+    settings = get_settings()
+    original_profile = settings.app_profile
+    settings.app_profile = "research_local"
+    client, db_session, _service = build_client()
+    try:
+        resp = client.get("/api/v1/research/integrations/zotero/config")
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["mode"] == "local_default"
+        assert body["enabled"] is True
+        assert "csljson" in body["import_formats"]
+        assert "collection" in body["export_targets"]
+    finally:
+        client.close()
+        db_session.close()
+        settings.app_profile = original_profile
+
+
+def test_local_zotero_csljson_import_dedupes_and_exports_collection(tmp_path):
+    settings = get_settings()
+    original_profile = settings.app_profile
+    settings.app_profile = "research_local"
+    settings.research_artifact_dir = str(tmp_path)
+    client, db_session, _service = build_client()
+    try:
+        projects = client.get("/api/v1/research/projects")
+        assert projects.status_code == 200
+        default_project_id = projects.json()["default_project_id"]
+
+        content = """
+[
+  {
+    "id": "item-1",
+    "type": "article-journal",
+    "title": "World Models for Embodied Agents",
+    "author": [{"given": "Ada", "family": "Lovelace"}],
+    "issued": {"date-parts": [[2024]]},
+    "container-title": "Nature Machine Intelligence",
+    "DOI": "10.1000/embodied-1",
+    "URL": "https://example.com/embodied-1",
+    "abstract": "paper abstract",
+    "keyword": ["embodied ai", "world model"]
+  },
+  {
+    "id": "item-2",
+    "type": "article-journal",
+    "title": "World Models for Embodied Agents",
+    "author": [{"given": "Ada", "family": "Lovelace"}],
+    "issued": {"date-parts": [[2024]]},
+    "container-title": "Nature Machine Intelligence",
+    "DOI": "10.1000/embodied-1",
+    "URL": "https://example.com/embodied-1"
+  }
+]
+""".strip()
+
+        import_resp = client.post(
+            "/api/v1/research/integrations/zotero/import-local",
+            data={"project_id": default_project_id, "collection_name": "Local CSL"},
+            files={"file": ("embodied.csljson", content, "application/json")},
+        )
+        assert import_resp.status_code == 200
+        body = import_resp.json()
+        assert body["format"] == "csljson"
+        assert body["total_items"] == 2
+        assert body["imported_items"] == 1
+        assert body["deduped_items"] == 1
+        collection_id = body["collection"]["collection_id"]
+
+        export_bib = client.get(f"/api/v1/research/collections/{collection_id}/export?format=bib")
+        assert export_bib.status_code == 200
+        bib_path = Path(export_bib.json()["path"])
+        assert bib_path.exists()
+        assert "World Models for Embodied Agents" in bib_path.read_text(encoding="utf-8")
+
+        export_csljson = client.get(f"/api/v1/research/collections/{collection_id}/export?format=csljson")
+        assert export_csljson.status_code == 200
+        csljson_path = Path(export_csljson.json()["path"])
+        assert csljson_path.exists()
+        assert '"title": "World Models for Embodied Agents"' in csljson_path.read_text(encoding="utf-8")
+
+        export_history = client.get(f"/api/v1/research/collections/{collection_id}/exports")
+        assert export_history.status_code == 200
+        history_body = export_history.json()
+        assert history_body["collection_id"] == collection_id
+        assert len(history_body["items"]) == 2
+        assert history_body["items"][0]["collection_id"] == collection_id
+        assert history_body["items"][0]["format"] == "csljson"
+        assert history_body["items"][1]["format"] == "bib"
+    finally:
+        client.close()
+        db_session.close()
+        settings.app_profile = original_profile
+
+
+def test_local_zotero_bibtex_import_and_task_csljson_export(tmp_path):
+    settings = get_settings()
+    original_profile = settings.app_profile
+    settings.app_profile = "research_local"
+    settings.research_artifact_dir = str(tmp_path)
+    client, db_session, _service = build_client()
+    try:
+        projects = client.get("/api/v1/research/projects")
+        assert projects.status_code == 200
+        default_project_id = projects.json()["default_project_id"]
+
+        bib = """
+@article{wm2024,
+  title = {Embodied World Models in Practice},
+  author = {Alice Smith and Bob Jones},
+  journal = {Science Robotics},
+  year = {2024},
+  doi = {10.1000/embodied-bib},
+  url = {https://example.com/embodied-bib},
+  abstract = {bib abstract}
+}
+""".strip()
+
+        import_resp = client.post(
+            "/api/v1/research/integrations/zotero/import-local",
+            data={"project_id": default_project_id, "collection_name": "Local Bib"},
+            files={"file": ("embodied.bib", bib, "text/plain")},
+        )
+        assert import_resp.status_code == 200
+        body = import_resp.json()
+        assert body["format"] == "bib"
+        assert body["imported_items"] == 1
+
+        task_resp = client.post(
+            "/api/v1/research/tasks",
+            json={"topic": "export csljson task", "mode": "gpt_step", "llm_backend": "gpt", "llm_model": "gpt-test", "project_id": default_project_id},
+        )
+        assert task_resp.status_code == 200
+        task_row = ResearchTaskRepo(db_session).get_by_task_id(task_resp.json()["task_id"], user_id=1)
+        assert task_row is not None
+        direction = ResearchDirectionRepo(db_session).replace_for_task(
+            task_row,
+            [{"name": "Direction A", "queries": ["q1"], "exclude_terms": []}],
+        )[0]
+        ResearchPaperRepo(db_session).replace_direction_papers(
+            direction,
+            [
+                {
+                    "paper_id": "paper:export-csl",
+                    "title": "Exported CSL JSON Paper",
+                    "title_norm": "exported csl json paper",
+                    "authors": ["Alice Smith", "Bob Jones"],
+                    "year": 2024,
+                    "venue": "Science Robotics",
+                    "doi": "10.1000/export-csl",
+                    "url": "https://example.com/export-csl",
+                    "abstract": "task export abstract",
+                    "method_summary": "method",
+                    "source": "semantic_scholar",
+                }
+            ],
+        )
+
+        export_resp = client.get(f"/api/v1/research/tasks/{task_resp.json()['task_id']}/export?format=csljson")
+        assert export_resp.status_code == 200
+        export_path = Path(export_resp.json()["path"])
+        assert export_path.exists()
+        export_text = export_path.read_text(encoding="utf-8")
+        assert '"title": "Exported CSL JSON Paper"' in export_text
+        assert '"DOI": "10.1000/export-csl"' in export_text
+    finally:
+        client.close()
+        db_session.close()
+        settings.app_profile = original_profile
+
+
+def test_paper_visual_extracts_primary_figure_and_exposes_graph_preview(tmp_path):
+    settings = get_settings()
+    original_profile = settings.app_profile
+    original_artifact_dir = settings.research_artifact_dir
+    settings.app_profile = "research_local"
+    settings.research_artifact_dir = str(tmp_path / "artifacts")
+    client, db_session, _service = build_client()
+    try:
+        create_resp = client.post(
+            "/api/v1/research/tasks",
+            json={"topic": "visual figure task", "mode": "gpt_step", "llm_backend": "gpt", "llm_model": "gpt-test"},
+        )
+        assert create_resp.status_code == 200
+        task_json = create_resp.json()
+        task_row = ResearchTaskRepo(db_session).get_by_task_id(task_json["task_id"], user_id=1)
+        assert task_row is not None
+
+        direction = ResearchDirectionRepo(db_session).replace_for_task(
+            task_row,
+            [{"name": "Direction A", "queries": ["figure"], "exclude_terms": []}],
+        )[0]
+        paper = ResearchPaperRepo(db_session).replace_direction_papers(
+            direction,
+            [
+                {
+                    "paper_id": "paper:visual-figure",
+                    "title": "Figure Rich Paper",
+                    "title_norm": "figure rich paper",
+                    "authors": ["Alice"],
+                    "year": 2025,
+                    "venue": "ICLR",
+                    "doi": "10.1000/figure-rich",
+                    "url": "https://example.com/figure-rich",
+                    "abstract": "paper with image",
+                    "method_summary": "method",
+                    "source": "semantic_scholar",
+                }
+            ],
+        )[0]
+        round_row = ResearchRoundRepo(db_session).create(
+            task_id=task_row.id,
+            direction_index=direction.direction_index,
+            parent_round_id=None,
+            depth=1,
+            action="expand",
+            feedback_text="build preview",
+            query_terms=["figure rich paper"],
+            status="done",
+        )
+        ResearchRoundPaperRepo(db_session).replace_for_round(round_id=round_row.id, rows=[paper], role="seed")
+
+        upload_resp = client.post(
+            f"/api/v1/research/tasks/{task_json['task_id']}/papers/{paper.paper_id}/pdf/upload",
+            files={"file": ("figure-rich.pdf", _pdf_with_image_bytes(), "application/pdf")},
+        )
+        assert upload_resp.status_code == 200
+
+        asset_resp = client.get(f"/api/v1/research/tasks/{task_json['task_id']}/papers/{paper.paper_id}/asset/meta")
+        assert asset_resp.status_code == 200
+        by_kind = {item["kind"]: item for item in asset_resp.json()["items"]}
+        assert by_kind["figure"]["status"] == "available"
+        assert by_kind["figure"]["download_url"].endswith("kind=figure")
+        assert by_kind["figure"]["mime_type"] == "image/png"
+        assert by_kind["visual"]["status"] == "available"
+
+        figure_resp = client.get(f"/api/v1/research/tasks/{task_json['task_id']}/papers/{paper.paper_id}/asset?kind=figure")
+        assert figure_resp.status_code == 200
+        assert figure_resp.headers["content-type"].startswith("image/png")
+
+        graph_resp = client.get(f"/api/v1/research/tasks/{task_json['task_id']}/graph?view=tree&include_papers=true")
+        assert graph_resp.status_code == 200
+        graph_node = next(node for node in graph_resp.json()["nodes"] if node["id"] == paper.paper_id)
+        assert graph_node["preview_kind"] == "figure"
+        assert graph_node["preview_url"].endswith("kind=figure")
+        assert graph_node["visual_status"] == "figure_ready"
+    finally:
+        client.close()
+        db_session.close()
+        settings.app_profile = original_profile
+        settings.research_artifact_dir = original_artifact_dir
+
+
+def test_paper_visual_falls_back_to_template_and_manual_rebuild_is_idempotent(tmp_path):
+    settings = get_settings()
+    original_profile = settings.app_profile
+    original_artifact_dir = settings.research_artifact_dir
+    settings.app_profile = "research_local"
+    settings.research_artifact_dir = str(tmp_path / "artifacts")
+    client, db_session, _service = build_client()
+    try:
+        create_resp = client.post(
+            "/api/v1/research/tasks",
+            json={"topic": "visual fallback task", "mode": "gpt_step", "llm_backend": "gpt", "llm_model": "gpt-test"},
+        )
+        assert create_resp.status_code == 200
+        task_json = create_resp.json()
+        task_row = ResearchTaskRepo(db_session).get_by_task_id(task_json["task_id"], user_id=1)
+        assert task_row is not None
+
+        direction = ResearchDirectionRepo(db_session).replace_for_task(
+            task_row,
+            [{"name": "Direction A", "queries": ["fallback"], "exclude_terms": []}],
+        )[0]
+        paper = ResearchPaperRepo(db_session).replace_direction_papers(
+            direction,
+            [
+                {
+                    "paper_id": "paper:visual-fallback",
+                    "title": "Text Only Paper",
+                    "title_norm": "text only paper",
+                    "authors": ["Bob"],
+                    "year": 2024,
+                    "venue": "ACL",
+                    "doi": "10.1000/text-only",
+                    "url": "https://example.com/text-only",
+                    "abstract": "paper without image",
+                    "method_summary": "method",
+                    "source": "arxiv",
+                }
+            ],
+        )[0]
+        round_row = ResearchRoundRepo(db_session).create(
+            task_id=task_row.id,
+            direction_index=direction.direction_index,
+            parent_round_id=None,
+            depth=1,
+            action="expand",
+            feedback_text="fallback preview",
+            query_terms=["text only paper"],
+            status="done",
+        )
+        ResearchRoundPaperRepo(db_session).replace_for_round(round_id=round_row.id, rows=[paper], role="seed")
+
+        upload_resp = client.post(
+            f"/api/v1/research/tasks/{task_json['task_id']}/papers/{paper.paper_id}/pdf/upload",
+            files={"file": ("text-only.pdf", _pdf_without_image_bytes(), "application/pdf")},
+        )
+        assert upload_resp.status_code == 200
+
+        asset_resp = client.get(f"/api/v1/research/tasks/{task_json['task_id']}/papers/{paper.paper_id}/asset/meta")
+        assert asset_resp.status_code == 200
+        by_kind = {item["kind"]: item for item in asset_resp.json()["items"]}
+        assert by_kind["figure"]["status"] == "missing"
+        assert by_kind["visual"]["status"] == "available"
+        assert by_kind["visual"]["mime_type"] == "image/svg+xml"
+
+        rebuild_one = client.post(f"/api/v1/research/tasks/{task_json['task_id']}/papers/{paper.paper_id}/visual/build")
+        rebuild_two = client.post(f"/api/v1/research/tasks/{task_json['task_id']}/papers/{paper.paper_id}/visual/build")
+        assert rebuild_one.status_code == 200
+        assert rebuild_two.status_code == 200
+        assert rebuild_two.json()["paper_id"] == paper.paper_id
+
+        graph_resp = client.get(f"/api/v1/research/tasks/{task_json['task_id']}/graph?view=tree&include_papers=true")
+        assert graph_resp.status_code == 200
+        graph_node = next(node for node in graph_resp.json()["nodes"] if node["id"] == paper.paper_id)
+        assert graph_node["preview_kind"] == "visual"
+        assert graph_node["preview_url"].endswith("kind=visual")
+        assert graph_node["visual_status"] == "visual_ready"
+    finally:
+        client.close()
+        db_session.close()
+        settings.app_profile = original_profile
+        settings.research_artifact_dir = original_artifact_dir

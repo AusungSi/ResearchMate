@@ -33,8 +33,11 @@ from app.domain.enums import (
     ResearchTaskStatus,
 )
 from app.domain.models import (
+    ResearchCompareReport,
     ResearchCollection,
+    ResearchCollectionExportRecord,
     ResearchCollectionItem,
+    ResearchExportRecord,
     ResearchProject,
     ResearchRound,
     ResearchTask,
@@ -42,11 +45,14 @@ from app.domain.models import (
 )
 from app.infra.repos import (
     ResearchCanvasStateRepo,
+    ResearchCompareReportRepo,
+    ResearchCollectionExportRecordRepo,
     ResearchCollectionItemRepo,
     ResearchCollectionRepo,
     ResearchCitationFetchCacheRepo,
     ResearchCitationEdgeRepo,
     ResearchDirectionRepo,
+    ResearchExportRecordRepo,
     ResearchGraphSnapshotRepo,
     ResearchJobRepo,
     ResearchNodeChatRepo,
@@ -66,6 +72,7 @@ from app.infra.repos import (
 from app.infra.wecom_client import WeComClient
 from app.llm.openclaw_client import LLMCallResult, LLMTaskType, OpenClawClient
 from app.llm.research_llm_gateway import ResearchLLMGateway
+from app.services.paper_visual_service import PaperVisualService
 
 
 logger = get_logger("research")
@@ -103,6 +110,7 @@ class ResearchService:
         self.settings = get_settings()
         self.openclaw_client = openclaw_client or OpenClawClient(settings=self.settings)
         self.llm_gateway = ResearchLLMGateway(settings=self.settings, openclaw_client=self.openclaw_client)
+        self.paper_visual_service = PaperVisualService(settings=self.settings)
         self.wecom_client = wecom_client
         self.research_jobs_total = 0
         self.research_job_latency_ms = 0
@@ -838,6 +846,44 @@ class ResearchService:
         row = self._get_or_create_project(db, user_id=user_id, project_id=project_id)
         return self._project_to_dict(db, row)
 
+    def get_project_dashboard(self, db: Session, *, user_id: int, project_id: str) -> dict:
+        project = self._get_or_create_project(db, user_id=user_id, project_id=project_id)
+        task_rows = ResearchTaskRepo(db).list_recent(user_id=user_id, limit=500, project_id=project.id)
+        collection_rows = ResearchCollectionRepo(db).list_for_project(project.id)
+        paper_count = 0
+        saved_paper_count = 0
+        recent_runs: list[dict] = []
+        for task in task_rows:
+            papers = ResearchPaperRepo(db).list_for_task(task.id)
+            paper_count += len(papers)
+            saved_paper_count += sum(1 for paper in papers if paper.saved)
+            latest_run = ResearchRunEventRepo(db).latest_for_task(task.id)
+            if latest_run:
+                recent_runs.append(
+                    {
+                        "task_id": task.task_id,
+                        "run_id": latest_run.run_id,
+                        "topic": task.topic,
+                        "mode": task.mode.value,
+                        "auto_status": task.auto_status.value,
+                        "updated_at": latest_run.created_at,
+                    }
+                )
+        recent_runs.sort(key=lambda item: item["updated_at"], reverse=True)
+        workbench_config = self.get_workbench_config()
+        return {
+            "project": self._project_to_dict(db, project),
+            "task_count": len(task_rows),
+            "collection_count": len(collection_rows),
+            "paper_count": paper_count,
+            "saved_paper_count": saved_paper_count,
+            "recent_tasks": [self._task_to_dict(db, row) for row in task_rows[:5]],
+            "recent_runs": recent_runs[:8],
+            "provider_status": workbench_config["provider_status"],
+            "recent_exports": [self._export_record_to_dict(row) for row in ResearchExportRecordRepo(db).list_recent_for_project(project.id, limit=8)],
+            "recent_collections": [self._collection_to_dict(db, row, include_items=False) for row in collection_rows[:6]],
+        }
+
     def list_collections(self, db: Session, *, user_id: int, project_id: str) -> dict:
         project = self._get_or_create_project(db, user_id=user_id, project_id=project_id)
         rows = ResearchCollectionRepo(db).list_for_project(project.id)
@@ -869,60 +915,25 @@ class ResearchService:
         ResearchCollectionRepo(db).create(row)
         return self._collection_to_dict(db, row)
 
-    def get_collection(self, db: Session, *, user_id: int, collection_id: str) -> dict:
+    def get_collection(
+        self,
+        db: Session,
+        *,
+        user_id: int,
+        collection_id: str,
+        offset: int = 0,
+        limit: int = 50,
+    ) -> dict:
         row = ResearchCollectionRepo(db).get_by_collection_id(user_id=user_id, collection_id=collection_id)
         if not row:
             raise ValueError("collection not found")
-        return self._collection_to_dict(db, row)
+        return self._collection_to_dict(db, row, offset=offset, limit=limit)
 
     def add_collection_items(self, db: Session, *, user_id: int, collection_id: str, items: list[dict]) -> dict:
         collection = ResearchCollectionRepo(db).get_by_collection_id(user_id=user_id, collection_id=collection_id)
         if not collection:
             raise ValueError("collection not found")
-        item_repo = ResearchCollectionItemRepo(db)
-        existing = item_repo.list_for_collection(collection.id)
-        existing_keys = {
-            (
-                (item.paper_id or "").strip().lower(),
-                (item.doi or "").strip().lower(),
-                (item.title_norm or "").strip().lower(),
-            )
-            for item in existing
-        }
-
-        for payload in items:
-            normalized = self._resolve_collection_item_payload(db, collection=collection, payload=payload)
-            key = (
-                (normalized.get("paper_id") or "").strip().lower(),
-                (normalized.get("doi") or "").strip().lower(),
-                (normalized.get("title_norm") or "").strip().lower(),
-            )
-            if key in existing_keys:
-                continue
-            now = datetime.now(timezone.utc)
-            row = ResearchCollectionItem(
-                collection_id=collection.id,
-                source_task_id=normalized.get("source_task_id"),
-                paper_id=normalized.get("paper_id"),
-                doi=normalized.get("doi"),
-                title=normalized["title"],
-                title_norm=normalized["title_norm"],
-                authors_json=orjson.dumps(normalized.get("authors") or []).decode("utf-8"),
-                year=normalized.get("year"),
-                venue=normalized.get("venue"),
-                url=normalized.get("url"),
-                source=normalized.get("source") or "manual",
-                metadata_json=orjson.dumps(normalized.get("metadata") or {}).decode("utf-8"),
-                created_at=now,
-                updated_at=now,
-            )
-            item_repo.create(row)
-            existing_keys.add(key)
-
-        collection.updated_at = datetime.now(timezone.utc)
-        db.add(collection)
-        db.flush()
-        return self._collection_to_dict(db, collection)
+        return self._add_collection_items_with_stats(db, collection=collection, items=items)["collection"]
 
     def remove_collection_item(self, db: Session, *, user_id: int, collection_id: str, item_id: int) -> dict:
         collection = ResearchCollectionRepo(db).get_by_collection_id(user_id=user_id, collection_id=collection_id)
@@ -932,6 +943,23 @@ class ResearchService:
         if not row or row.collection_id != collection.id:
             raise ValueError("collection item not found")
         ResearchCollectionItemRepo(db).delete(row)
+        collection.updated_at = datetime.now(timezone.utc)
+        db.add(collection)
+        db.flush()
+        return self._collection_to_dict(db, collection)
+
+    def remove_collection_items(self, db: Session, *, user_id: int, collection_id: str, item_ids: list[int]) -> dict:
+        collection = ResearchCollectionRepo(db).get_by_collection_id(user_id=user_id, collection_id=collection_id)
+        if not collection:
+            raise ValueError("collection not found")
+        item_repo = ResearchCollectionItemRepo(db)
+        rows = []
+        for item_id in item_ids:
+            row = item_repo.get_by_id(int(item_id))
+            if row and row.collection_id == collection.id:
+                rows.append(row)
+        if rows:
+            item_repo.delete_many(rows)
         collection.updated_at = datetime.now(timezone.utc)
         db.add(collection)
         db.flush()
@@ -1040,9 +1068,91 @@ class ResearchService:
             "stats": {"node_count": len(nodes), "edge_count": len(edges), "item_count": len(items)},
         }
 
-    def get_zotero_config(self) -> dict:
+    def compare_task_papers(
+        self,
+        db: Session,
+        *,
+        user_id: int,
+        task_id: str,
+        paper_ids: list[str],
+        focus: str | None = None,
+    ) -> dict:
+        task = self.switch_task(db, user_id=user_id, task_id=task_id, remember_active=False)
+        if len(paper_ids) < 2:
+            raise ValueError("at least two papers are required for compare")
+        papers = []
+        for paper_id in paper_ids:
+            paper = ResearchPaperRepo(db).get_by_token(task.id, paper_id)
+            if paper:
+                papers.append(paper)
+        if len(papers) < 2:
+            raise ValueError("at least two valid papers are required for compare")
+        report = self._build_compare_report(
+            db,
+            project_id=task.project_id,
+            task=task,
+            collection=None,
+            scope="task_papers",
+            title=f"{task.topic} 论文对比",
+            focus=focus,
+            items=[self._paper_compare_item(paper) for paper in papers],
+            llm_backend=task.llm_backend.value,
+            llm_model=task.llm_model,
+        )
+        return self._compare_report_to_dict(report)
+
+    def compare_collection(self, db: Session, *, user_id: int, collection_id: str, focus: str | None = None) -> dict:
+        collection = ResearchCollectionRepo(db).get_by_collection_id(user_id=user_id, collection_id=collection_id)
+        if not collection:
+            raise ValueError("collection not found")
+        items = ResearchCollectionItemRepo(db).list_for_collection(collection.id)
+        if len(items) < 2:
+            raise ValueError("collection needs at least two papers for compare")
+        recent_tasks = ResearchTaskRepo(db).list_recent(user_id=collection.project.user_id, project_id=collection.project_id, limit=1)
+        backend = recent_tasks[0].llm_backend.value if recent_tasks else ResearchLLMBackend.GPT.value
+        model = recent_tasks[0].llm_model if recent_tasks else (self.settings.research_gpt_model or None)
+        report = self._build_compare_report(
+            db,
+            project_id=collection.project_id,
+            task=None,
+            collection=collection,
+            scope="collection",
+            title=f"{collection.name} 集合对比",
+            focus=focus,
+            items=[self._collection_compare_item(item) for item in items],
+            llm_backend=backend,
+            llm_model=model,
+        )
+        return self._compare_report_to_dict(report)
+
+    def list_exports(self, db: Session, *, user_id: int, task_id: str) -> dict:
+        task = self.switch_task(db, user_id=user_id, task_id=task_id, remember_active=False)
+        rows = ResearchExportRecordRepo(db).list_for_task(task.id, limit=50)
         return {
-            "enabled": bool(self.settings.zotero_base_url and (self.settings.zotero_library_id or self.settings.zotero_api_key)),
+            "task_id": task.task_id,
+            "items": [self._export_record_to_dict(row) for row in rows],
+        }
+
+    def list_collection_exports(self, db: Session, *, user_id: int, collection_id: str) -> dict:
+        collection = ResearchCollectionRepo(db).get_by_collection_id(user_id=user_id, collection_id=collection_id)
+        if not collection:
+            raise ValueError("collection not found")
+        rows = ResearchCollectionExportRecordRepo(db).list_for_collection(collection.id, limit=50)
+        return {
+            "collection_id": collection.collection_id,
+            "items": [self._export_record_to_dict(row) for row in rows],
+        }
+
+    def get_zotero_config(self) -> dict:
+        legacy_enabled = bool(self.settings.zotero_base_url)
+        legacy_configured = bool(self.settings.zotero_base_url and self.settings.zotero_library_id.strip())
+        return {
+            "enabled": True,
+            "mode": "local_default",
+            "import_formats": ["csljson", "bib"],
+            "export_targets": ["task", "collection"],
+            "legacy_web_api_enabled": legacy_enabled,
+            "legacy_web_api_configured": legacy_configured,
             "base_url": self.settings.zotero_base_url,
             "library_type": self.settings.zotero_library_type,
             "library_id": self.settings.zotero_library_id or None,
@@ -1109,13 +1219,63 @@ class ResearchService:
         raw_items = items_resp if isinstance(items_resp, list) else []
         normalized_items = [self._normalize_zotero_item(item) for item in raw_items]
         normalized_items = [item for item in normalized_items if item]
-        updated = self.add_collection_items(
+        stats = self._add_collection_items_with_stats(
             db,
-            user_id=user_id,
-            collection_id=collection["collection_id"],
+            collection=ResearchCollectionRepo(db).get_by_collection_id(user_id=user_id, collection_id=collection["collection_id"]),
             items=normalized_items,
         )
-        return {"project_id": project.project_key, "collection": updated, "imported": len(normalized_items)}
+        return {
+            "project_id": project.project_key,
+            "collection": stats["collection"],
+            "imported": stats["imported_items"],
+            "total_items": len(normalized_items),
+            "imported_items": stats["imported_items"],
+            "deduped_items": stats["deduped_items"],
+            "linked_existing_papers": stats["linked_existing_papers"],
+            "format": "legacy_web_api",
+        }
+
+    def import_zotero_local_file(
+        self,
+        db: Session,
+        *,
+        user_id: int,
+        project_id: str | None,
+        filename: str,
+        content: bytes,
+        collection_name: str | None = None,
+    ) -> dict:
+        if not content:
+            raise ValueError("uploaded file is empty")
+        fmt = self._detect_zotero_import_format(filename=filename, content=content)
+        payloads = self._parse_zotero_local_file(filename=filename, content=content, fmt=fmt)
+        if not payloads:
+            raise ValueError("no importable items found in file")
+        project = self._get_or_create_project(db, user_id=user_id, project_id=project_id)
+        target_name = (collection_name or "").strip() or Path(filename or "zotero-import").stem or "Zotero Import"
+        collection = self.create_collection(
+            db,
+            user_id=user_id,
+            project_id=project.project_key,
+            name=target_name,
+            description="Imported from local Zotero export",
+            source_type="zotero_local",
+            source_ref=(filename or "").strip() or None,
+        )
+        collection_row = ResearchCollectionRepo(db).get_by_collection_id(user_id=user_id, collection_id=collection["collection_id"])
+        if not collection_row:
+            raise ValueError("collection not found after creation")
+        stats = self._add_collection_items_with_stats(db, collection=collection_row, items=payloads)
+        return {
+            "project_id": project.project_key,
+            "collection": stats["collection"],
+            "imported": stats["imported_items"],
+            "total_items": len(payloads),
+            "imported_items": stats["imported_items"],
+            "deduped_items": stats["deduped_items"],
+            "linked_existing_papers": stats["linked_existing_papers"],
+            "format": fmt,
+        }
 
     def list_tasks(self, db: Session, *, user_id: int, limit: int = 10, project_id: str | None = None) -> list[dict]:
         project_row = self._get_or_create_project(db, user_id=user_id, project_id=project_id) if project_id else None
@@ -1186,6 +1346,20 @@ class ResearchService:
                 "enabled": True,
                 "configured": bool(self.settings.zotero_library_id.strip()),
                 "detail": "Import only",
+            },
+            {
+                "key": "paper_visual",
+                "role": "visual",
+                "enabled": True,
+                "configured": True,
+                "detail": f"{self.settings.paper_visual_provider.title()} fallback",
+            },
+            {
+                "key": "diffusion",
+                "role": "visual",
+                "enabled": bool(self.settings.paper_visual_diffusion_enabled),
+                "configured": bool(self.settings.paper_visual_diffusion_base_url.strip()),
+                "detail": "Reserved provider",
             },
         ]
         return {
@@ -1335,12 +1509,18 @@ class ResearchService:
             candidates = [fulltext.pdf_path if fulltext else None]
         elif kind_norm in {"txt", "fulltext"}:
             candidates = [fulltext.text_path if fulltext else None]
+        elif kind_norm == "figure":
+            candidates = [self._paper_visual_assets(task=task, paper=paper, fulltext=fulltext).get("figure", {}).get("path")]
+        elif kind_norm == "visual":
+            candidates = [self._paper_visual_assets(task=task, paper=paper, fulltext=fulltext).get("visual", {}).get("path")]
         elif kind_norm in {"md", "markdown"}:
             candidates = [paper.saved_path]
         elif kind_norm == "bib":
             candidates = [paper.saved_bib_path]
         else:
             candidates = [
+                self._paper_visual_assets(task=task, paper=paper, fulltext=fulltext).get("figure", {}).get("path"),
+                self._paper_visual_assets(task=task, paper=paper, fulltext=fulltext).get("visual", {}).get("path"),
                 fulltext.pdf_path if fulltext else None,
                 fulltext.text_path if fulltext else None,
                 paper.saved_path,
@@ -1365,25 +1545,33 @@ class ResearchService:
             raise ValueError("paper not found")
         fulltext = ResearchPaperFulltextRepo(db).get(task.id, _paper_token(paper))
         items = []
-        for kind, path_value in (
-            ("pdf", fulltext.pdf_path if fulltext else None),
-            ("txt", fulltext.text_path if fulltext else None),
-            ("md", paper.saved_path),
-            ("bib", paper.saved_bib_path),
-        ):
-            path_text = str(path_value).strip() if path_value else None
-            exists = bool(path_text and Path(path_text).exists())
+        visual_assets = self._paper_visual_assets(task=task, paper=paper, fulltext=fulltext)
+        static_assets = {
+            "figure": visual_assets.get("figure"),
+            "visual": visual_assets.get("visual"),
+            "pdf": self._basic_asset_metadata(kind="pdf", path_value=fulltext.pdf_path if fulltext else None),
+            "txt": self._basic_asset_metadata(kind="txt", path_value=fulltext.text_path if fulltext else None),
+            "md": self._basic_asset_metadata(kind="md", path_value=paper.saved_path),
+            "bib": self._basic_asset_metadata(kind="bib", path_value=paper.saved_bib_path),
+        }
+        for kind in ("figure", "visual", "pdf", "txt", "md", "bib"):
+            item = static_assets.get(kind) or {"kind": kind, "status": "missing"}
+            exists = item.get("status") == "available"
             items.append(
                 {
                     "kind": kind,
                     "status": "available" if exists else "missing",
-                    "filename": Path(path_text).name if exists and path_text else None,
-                    "path": path_text if exists else None,
+                    "filename": item.get("filename"),
+                    "path": item.get("path"),
                     "download_url": (
                         f"/api/v1/research/tasks/{quote_plus(task.task_id)}/papers/{quote_plus(paper_token)}/asset?kind={kind}"
                         if exists
                         else None
                     ),
+                    "mime_type": item.get("mime_type"),
+                    "width": item.get("width"),
+                    "height": item.get("height"),
+                    "source": item.get("source"),
                 }
             )
         primary = next((item["kind"] for item in items if item["status"] == "available"), None)
@@ -1393,6 +1581,22 @@ class ResearchService:
             "primary_kind": primary,
             "items": items,
         }
+
+    def rebuild_paper_visual_assets(
+        self,
+        db: Session,
+        *,
+        user_id: int,
+        task_id: str,
+        paper_token: str,
+    ) -> dict:
+        task = self.switch_task(db, user_id=user_id, task_id=task_id)
+        paper = ResearchPaperRepo(db).get_by_token(task.id, paper_token)
+        if not paper:
+            raise ValueError("paper not found")
+        fulltext = ResearchPaperFulltextRepo(db).get(task.id, _paper_token(paper))
+        self._build_paper_visual_assets(task=task, paper=paper, fulltext=fulltext)
+        return self.get_paper_assets(db, user_id=user_id, task_id=task_id, paper_token=paper_token)
 
     def start_auto_research(self, db: Session, *, user_id: int, task_id: str) -> dict:
         task = self.switch_task(db, user_id=user_id, task_id=task_id)
@@ -1589,6 +1793,7 @@ class ResearchService:
             fetched_at=datetime.now(timezone.utc),
             parsed_at=datetime.now(timezone.utc),
         )
+        self._safe_build_paper_visual_assets(task=task, paper=paper, fulltext=row)
         return {
             "paper_id": row.paper_id,
             "status": row.status.value,
@@ -1611,6 +1816,7 @@ class ResearchService:
             raise ValueError("paper not found")
         paper_id = _paper_token(paper)
         fulltext = ResearchPaperFulltextRepo(db).get(task.id, paper_id)
+        preview = self._paper_visual_preview(task=task, paper=paper, fulltext=fulltext)
         return {
             "task_id": task.task_id,
             "paper_id": paper_id,
@@ -1633,6 +1839,116 @@ class ResearchService:
             "key_points": paper.key_points,
             "key_points_error": paper.key_points_error,
             "key_points_updated_at": paper.key_points_updated_at,
+            "preview_kind": preview.get("preview_kind"),
+            "preview_url": preview.get("preview_url"),
+            "visual_status": preview.get("visual_status"),
+        }
+
+    def _basic_asset_metadata(self, *, kind: str, path_value: str | None) -> dict:
+        path_text = str(path_value).strip() if path_value else None
+        exists = bool(path_text and Path(path_text).exists())
+        mime_map = {
+            "pdf": "application/pdf",
+            "txt": "text/plain; charset=utf-8",
+            "md": "text/markdown; charset=utf-8",
+            "bib": "application/x-bibtex",
+        }
+        return {
+            "kind": kind,
+            "status": "available" if exists else "missing",
+            "filename": Path(path_text).name if exists and path_text else None,
+            "path": path_text if exists else None,
+            "mime_type": mime_map.get(kind),
+            "width": None,
+            "height": None,
+            "source": None,
+        }
+
+    def _build_paper_visual_assets(self, *, task: ResearchTask, paper, fulltext) -> dict:
+        return self.paper_visual_service.build_assets(
+            artifact_root=Path(self.settings.research_artifact_dir),
+            task_id=task.task_id,
+            paper_token=_paper_token(paper),
+            pdf_path=(fulltext.pdf_path if fulltext else None),
+            title=paper.title,
+            authors=_load_json_list(paper.authors_json),
+            year=paper.year,
+            venue=paper.venue,
+            source=paper.source,
+            abstract=paper.key_points or paper.abstract,
+            key_points=paper.key_points,
+        )
+
+    def _safe_build_paper_visual_assets(self, *, task: ResearchTask, paper, fulltext) -> None:
+        try:
+            self._build_paper_visual_assets(task=task, paper=paper, fulltext=fulltext)
+        except Exception:
+            logger.exception("paper_visual_build_failed task_id=%s paper_id=%s", task.task_id, _paper_token(paper))
+
+    def _paper_visual_assets(self, *, task: ResearchTask, paper, fulltext) -> dict:
+        assets = self.paper_visual_service.inspect_assets(
+            artifact_root=Path(self.settings.research_artifact_dir),
+            task_id=task.task_id,
+            paper_token=_paper_token(paper),
+        )
+        out: dict[str, dict] = {}
+        for kind, asset in assets.items():
+            out[kind] = {
+                "kind": asset.kind,
+                "status": "available",
+                "filename": Path(asset.path).name,
+                "path": asset.path,
+                "mime_type": asset.mime_type,
+                "width": asset.width,
+                "height": asset.height,
+                "source": asset.source,
+            }
+        return out
+
+    def _paper_visual_preview(self, *, task: ResearchTask, paper, fulltext) -> dict:
+        assets = self._paper_visual_assets(task=task, paper=paper, fulltext=fulltext)
+        preview_kind = None
+        preview_url = None
+        visual_status = "missing"
+        for kind in ("figure", "visual"):
+            item = assets.get(kind)
+            if item and item.get("status") == "available":
+                preview_kind = kind
+                preview_url = (
+                    f"/api/v1/research/tasks/{quote_plus(task.task_id)}/papers/{quote_plus(_paper_token(paper))}/asset?kind={kind}"
+                )
+                visual_status = "figure_ready" if kind == "figure" else "visual_ready"
+                break
+        if preview_kind is None and fulltext and fulltext.pdf_path and Path(fulltext.pdf_path).exists():
+            visual_status = "needs_build"
+        return {
+            "preview_kind": preview_kind,
+            "preview_url": preview_url,
+            "visual_status": visual_status,
+        }
+
+    def _paper_graph_node(self, *, task: ResearchTask, paper, direction_index: int | None, fulltext) -> dict:
+        preview = self._paper_visual_preview(task=task, paper=paper, fulltext=fulltext)
+        return {
+            "id": _paper_token(paper),
+            "paper_id": _paper_token(paper),
+            "type": "paper",
+            "label": paper.title[:240],
+            "year": paper.year,
+            "source": paper.source,
+            "venue": paper.venue,
+            "doi": paper.doi,
+            "url": paper.url,
+            "abstract": paper.abstract,
+            "method_summary": paper.method_summary,
+            "authors": _load_json_list(paper.authors_json),
+            "direction_index": direction_index,
+            "fulltext_status": fulltext.status.value if fulltext else None,
+            "saved": bool(paper.saved),
+            "key_points_status": paper.key_points_status,
+            "preview_kind": preview.get("preview_kind"),
+            "preview_url": preview.get("preview_url"),
+            "visual_status": preview.get("visual_status"),
         }
 
     def list_saved_papers(
@@ -1891,8 +2207,9 @@ class ResearchService:
 
     def export_task(self, db: Session, *, user_id: int, fmt: str = "md") -> str:
         fmt_norm = (fmt or "md").lower().strip()
-        if fmt_norm not in {"md", "bib", "json"}:
-            raise ValueError("format must be one of md|bib|json")
+        if fmt_norm not in {"md", "bib", "json", "csljson"}:
+            raise ValueError("format must be one of md|bib|json|csljson")
+        task: ResearchTask | None = None
         try:
             task = self.get_active_task(db, user_id)
             if not task:
@@ -1905,20 +2222,97 @@ class ResearchService:
             report_path = base / "report.md"
             bib_path = base / "papers.bib"
             json_path = base / "papers.json"
+            csljson_path = base / "papers.csljson"
             report_path.write_text(self._render_report(task, directions, papers), encoding="utf-8")
             bib_path.write_text(self._render_bib(papers), encoding="utf-8")
             json_path.write_text(self._render_json(task, directions, papers), encoding="utf-8")
+            csljson_path.write_text(self._render_csljson_from_papers(papers), encoding="utf-8")
 
             if fmt_norm == "bib":
                 self._record_export_metric(success=True)
+                ResearchExportRecordRepo(db).create(
+                    task_id=task.id,
+                    project_id=task.project_id,
+                    fmt=fmt_norm,
+                    output_path=str(bib_path),
+                    status="success",
+                )
                 return str(bib_path)
+            if fmt_norm == "csljson":
+                self._record_export_metric(success=True)
+                ResearchExportRecordRepo(db).create(
+                    task_id=task.id,
+                    project_id=task.project_id,
+                    fmt=fmt_norm,
+                    output_path=str(csljson_path),
+                    status="success",
+                )
+                return str(csljson_path)
             if fmt_norm == "json":
                 self._record_export_metric(success=True)
+                ResearchExportRecordRepo(db).create(
+                    task_id=task.id,
+                    project_id=task.project_id,
+                    fmt=fmt_norm,
+                    output_path=str(json_path),
+                    status="success",
+                )
                 return str(json_path)
             self._record_export_metric(success=True)
+            ResearchExportRecordRepo(db).create(
+                task_id=task.id,
+                project_id=task.project_id,
+                fmt=fmt_norm,
+                output_path=str(report_path),
+                status="success",
+            )
             return str(report_path)
-        except Exception:
+        except Exception as exc:
             self._record_export_metric(success=False)
+            if task is not None:
+                ResearchExportRecordRepo(db).create(
+                    task_id=task.id,
+                    project_id=task.project_id,
+                    fmt=fmt_norm,
+                    output_path=None,
+                    status="failed",
+                    error=str(exc),
+                )
+            raise
+
+    def export_collection(self, db: Session, *, user_id: int, collection_id: str, fmt: str = "bib") -> str:
+        fmt_norm = (fmt or "bib").lower().strip()
+        if fmt_norm not in {"bib", "csljson"}:
+            raise ValueError("format must be one of bib|csljson")
+        collection = ResearchCollectionRepo(db).get_by_collection_id(user_id=user_id, collection_id=collection_id)
+        if not collection:
+            raise ValueError("collection not found")
+        try:
+            items = ResearchCollectionItemRepo(db).list_for_collection(collection.id)
+            if not items:
+                raise ValueError("collection is empty")
+            base = Path(self.settings.research_artifact_dir).expanduser().resolve() / "collections" / collection.collection_id
+            base.mkdir(parents=True, exist_ok=True)
+            bib_path = base / "collection.bib"
+            csljson_path = base / "collection.csljson"
+            bib_path.write_text(self._render_bib_from_collection_items(items), encoding="utf-8")
+            csljson_path.write_text(self._render_csljson_from_collection_items(items), encoding="utf-8")
+            output_path = str(csljson_path if fmt_norm == "csljson" else bib_path)
+            ResearchCollectionExportRecordRepo(db).create(
+                collection_id=collection.id,
+                fmt=fmt_norm,
+                output_path=output_path,
+                status="success",
+            )
+            return output_path
+        except Exception as exc:
+            ResearchCollectionExportRecordRepo(db).create(
+                collection_id=collection.id,
+                fmt=fmt_norm,
+                output_path=None,
+                status="failed",
+                error=str(exc),
+            )
             raise
 
     def _run_plan_job(
@@ -2140,6 +2534,8 @@ class ResearchService:
                     fetched_at=fetched_at,
                     parsed_at=datetime.now(timezone.utc),
                 )
+                current = fulltext_repo.get(task.id, paper_id)
+                self._safe_build_paper_visual_assets(task=task, paper=paper, fulltext=current)
             except Exception as exc:
                 fulltext_repo.upsert(
                     task_id=task.id,
@@ -2222,7 +2618,7 @@ class ResearchService:
 
         paper_repo = ResearchPaperRepo(db)
         fulltext_map = {
-            row.paper_id: row.status.value
+            row.paper_id: row
             for row in ResearchPaperFulltextRepo(db).list_for_task(task.id)
         }
         direction_repo = ResearchDirectionRepo(db)
@@ -2288,6 +2684,7 @@ class ResearchService:
         for paper in seed_papers:
             p_id = _paper_token(paper)
             direction_idx = direction_by_id.get(paper.direction_id).direction_index if paper.direction_id in direction_by_id else None
+            preview = self._paper_visual_preview(task=task, paper=paper, fulltext=fulltext_map.get(p_id))
             nodes[p_id] = {
                 "id": p_id,
                 "type": "paper",
@@ -2296,7 +2693,10 @@ class ResearchService:
                 "source": paper.source,
                 "direction_index": direction_idx,
                 "score": None,
-                "fulltext_status": fulltext_map.get(p_id),
+                "fulltext_status": fulltext_map.get(p_id).status.value if fulltext_map.get(p_id) else None,
+                "preview_kind": preview.get("preview_kind"),
+                "preview_url": preview.get("preview_url"),
+                "visual_status": preview.get("visual_status"),
             }
             if direction_idx is not None:
                 d_node_id = f"direction:{task.task_id}:{direction_idx}"
@@ -2332,7 +2732,10 @@ class ResearchService:
                         "source": str(item.get("source") or "semantic_scholar"),
                         "direction_index": direction_idx,
                         "score": None,
-                        "fulltext_status": fulltext_map.get(n_id),
+                        "fulltext_status": fulltext_map.get(n_id).status.value if fulltext_map.get(n_id) else None,
+                        "preview_kind": None,
+                        "preview_url": None,
+                        "visual_status": "missing",
                     }
                 src = str(item.get("source_id") or "").strip()
                 dst = str(item.get("target_id") or "").strip()
@@ -2645,6 +3048,7 @@ class ResearchService:
         message: str,
         status: str,
         details: dict | None = None,
+        result_refs: dict | None = None,
     ) -> dict:
         return self._emit_run_event(
             db,
@@ -2658,6 +3062,7 @@ class ResearchService:
                 "message": message,
                 "status": status,
                 "details": details or {},
+                "result_refs": result_refs or {},
             },
         )
 
@@ -2688,11 +3093,11 @@ class ResearchService:
         latest_checkpoint: dict | None = None
         latest_report: dict | None = None
         artifacts: list[dict] = []
+        guidance_history: list[dict] = []
+        step_cards: list[dict] = []
         latest_seq = 0
         for row in rows:
-            data = _load_json_dict(row.payload_json)
-            payload = _load_json_dict(data.get("payload"))
-            event_type = str(data.get("event_type") or row.event_type.value)
+            _run_id, _task_id, event_type, payload = self._decode_run_event(row, task_id="")
             latest_seq = max(latest_seq, int(row.seq or 0))
             phase_key, phase_label = self._phase_summary_key(event_type, payload)
             if phase_key:
@@ -2714,14 +3119,63 @@ class ResearchService:
                 latest_report = payload
             elif event_type == ResearchRunEventType.ARTIFACT.value:
                 artifacts.append(payload)
+            if payload.get("kind") == "user_guidance":
+                guidance_history.append(
+                    {
+                        "seq": row.seq,
+                        "text": str(payload.get("text") or "").strip(),
+                        "tags": list(payload.get("tags") or []),
+                        "created_at": row.created_at,
+                    }
+                )
+            if payload.get("kind") == "gpt_step":
+                step_cards.append(
+                    {
+                        "key": str(payload.get("step") or event_type),
+                        "title": str(payload.get("title") or self._step_label(str(payload.get("step") or event_type))),
+                        "status": str(payload.get("status") or "").strip() or None,
+                        "seq": row.seq,
+                        "details": _load_json_dict(payload.get("details")),
+                        "result_refs": _load_json_dict(payload.get("result_refs")),
+                        "created_at": row.created_at,
+                    }
+                )
+        latest_report_excerpt = None
+        if latest_report:
+            latest_report_excerpt = (
+                str(latest_report.get("report_excerpt") or "").strip()
+                or str(latest_report.get("summary") or "").strip()
+                or str(latest_report.get("content") or "").strip()
+                or None
+            )
         return {
             "total": len(rows),
             "latest_seq": latest_seq,
             "phases": list(phase_map.values()),
+            "phase_groups": list(phase_map.values()),
             "latest_checkpoint": latest_checkpoint,
             "latest_report": latest_report,
+            "latest_report_excerpt": latest_report_excerpt,
+            "guidance_history": guidance_history[-10:],
+            "step_cards": step_cards[-20:],
             "artifacts": artifacts[-10:],
         }
+
+    def _decode_run_event(self, row, *, task_id: str) -> tuple[str, str, str, dict]:
+        data = _load_json_dict(row.payload_json)
+        if "payload" in data:
+            return (
+                str(data.get("run_id") or row.run_id),
+                str(data.get("task_id") or task_id),
+                str(data.get("event_type") or row.event_type.value),
+                _load_json_dict(data.get("payload")),
+            )
+        return (
+            str(row.run_id),
+            str(task_id),
+            str(row.event_type.value),
+            data,
+        )
 
     def _phase_summary_key(self, event_type: str, payload: dict) -> tuple[str, str]:
         if payload.get("kind") == "gpt_step":
@@ -2769,19 +3223,17 @@ class ResearchService:
     def _latest_guidance_text(self, db: Session, *, task_id: int, run_id: str) -> str:
         rows = ResearchRunEventRepo(db).list_for_run(task_id=task_id, run_id=run_id, limit=200)
         for row in reversed(rows):
-            data = _load_json_dict(row.payload_json)
-            payload = _load_json_dict(data.get("payload"))
-            if data.get("event_type") == ResearchRunEventType.PROGRESS.value and payload.get("kind") == "user_guidance":
+            _run_id, _task_id, event_type, payload = self._decode_run_event(row, task_id="")
+            if event_type == ResearchRunEventType.PROGRESS.value and payload.get("kind") == "user_guidance":
                 return str(payload.get("text") or "").strip()
         return ""
 
     def _run_event_to_dict(self, task_id: str, row) -> dict:
-        data = _load_json_dict(row.payload_json)
-        payload = _load_json_dict(data.get("payload"))
+        run_id, task_token, event_type, payload = self._decode_run_event(row, task_id=task_id)
         return {
-            "run_id": str(data.get("run_id") or row.run_id),
-            "task_id": str(data.get("task_id") or task_id),
-            "event_type": str(data.get("event_type") or row.event_type.value),
+            "run_id": run_id,
+            "task_id": task_token,
+            "event_type": event_type,
             "seq": row.seq,
             "payload": payload,
             "created_at": row.created_at,
@@ -3494,7 +3946,7 @@ class ResearchService:
         round_paper_repo = ResearchRoundPaperRepo(db)
         paper_repo = ResearchPaperRepo(db)
         fulltext_map = {
-            row.paper_id: row.status.value
+            row.paper_id: row
             for row in ResearchPaperFulltextRepo(db).list_for_task(task.id)
             if row.paper_id
         }
@@ -3566,24 +4018,12 @@ class ResearchService:
                 for paper in papers:
                     p_id = _paper_token(paper)
                     if p_id not in nodes:
-                        nodes[p_id] = {
-                            "id": p_id,
-                            "paper_id": p_id,
-                            "type": "paper",
-                            "label": paper.title[:240],
-                            "year": paper.year,
-                            "source": paper.source,
-                            "venue": paper.venue,
-                            "doi": paper.doi,
-                            "url": paper.url,
-                            "abstract": paper.abstract,
-                            "method_summary": paper.method_summary,
-                            "authors": _load_json_list(paper.authors_json),
-                            "direction_index": row.direction_index,
-                            "fulltext_status": fulltext_map.get(p_id),
-                            "saved": bool(paper.saved),
-                            "key_points_status": paper.key_points_status,
-                        }
+                        nodes[p_id] = self._paper_graph_node(
+                            task=task,
+                            paper=paper,
+                            direction_index=row.direction_index,
+                            fulltext=fulltext_map.get(p_id),
+                        )
                     key = (r_id, p_id, "round_paper")
                     if key not in seen:
                         edges.append({"source": r_id, "target": p_id, "type": "round_paper", "weight": 1.0})
@@ -4154,8 +4594,18 @@ class ResearchService:
             "updated_at": row.updated_at,
         }
 
-    def _collection_to_dict(self, db: Session, row: ResearchCollection, *, include_items: bool = True) -> dict:
-        item_rows = ResearchCollectionItemRepo(db).list_for_collection(row.id)
+    def _collection_to_dict(
+        self,
+        db: Session,
+        row: ResearchCollection,
+        *,
+        include_items: bool = True,
+        offset: int = 0,
+        limit: int = 50,
+    ) -> dict:
+        item_repo = ResearchCollectionItemRepo(db)
+        total_items = item_repo.count_for_collection(row.id)
+        item_rows = item_repo.list_for_collection_page(row.id, offset=offset, limit=limit) if include_items else []
         return {
             "collection_id": row.collection_id,
             "project_id": row.project.project_key,
@@ -4164,20 +4614,24 @@ class ResearchService:
             "source_type": row.source_type,
             "source_ref": row.source_ref,
             "summary_text": row.summary_text,
-            "item_count": len(item_rows),
+            "item_count": total_items,
             "items": [self._collection_item_to_dict(item) for item in item_rows] if include_items else [],
+            "offset": max(0, int(offset)),
+            "limit": max(1, int(limit)) if include_items else 0,
+            "has_more": include_items and (max(0, int(offset)) + len(item_rows) < total_items),
             "created_at": row.created_at,
             "updated_at": row.updated_at,
         }
 
     def _collection_item_to_dict(self, row: ResearchCollectionItem) -> dict:
         metadata = _load_json_dict(row.metadata_json)
-        source_task_id = None
-        if row.source_task_id:
-            source_task_id = None
+        source_task_id = row.source_task.task_id if getattr(row, "source_task", None) else None
+        task_token = metadata.get("task_id")
+        if task_token is not None and not isinstance(task_token, str):
+            task_token = None
         return {
             "item_id": row.id,
-            "task_id": metadata.get("task_id") or source_task_id,
+            "task_id": task_token or source_task_id,
             "paper_id": row.paper_id,
             "title": row.title,
             "authors": _load_json_list(row.authors_json),
@@ -4186,9 +4640,202 @@ class ResearchService:
             "doi": row.doi,
             "url": row.url,
             "source": row.source,
-            "metadata": metadata,
+            "metadata": {
+                **metadata,
+                "task_id": task_token or source_task_id,
+            }
+            if (task_token or source_task_id)
+            else metadata,
             "created_at": row.created_at,
             "updated_at": row.updated_at,
+        }
+
+    def _export_record_to_dict(self, row: ResearchExportRecord | ResearchCollectionExportRecord) -> dict:
+        task = getattr(row, "task", None)
+        project = getattr(row, "project", None)
+        collection = getattr(row, "collection", None)
+        return {
+            "id": row.id,
+            "task_id": task.task_id if task else None,
+            "collection_id": collection.collection_id if collection else None,
+            "project_id": (
+                project.project_key
+                if project
+                else (collection.project.project_key if collection and collection.project else None)
+            ),
+            "format": row.format,
+            "output_path": row.output_path,
+            "status": row.status,
+            "error": row.error,
+            "created_at": row.created_at,
+        }
+
+    def _compare_report_to_dict(self, row: ResearchCompareReport) -> dict:
+        return {
+            "report_id": row.report_id,
+            "scope": row.scope,
+            "title": row.title,
+            "focus": row.focus,
+            "overview": row.overview,
+            "common_points": _load_json_list(row.common_points_json),
+            "differences": _load_json_list(row.differences_json),
+            "recommended_next_steps": _load_json_list(row.recommended_next_steps_json),
+            "items": _load_json_list(row.items_json),
+            "created_at": row.created_at,
+        }
+
+    def _paper_compare_item(self, paper) -> dict:
+        return {
+            "paper_id": _paper_token(paper),
+            "title": paper.title,
+            "year": paper.year,
+            "venue": paper.venue,
+            "source": paper.source,
+            "doi": paper.doi,
+            "url": paper.url,
+            "abstract": paper.abstract,
+            "method_summary": paper.method_summary,
+        }
+
+    def _collection_compare_item(self, item: ResearchCollectionItem) -> dict:
+        metadata = _load_json_dict(item.metadata_json)
+        return {
+            "paper_id": item.paper_id,
+            "title": item.title,
+            "year": item.year,
+            "venue": item.venue,
+            "source": item.source,
+            "doi": item.doi,
+            "url": item.url,
+            "abstract": metadata.get("abstract"),
+            "method_summary": metadata.get("method_summary"),
+        }
+
+    def _build_compare_report(
+        self,
+        db: Session,
+        *,
+        project_id: int | None,
+        task: ResearchTask | None,
+        collection: ResearchCollection | None,
+        scope: str,
+        title: str,
+        focus: str | None,
+        items: list[dict],
+        llm_backend: str,
+        llm_model: str | None,
+    ) -> ResearchCompareReport:
+        structured = self._generate_compare_payload(
+            title=title,
+            focus=focus,
+            items=items,
+            llm_backend=llm_backend,
+            llm_model=llm_model,
+        )
+        return ResearchCompareReportRepo(db).create(
+            report_id=f"compare-{uuid4().hex[:10]}",
+            project_id=project_id,
+            task_id=task.id if task else None,
+            collection_id=collection.id if collection else None,
+            scope=scope,
+            title=structured["title"],
+            focus=structured.get("focus"),
+            overview=structured["overview"],
+            common_points=list(structured.get("common_points") or []),
+            differences=list(structured.get("differences") or []),
+            recommended_next_steps=list(structured.get("recommended_next_steps") or []),
+            items=items,
+        )
+
+    def _generate_compare_payload(
+        self,
+        *,
+        title: str,
+        focus: str | None,
+        items: list[dict],
+        llm_backend: str,
+        llm_model: str | None,
+    ) -> dict:
+        clipped_items = [
+            {
+                "paper_id": item.get("paper_id"),
+                "title": item.get("title"),
+                "year": item.get("year"),
+                "venue": item.get("venue"),
+                "source": item.get("source"),
+                "doi": item.get("doi"),
+                "abstract": str(item.get("abstract") or "")[:1200],
+                "method_summary": str(item.get("method_summary") or "")[:600],
+            }
+            for item in items[:10]
+        ]
+        prompt = (
+            "请对下面这些论文或集合论文做中文对比总结。"
+            '返回严格 JSON：{"title":"...","focus":"...","overview":"...","common_points":["..."],'
+            '"differences":["..."],"recommended_next_steps":["..."]}\n\n'
+            f"Title: {title}\n"
+            f"Focus: {focus or '整体方法与研究价值'}\n"
+            f"Items: {orjson.dumps(clipped_items).decode('utf-8')}"
+        )
+        try:
+            result = self.llm_gateway.chat_text(
+                backend=llm_backend,
+                model=llm_model,
+                system_prompt="Return strict JSON only. Be factual and concise.",
+                prompt=prompt,
+                temperature=0.1,
+                max_tokens=1400,
+            )
+            data = _extract_first_json_object((result.text or "").strip())
+            if isinstance(data, dict):
+                common_points = [str(item).strip() for item in (data.get("common_points") or []) if str(item).strip()]
+                differences = [str(item).strip() for item in (data.get("differences") or []) if str(item).strip()]
+                next_steps = [str(item).strip() for item in (data.get("recommended_next_steps") or []) if str(item).strip()]
+                overview = str(data.get("overview") or "").strip()
+                if overview:
+                    return {
+                        "title": str(data.get("title") or title).strip() or title,
+                        "focus": str(data.get("focus") or focus or "").strip() or None,
+                        "overview": overview,
+                        "common_points": common_points[:8],
+                        "differences": differences[:8],
+                        "recommended_next_steps": next_steps[:8],
+                    }
+        except Exception:
+            logger.exception("compare_report_llm_failed title=%s", title)
+        return self._compare_payload_fallback(title=title, focus=focus, items=items)
+
+    def _compare_payload_fallback(self, *, title: str, focus: str | None, items: list[dict]) -> dict:
+        venues = sorted({str(item.get("venue") or "").strip() for item in items if str(item.get("venue") or "").strip()})
+        years = [int(item.get("year")) for item in items if item.get("year")]
+        sources = sorted({str(item.get("source") or "").strip() for item in items if str(item.get("source") or "").strip()})
+        common_points = []
+        if venues:
+            common_points.append(f"论文主要分布在 {', '.join(venues[:4])} 等来源。")
+        if years:
+            common_points.append(f"样本时间范围主要集中在 {min(years)} 到 {max(years)}。")
+        if sources:
+            common_points.append(f"当前对比样本来自 {', '.join(sources[:4])}。")
+        if not common_points:
+            common_points.append("这些论文都围绕同一研究主题展开，但证据仍需结合原文核验。")
+        differences = []
+        for item in items[:4]:
+            label = str(item.get("title") or item.get("paper_id") or "未命名论文").strip()
+            venue = str(item.get("venue") or "来源未标注").strip()
+            year = str(item.get("year") or "年份未知").strip()
+            differences.append(f"{label} 更适合从 {venue} / {year} 这个上下文理解其定位与贡献。")
+        next_steps = [
+            "优先挑选 2-3 篇代表论文继续做全文处理与证据核验。",
+            "将差异最大的论文加入 Collection，继续生成专题 study task。",
+            "基于当前对比结果补一版总结笔记，沉淀到画布节点中。",
+        ]
+        return {
+            "title": title,
+            "focus": (focus or "").strip() or None,
+            "overview": f"当前共比较 {len(items)} 篇论文，建议围绕“{focus or '方法差异与研究价值'}”继续筛选代表样本并补充全文证据。",
+            "common_points": common_points[:8],
+            "differences": differences[:8],
+            "recommended_next_steps": next_steps[:8],
         }
 
     def _get_or_create_project(
@@ -4261,9 +4908,21 @@ class ResearchService:
         if not title:
             raise ValueError("collection item title is required")
         doi = str(payload.get("doi") or "").strip().lower() or None
+        matched = self._match_existing_paper_for_import(
+            db,
+            user_id=collection.project.user_id,
+            doi=doi,
+            title_norm=_normalize_title(title),
+        )
+        metadata = dict(payload.get("metadata") or {})
+        metadata.setdefault("task_id", matched["task_id"] if matched else None)
+        if matched:
+            metadata.setdefault("matched_existing_paper", True)
+            metadata.setdefault("matched_paper_id", matched["paper_id"])
+            metadata.setdefault("matched_task_id", matched["task_id"])
         return {
-            "source_task_id": None,
-            "paper_id": paper_token or None,
+            "source_task_id": matched["task_row_id"] if matched else None,
+            "paper_id": paper_token or (matched["paper_id"] if matched else None),
             "doi": doi,
             "title": title,
             "title_norm": _normalize_title(title),
@@ -4272,8 +4931,92 @@ class ResearchService:
             "venue": str(payload.get("venue") or "").strip() or None,
             "url": str(payload.get("url") or "").strip() or None,
             "source": str(payload.get("source") or "manual").strip() or "manual",
-            "metadata": payload.get("metadata") or {},
+            "metadata": metadata,
         }
+
+    def _add_collection_items_with_stats(self, db: Session, *, collection: ResearchCollection | None, items: list[dict]) -> dict:
+        if not collection:
+            raise ValueError("collection not found")
+        item_repo = ResearchCollectionItemRepo(db)
+        existing = item_repo.list_for_collection(collection.id)
+        existing_keys = {
+            (
+                (item.paper_id or "").strip().lower(),
+                (item.doi or "").strip().lower(),
+                (item.title_norm or "").strip().lower(),
+            )
+            for item in existing
+        }
+        imported_items = 0
+        deduped_items = 0
+        linked_existing_papers = 0
+
+        for payload in items:
+            normalized = self._resolve_collection_item_payload(db, collection=collection, payload=payload)
+            key = (
+                (normalized.get("paper_id") or "").strip().lower(),
+                (normalized.get("doi") or "").strip().lower(),
+                (normalized.get("title_norm") or "").strip().lower(),
+            )
+            if key in existing_keys:
+                deduped_items += 1
+                continue
+            now = datetime.now(timezone.utc)
+            row = ResearchCollectionItem(
+                collection_id=collection.id,
+                source_task_id=normalized.get("source_task_id"),
+                paper_id=normalized.get("paper_id"),
+                doi=normalized.get("doi"),
+                title=normalized["title"],
+                title_norm=normalized["title_norm"],
+                authors_json=orjson.dumps(normalized.get("authors") or []).decode("utf-8"),
+                year=normalized.get("year"),
+                venue=normalized.get("venue"),
+                url=normalized.get("url"),
+                source=normalized.get("source") or "manual",
+                metadata_json=orjson.dumps(normalized.get("metadata") or {}).decode("utf-8"),
+                created_at=now,
+                updated_at=now,
+            )
+            item_repo.create(row)
+            existing_keys.add(key)
+            imported_items += 1
+            if normalized.get("source_task_id") or normalized.get("paper_id"):
+                linked_existing_papers += 1
+
+        collection.updated_at = datetime.now(timezone.utc)
+        db.add(collection)
+        db.flush()
+        return {
+            "collection": self._collection_to_dict(db, collection),
+            "imported_items": imported_items,
+            "deduped_items": deduped_items,
+            "linked_existing_papers": linked_existing_papers,
+        }
+
+    def _match_existing_paper_for_import(
+        self,
+        db: Session,
+        *,
+        user_id: int,
+        doi: str | None,
+        title_norm: str | None,
+    ) -> dict | None:
+        doi_norm = (doi or "").strip().lower()
+        title_norm_value = (title_norm or "").strip().lower()
+        if not doi_norm and not title_norm_value:
+            return None
+        task_rows = ResearchTaskRepo(db).list_recent(user_id=user_id, limit=200)
+        paper_repo = ResearchPaperRepo(db)
+        for task_row in task_rows:
+            for paper in paper_repo.list_for_task(task_row.id):
+                paper_doi = (paper.doi or "").strip().lower()
+                paper_title_norm = (paper.title_norm or "").strip().lower()
+                if doi_norm and paper_doi == doi_norm:
+                    return {"task_id": task_row.task_id, "task_row_id": task_row.id, "paper_id": _paper_token(paper)}
+                if not doi_norm and title_norm_value and paper_title_norm == title_norm_value:
+                    return {"task_id": task_row.task_id, "task_row_id": task_row.id, "paper_id": _paper_token(paper)}
+        return None
 
     def _summarize_collection_items(self, name: str, items: list[ResearchCollectionItem]) -> str:
         if not items:
@@ -4291,6 +5034,314 @@ class ResearchService:
         else:
             year_text = "年份未标注"
         return f"集合「{name}」共包含 {len(items)} 篇论文，时间范围 {year_text}，主要来源/期刊包括 {venue_text}。适合继续做集合级总结、派生 study task 或构建专题图谱。"
+
+    def _detect_zotero_import_format(self, *, filename: str, content: bytes) -> str:
+        suffix = Path(filename or "").suffix.lower()
+        text = content.decode("utf-8-sig", errors="ignore").lstrip()
+        if suffix in {".json", ".csljson"}:
+            return "csljson"
+        if suffix == ".bib":
+            return "bib"
+        if text.startswith("{") or text.startswith("["):
+            return "csljson"
+        if re.search(r"@\w+\s*[{(]", text):
+            return "bib"
+        raise ValueError("unsupported import format, expected .json/.csljson or .bib")
+
+    def _parse_zotero_local_file(self, *, filename: str, content: bytes, fmt: str) -> list[dict]:
+        text = content.decode("utf-8-sig", errors="ignore")
+        if not text.strip():
+            raise ValueError("uploaded file is empty")
+        if fmt == "csljson":
+            return self._parse_zotero_csljson(filename=filename, text=text)
+        if fmt == "bib":
+            return self._parse_zotero_bibtex(filename=filename, text=text)
+        raise ValueError("unsupported import format")
+
+    def _parse_zotero_csljson(self, *, filename: str, text: str) -> list[dict]:
+        try:
+            data = orjson.loads(text)
+        except orjson.JSONDecodeError as exc:
+            raise ValueError("invalid CSL JSON file") from exc
+        if isinstance(data, dict) and isinstance(data.get("items"), list):
+            raw_items = data.get("items") or []
+        elif isinstance(data, list):
+            raw_items = data
+        else:
+            raise ValueError("invalid CSL JSON structure")
+        items: list[dict] = []
+        for raw in raw_items:
+            if not isinstance(raw, dict):
+                continue
+            title = str(raw.get("title") or "").strip()
+            if not title:
+                continue
+            items.append(
+                {
+                    "title": title,
+                    "authors": self._parse_csl_authors(raw.get("author")),
+                    "year": self._extract_csl_year(raw),
+                    "venue": self._first_nonempty_string(raw.get("container-title"), raw.get("collection-title"), raw.get("publisher")),
+                    "doi": self._first_nonempty_string(raw.get("DOI"), raw.get("doi")),
+                    "url": self._first_nonempty_string(raw.get("URL"), raw.get("url")),
+                    "source": "zotero_local",
+                    "metadata": {
+                        "abstract": self._first_nonempty_string(raw.get("abstract"), raw.get("note")),
+                        "item_type": self._first_nonempty_string(raw.get("type")) or "article-journal",
+                        "tags": self._normalize_tag_values(raw.get("keyword") or raw.get("keywords")),
+                        "source_file": filename,
+                        "zotero_key": self._first_nonempty_string(raw.get("id"), raw.get("_id")),
+                        "raw_source": "csljson",
+                    },
+                }
+            )
+        return items
+
+    def _parse_zotero_bibtex(self, *, filename: str, text: str) -> list[dict]:
+        items: list[dict] = []
+        for entry in self._parse_bibtex_entries(text):
+            title = str(entry["fields"].get("title") or "").strip()
+            if not title:
+                continue
+            items.append(
+                {
+                    "title": title,
+                    "authors": self._parse_bibtex_authors(entry["fields"].get("author")),
+                    "year": _extract_year_from_text(self._first_nonempty_string(entry["fields"].get("year"), entry["fields"].get("date")) or ""),
+                    "venue": self._first_nonempty_string(
+                        entry["fields"].get("journal"),
+                        entry["fields"].get("booktitle"),
+                        entry["fields"].get("publisher"),
+                    ),
+                    "doi": self._first_nonempty_string(entry["fields"].get("doi")),
+                    "url": self._first_nonempty_string(entry["fields"].get("url")),
+                    "source": "zotero_local",
+                    "metadata": {
+                        "abstract": self._first_nonempty_string(entry["fields"].get("abstract"), entry["fields"].get("note")),
+                        "item_type": entry["entry_type"],
+                        "tags": self._normalize_tag_values(entry["fields"].get("keywords")),
+                        "source_file": filename,
+                        "zotero_key": entry["cite_key"],
+                        "raw_source": "bib",
+                    },
+                }
+            )
+        return items
+
+    def _parse_bibtex_entries(self, text: str) -> list[dict]:
+        entries: list[dict] = []
+        cursor = 0
+        total = len(text)
+        while cursor < total:
+            match = re.search(r"@([A-Za-z0-9_:+-]+)\s*([({])", text[cursor:])
+            if not match:
+                break
+            entry_type = str(match.group(1) or "").strip().lower()
+            open_char = match.group(2)
+            close_char = "}" if open_char == "{" else ")"
+            body_start = cursor + match.end()
+            depth = 1
+            index = body_start
+            while index < total and depth > 0:
+                char = text[index]
+                if char == open_char:
+                    depth += 1
+                elif char == close_char:
+                    depth -= 1
+                index += 1
+            body = text[body_start : max(body_start, index - 1)]
+            cursor = index
+            if not body.strip():
+                continue
+            cite_key, fields_block = self._split_bibtex_body(body)
+            entries.append(
+                {
+                    "entry_type": entry_type or "article",
+                    "cite_key": cite_key,
+                    "fields": self._parse_bibtex_fields(fields_block),
+                }
+            )
+        return entries
+
+    @staticmethod
+    def _split_bibtex_body(body: str) -> tuple[str, str]:
+        if "," not in body:
+            return body.strip(), ""
+        cite_key, fields_block = body.split(",", 1)
+        return cite_key.strip(), fields_block
+
+    def _parse_bibtex_fields(self, body: str) -> dict[str, str]:
+        fields: dict[str, str] = {}
+        index = 0
+        length = len(body)
+        while index < length:
+            while index < length and body[index] in " \t\r\n,":
+                index += 1
+            start = index
+            while index < length and re.match(r"[A-Za-z0-9_:+-]", body[index]):
+                index += 1
+            name = body[start:index].strip().lower()
+            while index < length and body[index].isspace():
+                index += 1
+            if not name or index >= length or body[index] != "=":
+                break
+            index += 1
+            while index < length and body[index].isspace():
+                index += 1
+            value, index = self._read_bibtex_value(body, index)
+            fields[name] = value.strip()
+            while index < length and body[index] not in ",":
+                index += 1
+            if index < length and body[index] == ",":
+                index += 1
+        return fields
+
+    def _read_bibtex_value(self, text: str, index: int) -> tuple[str, int]:
+        if index >= len(text):
+            return "", index
+        marker = text[index]
+        if marker == "{":
+            depth = 1
+            index += 1
+            start = index
+            while index < len(text) and depth > 0:
+                char = text[index]
+                if char == "{":
+                    depth += 1
+                elif char == "}":
+                    depth -= 1
+                index += 1
+            return self._strip_wrapping_braces(text[start : max(start, index - 1)]), index
+        if marker == '"':
+            index += 1
+            start = index
+            escaped = False
+            while index < len(text):
+                char = text[index]
+                if char == '"' and not escaped:
+                    return text[start:index], index + 1
+                escaped = char == "\\" and not escaped
+                if char != "\\":
+                    escaped = False
+                index += 1
+            return text[start:], index
+        start = index
+        while index < len(text) and text[index] not in ",\r\n":
+            index += 1
+        return text[start:index].strip(), index
+
+    @staticmethod
+    def _strip_wrapping_braces(value: str) -> str:
+        cleaned = value.strip()
+        while cleaned.startswith("{") and cleaned.endswith("}"):
+            inner = cleaned[1:-1].strip()
+            if not inner:
+                return ""
+            cleaned = inner
+        return cleaned
+
+    @staticmethod
+    def _parse_bibtex_authors(value: object) -> list[str]:
+        text = str(value or "").strip()
+        if not text:
+            return []
+        authors = []
+        for part in re.split(r"\s+and\s+", text, flags=re.IGNORECASE):
+            normalized = part.strip()
+            if not normalized:
+                continue
+            if "," in normalized:
+                pieces = [piece.strip() for piece in normalized.split(",", 1)]
+                normalized = " ".join(piece for piece in reversed(pieces) if piece).strip()
+            authors.append(normalized)
+        return authors
+
+    @staticmethod
+    def _parse_csl_authors(value: object) -> list[str]:
+        if not isinstance(value, list):
+            return []
+        authors = []
+        for author in value:
+            if not isinstance(author, dict):
+                continue
+            literal = str(author.get("literal") or "").strip()
+            if literal:
+                authors.append(literal)
+                continue
+            given = str(author.get("given") or "").strip()
+            family = str(author.get("family") or "").strip()
+            full_name = " ".join(part for part in (given, family) if part).strip()
+            if full_name:
+                authors.append(full_name)
+        return authors
+
+    @staticmethod
+    def _extract_csl_year(item: dict) -> int | None:
+        for key in ("issued", "published-print", "published-online", "accessed"):
+            value = item.get(key)
+            if isinstance(value, dict):
+                date_parts = value.get("date-parts")
+                if isinstance(date_parts, list) and date_parts and isinstance(date_parts[0], list) and date_parts[0]:
+                    return _to_int_or_none(date_parts[0][0])
+        return _extract_year_from_text(str(item.get("year") or "").strip())
+
+    @staticmethod
+    def _normalize_tag_values(value: object) -> list[str]:
+        if isinstance(value, list):
+            return [str(item).strip() for item in value if str(item).strip()]
+        if isinstance(value, str):
+            return [part.strip() for part in re.split(r"[;,]", value) if part.strip()]
+        return []
+
+    @staticmethod
+    def _first_nonempty_string(*values: object) -> str | None:
+        for value in values:
+            if isinstance(value, list):
+                for item in value:
+                    text = str(item or "").strip()
+                    if text:
+                        return text
+            else:
+                text = str(value or "").strip()
+                if text:
+                    return text
+        return None
+
+    @staticmethod
+    def _sanitize_bib_value(value: object) -> str:
+        return str(value or "").replace("{", "").replace("}", "").strip()
+
+    @staticmethod
+    def _authors_to_csl(authors: list[object]) -> list[dict[str, str]]:
+        output: list[dict[str, str]] = []
+        for raw in authors:
+            text = str(raw or "").strip()
+            if not text:
+                continue
+            if "," in text:
+                family, given = [part.strip() for part in text.split(",", 1)]
+                output.append({"family": family, "given": given})
+            elif len(text.split()) == 1:
+                output.append({"literal": text})
+            else:
+                parts = text.split()
+                output.append({"family": parts[-1], "given": " ".join(parts[:-1])})
+        return output
+
+    @staticmethod
+    def _collection_item_export_dict(item: ResearchCollectionItem) -> dict:
+        metadata = _load_json_dict(item.metadata_json)
+        return {
+            "id": metadata.get("zotero_key") or item.paper_id or f"collection-item-{item.id}",
+            "title": item.title,
+            "authors": _load_json_list(item.authors_json),
+            "year": item.year,
+            "venue": item.venue,
+            "doi": item.doi,
+            "url": item.url,
+            "abstract": metadata.get("abstract"),
+            "type": metadata.get("item_type") or "article-journal",
+        }
 
     def _normalize_zotero_item(self, item: dict) -> dict | None:
         data = item.get("data") if isinstance(item, dict) and isinstance(item.get("data"), dict) else item
@@ -4497,20 +5548,46 @@ class ResearchService:
 
     @staticmethod
     def _render_bib(papers: list) -> str:
+        export_items = []
+        for idx, paper in enumerate(papers, start=1):
+            export_items.append(
+                {
+                    "id": _paper_token(paper) or f"paper{idx}",
+                    "title": paper.title,
+                    "authors": _load_json_list(paper.authors_json),
+                    "year": paper.year,
+                    "venue": paper.venue,
+                    "doi": paper.doi,
+                    "url": paper.url,
+                    "abstract": paper.abstract,
+                    "type": "article-journal",
+                }
+            )
+        return ResearchService._render_bib_from_export_items(export_items)
+
+    @staticmethod
+    def _render_bib_from_collection_items(items: list[ResearchCollectionItem]) -> str:
+        export_items = [ResearchService._collection_item_export_dict(item) for item in items]
+        return ResearchService._render_bib_from_export_items(export_items)
+
+    @staticmethod
+    def _render_bib_from_export_items(items: list[dict]) -> str:
         blocks: list[str] = []
-        for idx, p in enumerate(papers, start=1):
-            key = f"paper{idx}"
-            authors = " and ".join(_load_json_list(p.authors_json))
-            title = (p.title or "").replace("{", "").replace("}", "")
-            venue = (p.venue or "").replace("{", "").replace("}", "")
-            url = p.url or ""
-            doi = p.doi or ""
-            year = str(p.year) if p.year else ""
+        for idx, item in enumerate(items, start=1):
+            key = _normalize_cite_key(str(item.get("id") or f"paper{idx}"), fallback=f"paper{idx}")
+            authors = " and ".join([str(author).strip() for author in (item.get("authors") or []) if str(author).strip()])
+            title = ResearchService._sanitize_bib_value(item.get("title"))
+            venue = ResearchService._sanitize_bib_value(item.get("venue"))
+            url = ResearchService._sanitize_bib_value(item.get("url"))
+            doi = ResearchService._sanitize_bib_value(item.get("doi"))
+            year = str(item.get("year") or "")
+            entry_type = "inproceedings" if "proceed" in str(item.get("type") or "").lower() else "article"
+            venue_field = "booktitle" if entry_type == "inproceedings" else "journal"
             entry = [
-                f"@article{{{key},",
+                f"@{entry_type}{{{key},",
                 f"  title = {{{title}}},",
                 f"  author = {{{authors}}},",
-                f"  journal = {{{venue}}},",
+                f"  {venue_field} = {{{venue}}},",
                 f"  year = {{{year}}},",
                 f"  doi = {{{doi}}},",
                 f"  url = {{{url}}},",
@@ -4518,6 +5595,60 @@ class ResearchService:
             ]
             blocks.append("\n".join(entry))
         return "\n\n".join(blocks).strip() + "\n"
+
+    @staticmethod
+    def _render_csljson_from_papers(papers: list) -> str:
+        export_items = []
+        for idx, paper in enumerate(papers, start=1):
+            export_items.append(
+                {
+                    "id": _paper_token(paper) or f"paper{idx}",
+                    "title": paper.title,
+                    "authors": _load_json_list(paper.authors_json),
+                    "year": paper.year,
+                    "venue": paper.venue,
+                    "doi": paper.doi,
+                    "url": paper.url,
+                    "abstract": paper.abstract,
+                    "type": "article-journal",
+                }
+            )
+        return ResearchService._render_csljson_from_export_items(export_items)
+
+    @staticmethod
+    def _render_csljson_from_collection_items(items: list[ResearchCollectionItem]) -> str:
+        export_items = [ResearchService._collection_item_export_dict(item) for item in items]
+        return ResearchService._render_csljson_from_export_items(export_items)
+
+    @staticmethod
+    def _render_csljson_from_export_items(items: list[dict]) -> str:
+        payload = []
+        for idx, item in enumerate(items, start=1):
+            entry: dict[str, object] = {
+                "id": str(item.get("id") or f"paper{idx}"),
+                "type": str(item.get("type") or "article-journal"),
+                "title": str(item.get("title") or ""),
+            }
+            authors = ResearchService._authors_to_csl(item.get("authors") or [])
+            if authors:
+                entry["author"] = authors
+            year = _to_int_or_none(item.get("year"))
+            if year is not None:
+                entry["issued"] = {"date-parts": [[year]]}
+            venue = str(item.get("venue") or "").strip()
+            if venue:
+                entry["container-title"] = venue
+            doi = str(item.get("doi") or "").strip()
+            if doi:
+                entry["DOI"] = doi
+            url = str(item.get("url") or "").strip()
+            if url:
+                entry["URL"] = url
+            abstract = str(item.get("abstract") or "").strip()
+            if abstract:
+                entry["abstract"] = abstract
+            payload.append(entry)
+        return orjson.dumps(payload, option=orjson.OPT_INDENT_2).decode("utf-8") + "\n"
 
     @staticmethod
     def _render_json(task: ResearchTask, directions: list, papers: list) -> str:
@@ -4627,6 +5758,11 @@ def _normalize_title(title: str) -> str:
     value = (title or "").lower()
     value = re.sub(r"[^a-z0-9\u4e00-\u9fff]+", " ", value)
     return re.sub(r"\s+", " ", value).strip()
+
+
+def _normalize_cite_key(value: str, *, fallback: str) -> str:
+    normalized = re.sub(r"[^A-Za-z0-9:_-]+", "-", (value or "").strip()).strip("-")
+    return normalized[:64] or fallback
 
 
 def _resolve_sources(sources: object, default_sources: str) -> set[str]:

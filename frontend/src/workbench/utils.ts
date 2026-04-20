@@ -69,27 +69,30 @@ export function stepLabel(step?: string) {
     search_queued: "论文检索排队",
     search_completed: "论文检索完成",
     exploration_started: "开始探索",
-    candidates_generated: "生成候选",
-    candidate_selected: "选择候选",
+    candidates_generated: "生成候选方向",
+    candidate_selected: "选择候选方向",
     next_round_created: "进入下一轮",
     graph_queued: "图谱构建排队",
     tree_graph_completed: "树图生成完成",
-    citation_graph_completed: "引用图生成完成",
+    citation_graph_completed: "引文图生成完成",
     fulltext_queued: "全文处理排队",
     fulltext_completed: "全文处理完成",
     paper_saved: "论文已保存",
     paper_summary_queued: "论文总结排队",
     paper_summary_completed: "论文总结完成",
+    export_requested: "导出排队",
+    export_completed: "导出完成",
   };
   return labels[step || ""] || step || "步骤";
 }
 
-export function manualNodeDefaultLabel(type: "note" | "question" | "reference" | "group") {
+export function manualNodeDefaultLabel(type: "note" | "question" | "reference" | "group" | "report") {
   const labels = {
     note: "新的笔记",
     question: "新的问题",
     reference: "新的参考资料",
     group: "新的分组",
+    report: "新的报告",
   };
   return labels[type];
 }
@@ -125,7 +128,7 @@ export function eventTypeLabel(eventType: string, payload?: Record<string, unkno
     paper_upsert: "论文更新",
     checkpoint: "Checkpoint",
     report_chunk: "阶段报告",
-    artifact: "产出物",
+    artifact: "产物",
     error: "错误",
   };
   return labels[eventType] || eventType;
@@ -192,7 +195,7 @@ function buildEventGraph(taskId: string, events: RunEvent[]) {
         id: nodeId,
         type: "report",
         label: String(payload.title || "阶段报告"),
-        summary: stringifyBest(payload.content, payload.summary),
+        summary: stringifyBest(payload.content, payload.summary, payload.report_excerpt),
         status: "done",
       });
       edges.set(`${taskId}:topic:${nodeId}:report`, {
@@ -317,11 +320,7 @@ export function mergeCanvasWithGraph(
   };
 }
 
-export async function runAutoLayout(
-  nodes: Array<Node<FlowNodeData>>,
-  edges: Array<Edge>,
-  mode = "elk_layered",
-) {
+export async function runAutoLayout(nodes: Array<Node<FlowNodeData>>, edges: Array<Edge>, mode = "elk_layered") {
   const systemNodes = nodes.filter((node) => !isManualNode(node));
   if (!systemNodes.length || !mode.startsWith("elk")) {
     return new Map<string, { x: number; y: number }>();
@@ -332,10 +331,10 @@ export async function runAutoLayout(
     layoutOptions: {
       "elk.algorithm": mode === "elk_stress" ? "stress" : "layered",
       "elk.direction": "RIGHT",
-      "elk.spacing.nodeNode": "120",
-      "elk.layered.spacing.nodeNodeBetweenLayers": "220",
+      "elk.spacing.nodeNode": "160",
+      "elk.layered.spacing.nodeNodeBetweenLayers": "260",
       "elk.layered.nodePlacement.strategy": "NETWORK_SIMPLEX",
-      "elk.padding": "[top=60,left=80,bottom=60,right=80]",
+      "elk.padding": "[top=60,left=100,bottom=60,right=100]",
     },
     children: systemNodes.map((node) => ({
       id: node.id,
@@ -456,7 +455,7 @@ export function formatRunState(mode: TaskMode, runId: string, autoStatus: string
   if (mode === "openclaw_auto") {
     return `运行 ${runId || "未启动"} · ${autoStatusLabel(autoStatus)} · ${summary?.total || 0} 条事件`;
   }
-  return `GPT Step · ${summary?.total || 0} 条步骤记录`;
+  return `GPT Step · ${summary?.step_cards?.length || summary?.total || 0} 条步骤记录`;
 }
 
 export function inferRoundId(nodeId: string, data?: Partial<FlowNodeData> | null) {
@@ -476,11 +475,18 @@ export function isPaperNode(nodeId?: string) {
 }
 
 export function isManualNode(node: Node<FlowNodeData>) {
-  return Boolean(node.data?.isManual) || /^(note|question|reference|group):/.test(node.id);
+  return Boolean(node.data?.isManual) || /^(note|question|reference|group|report):/.test(node.id);
 }
 
 export function selectedPaperNodes(nodes: Array<Node<FlowNodeData>>) {
   return nodes.filter((node) => Boolean(node.selected) && isPaperNode(node.id));
+}
+
+export function formatDateTime(value?: string | null) {
+  if (!value) return "";
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return value;
+  return date.toLocaleString("zh-CN", { hour12: false });
 }
 
 function stringifyBest(...values: Array<unknown>) {

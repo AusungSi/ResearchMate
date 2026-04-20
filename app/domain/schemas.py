@@ -392,6 +392,33 @@ class ResearchProjectListResponse(BaseModel):
     default_project_id: str | None = None
 
 
+class ResearchExportRecordResponse(BaseModel):
+    id: int
+    task_id: str | None = None
+    collection_id: str | None = None
+    project_id: str | None = None
+    format: str
+    output_path: str | None = None
+    status: str
+    error: str | None = None
+    created_at: datetime
+
+
+class ResearchExportListResponse(BaseModel):
+    task_id: str | None = None
+    collection_id: str | None = None
+    items: list[ResearchExportRecordResponse] = Field(default_factory=list)
+
+
+class ResearchProjectRecentRunItem(BaseModel):
+    task_id: str
+    run_id: str
+    topic: str
+    mode: ResearchRunMode
+    auto_status: ResearchAutoStatus
+    updated_at: datetime
+
+
 class ResearchCollectionCreateRequest(BaseModel):
     name: str = Field(min_length=1, max_length=255)
     description: str | None = None
@@ -436,6 +463,9 @@ class ResearchCollectionResponse(BaseModel):
     summary_text: str | None = None
     item_count: int = 0
     items: list[ResearchCollectionItemResponse] = Field(default_factory=list)
+    offset: int = 0
+    limit: int = 0
+    has_more: bool = False
     created_at: datetime
     updated_at: datetime
 
@@ -447,6 +477,10 @@ class ResearchCollectionListResponse(BaseModel):
 
 class ResearchCollectionAddItemsRequest(BaseModel):
     items: list[ResearchCollectionAddItemInput] = Field(default_factory=list)
+
+
+class ResearchCollectionRemoveItemsRequest(BaseModel):
+    item_ids: list[int] = Field(default_factory=list)
 
 
 class ResearchCollectionSummaryResponse(BaseModel):
@@ -469,8 +503,31 @@ class ResearchCollectionGraphResponse(BaseModel):
     stats: dict = Field(default_factory=dict)
 
 
+class ResearchCompareRequest(BaseModel):
+    paper_ids: list[str] = Field(default_factory=list)
+    focus: str | None = None
+
+
+class ResearchCompareResponse(BaseModel):
+    report_id: str
+    scope: str
+    title: str
+    focus: str | None = None
+    overview: str
+    common_points: list[str] = Field(default_factory=list)
+    differences: list[str] = Field(default_factory=list)
+    recommended_next_steps: list[str] = Field(default_factory=list)
+    items: list[dict] = Field(default_factory=list)
+    created_at: datetime
+
+
 class ResearchZoteroConfigResponse(BaseModel):
-    enabled: bool = False
+    enabled: bool = True
+    mode: str = "local_default"
+    import_formats: list[str] = Field(default_factory=lambda: ["csljson", "bib"])
+    export_targets: list[str] = Field(default_factory=lambda: ["task", "collection"])
+    legacy_web_api_enabled: bool = False
+    legacy_web_api_configured: bool = False
     base_url: str | None = None
     library_type: str | None = None
     library_id: str | None = None
@@ -491,6 +548,11 @@ class ResearchZoteroImportResponse(BaseModel):
     project_id: str
     collection: ResearchCollectionResponse
     imported: int = 0
+    total_items: int = 0
+    imported_items: int = 0
+    deduped_items: int = 0
+    linked_existing_papers: int = 0
+    format: str | None = None
 
 
 class ResearchTaskCreateRequest(BaseModel):
@@ -590,6 +652,9 @@ class ResearchGraphNode(BaseModel):
     method_summary: str | None = None
     authors: list[str] = Field(default_factory=list)
     feedback_text: str | None = None
+    preview_kind: str | None = None
+    preview_url: str | None = None
+    visual_status: str | None = None
 
 
 class ResearchGraphEdge(BaseModel):
@@ -754,6 +819,19 @@ class ResearchTaskListResponse(BaseModel):
     total: int
 
 
+class ResearchProjectDashboardResponse(BaseModel):
+    project: ResearchProjectResponse
+    task_count: int = 0
+    collection_count: int = 0
+    paper_count: int = 0
+    saved_paper_count: int = 0
+    recent_tasks: list[ResearchTaskResponse] = Field(default_factory=list)
+    recent_runs: list[ResearchProjectRecentRunItem] = Field(default_factory=list)
+    provider_status: list["ResearchProviderStatusItem"] = Field(default_factory=list)
+    recent_exports: list[ResearchExportRecordResponse] = Field(default_factory=list)
+    recent_collections: list[ResearchCollectionResponse] = Field(default_factory=list)
+
+
 class ResearchCanvasNode(BaseModel):
     id: str
     type: str
@@ -816,12 +894,33 @@ class ResearchRunPhaseSummary(BaseModel):
     latest_seq: int = 0
 
 
+class ResearchRunGuidanceItem(BaseModel):
+    seq: int
+    text: str
+    tags: list[str] = Field(default_factory=list)
+    created_at: datetime
+
+
+class ResearchRunStepCard(BaseModel):
+    key: str
+    title: str
+    status: str | None = None
+    seq: int = 0
+    details: dict = Field(default_factory=dict)
+    result_refs: dict = Field(default_factory=dict)
+    created_at: datetime | None = None
+
+
 class ResearchRunSummary(BaseModel):
     total: int = 0
     latest_seq: int = 0
     phases: list[ResearchRunPhaseSummary] = Field(default_factory=list)
+    phase_groups: list[ResearchRunPhaseSummary] = Field(default_factory=list)
     latest_checkpoint: dict | None = None
     latest_report: dict | None = None
+    latest_report_excerpt: str | None = None
+    guidance_history: list[ResearchRunGuidanceItem] = Field(default_factory=list)
+    step_cards: list[ResearchRunStepCard] = Field(default_factory=list)
     artifacts: list[dict] = Field(default_factory=list)
 
 
@@ -847,6 +946,10 @@ class ResearchPaperAssetItem(BaseModel):
     filename: str | None = None
     path: str | None = None
     download_url: str | None = None
+    mime_type: str | None = None
+    width: int | None = None
+    height: int | None = None
+    source: str | None = None
 
 
 class ResearchPaperAssetResponse(BaseModel):
@@ -918,7 +1021,8 @@ class ResearchSearchResponse(BaseModel):
 
 
 class ResearchExportResponse(BaseModel):
-    task_id: str
+    task_id: str | None = None
+    collection_id: str | None = None
     format: str
     path: str
 
@@ -980,6 +1084,9 @@ class ResearchPaperDetailResponse(BaseModel):
     key_points: str | None = None
     key_points_error: str | None = None
     key_points_updated_at: datetime | None = None
+    preview_kind: str | None = None
+    preview_url: str | None = None
+    visual_status: str | None = None
 
 
 class DevUserListResponse(BaseModel):

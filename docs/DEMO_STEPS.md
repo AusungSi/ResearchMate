@@ -1,5 +1,29 @@
 # Workbench 演示步骤
 
+## 0. 一键准备两套 Demo
+
+如果你只是要把演示资产先准备好，优先用这一条：
+
+```bash
+bash scripts/run_demo_showcase_wsl.sh --mode all --json-out artifacts/demo/showcase-all.json
+```
+
+它会同时完成两件事：
+
+- 初始化静态展示 Demo：
+  - 一个围绕“具身智能 / Embodied AI”的已完成工作区
+  - 包含 demo project、GPT Step 任务、OpenClaw Auto 任务、collection、compare、checkpoint、artifact、PDF/fulltext、export history
+- 准备动态 Showcase：
+  - 顺序跑 `gpt_basic -> gpt_explore -> openclaw_auto`
+  - 把每一段 live 结果写到 `artifacts/demo/`
+
+如果只想准备其中一套：
+
+```bash
+bash scripts/run_demo_showcase_wsl.sh --mode static
+bash scripts/run_demo_showcase_wsl.sh --mode live
+```
+
 ## 1. 启动后端与 worker
 
 在 WSL 中执行：

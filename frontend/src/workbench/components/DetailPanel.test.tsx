@@ -23,6 +23,7 @@ describe("DetailPanel", () => {
         onOpenPdf={vi.fn()}
         onSavePaper={vi.fn()}
         onSummarizePaper={vi.fn()}
+        onRebuildVisual={vi.fn()}
         onSearchDirection={vi.fn()}
         onStartExplore={vi.fn()}
         onBuildGraph={vi.fn()}
@@ -33,7 +34,7 @@ describe("DetailPanel", () => {
       />,
     );
 
-    expect(screen.getByText("Round Actions")).toBeInTheDocument();
+    expect(screen.getByText("轮次动作")).toBeTruthy();
     fireEvent.click(screen.getByText("选择这个候选"));
     expect(onSelectCandidate).toHaveBeenCalledWith(12, 3);
 
@@ -74,6 +75,7 @@ describe("DetailPanel", () => {
         onOpenPdf={vi.fn()}
         onSavePaper={vi.fn()}
         onSummarizePaper={vi.fn()}
+        onRebuildVisual={vi.fn()}
         onSearchDirection={vi.fn()}
         onStartExplore={vi.fn()}
         onBuildGraph={vi.fn()}
@@ -84,7 +86,8 @@ describe("DetailPanel", () => {
       />,
     );
 
-    expect(screen.getByText("Paper Actions")).toBeInTheDocument();
-    expect(screen.getByText("Open PDF")).toBeInTheDocument();
+    expect(screen.getByText("论文动作")).toBeTruthy();
+    expect(screen.getByText("Open PDF")).toBeTruthy();
+    expect(screen.getAllByText("Paper Visual").length).toBeGreaterThan(0);
   });
 });

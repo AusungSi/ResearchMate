@@ -13,7 +13,7 @@
 - `RESEARCH_ARCH.md`
   - research 数据模型、队列和图谱相关架构说明
 - `DEMO_STEPS.md`
-  - 本地演示流程和操作顺序
+  - 本地演示流程、静态 Demo 初始化和动态 Showcase 操作顺序
 - `LLM_TUNING.md`
   - LLM 行为调优和提示词实验说明
 
@@ -32,3 +32,5 @@
     - 接口连通性检查
   - `run_research_live_smoke_wsl.sh`
     - 完整研究链路 smoke
+  - `run_demo_showcase_wsl.sh`
+    - 一键准备静态展示 Demo 和动态 Showcase

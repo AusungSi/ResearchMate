@@ -9,6 +9,7 @@
 - 独立前端工作台
 - `project / collection / study task`
 - Zotero v1 导入
+- 已交付的静态展示 Demo + 动态 Showcase
 
 ## P0：继续做稳当前主链路
 

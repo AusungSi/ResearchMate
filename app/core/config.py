@@ -138,6 +138,15 @@ class Settings(BaseSettings):
     research_graph_paper_limit_default: int = 8
     research_summary_enabled: bool = True
     research_summary_max_chars: int = 8000
+    paper_visual_provider: str = "template"
+    paper_visual_diffusion_enabled: bool = False
+    paper_visual_diffusion_base_url: str = ""
+    paper_visual_scan_pages: int = 8
+    paper_visual_min_width: int = 180
+    paper_visual_min_height: int = 120
+    paper_visual_min_page_area_ratio: float = 0.015
+    paper_visual_template_width: int = 1200
+    paper_visual_template_height: int = 630
     semantic_scholar_api_key: str = ""
     zotero_base_url: str = "https://api.zotero.org"
     zotero_library_type: str = "users"

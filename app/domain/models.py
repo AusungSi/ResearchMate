@@ -181,6 +181,8 @@ class ResearchProject(Base):
     user: Mapped["User"] = relationship(back_populates="research_projects")
     tasks: Mapped[list["ResearchTask"]] = relationship(back_populates="project")
     collections: Mapped[list["ResearchCollection"]] = relationship(back_populates="project")
+    export_records: Mapped[list["ResearchExportRecord"]] = relationship(back_populates="project")
+    compare_reports: Mapped[list["ResearchCompareReport"]] = relationship(back_populates="project")
 
 
 class ResearchCollection(Base):
@@ -200,6 +202,8 @@ class ResearchCollection(Base):
 
     project: Mapped["ResearchProject"] = relationship(back_populates="collections")
     items: Mapped[list["ResearchCollectionItem"]] = relationship(back_populates="collection")
+    export_records: Mapped[list["ResearchCollectionExportRecord"]] = relationship(back_populates="collection")
+    compare_reports: Mapped[list["ResearchCompareReport"]] = relationship(back_populates="collection")
 
 
 class ResearchCollectionItem(Base):
@@ -223,6 +227,60 @@ class ResearchCollectionItem(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
 
     collection: Mapped["ResearchCollection"] = relationship(back_populates="items")
+    source_task: Mapped["ResearchTask | None"] = relationship()
+
+
+class ResearchCollectionExportRecord(Base):
+    __tablename__ = "research_collection_export_records"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    collection_id: Mapped[int] = mapped_column(ForeignKey("research_collections.id"), nullable=False)
+    format: Mapped[str] = mapped_column(String(16), nullable=False)
+    output_path: Mapped[str | None] = mapped_column(Text, nullable=True)
+    status: Mapped[str] = mapped_column(String(16), nullable=False, default="success")
+    error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+    collection: Mapped["ResearchCollection"] = relationship(back_populates="export_records")
+
+
+class ResearchExportRecord(Base):
+    __tablename__ = "research_export_records"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    task_id: Mapped[int] = mapped_column(ForeignKey("research_tasks.id"), nullable=False)
+    project_id: Mapped[int | None] = mapped_column(ForeignKey("research_projects.id"), nullable=True)
+    format: Mapped[str] = mapped_column(String(16), nullable=False)
+    output_path: Mapped[str | None] = mapped_column(Text, nullable=True)
+    status: Mapped[str] = mapped_column(String(16), nullable=False, default="success")
+    error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+    task: Mapped["ResearchTask"] = relationship(back_populates="export_records")
+    project: Mapped["ResearchProject | None"] = relationship(back_populates="export_records")
+
+
+class ResearchCompareReport(Base):
+    __tablename__ = "research_compare_reports"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    report_id: Mapped[str] = mapped_column(String(64), unique=True, nullable=False)
+    project_id: Mapped[int | None] = mapped_column(ForeignKey("research_projects.id"), nullable=True)
+    task_id: Mapped[int | None] = mapped_column(ForeignKey("research_tasks.id"), nullable=True)
+    collection_id: Mapped[int | None] = mapped_column(ForeignKey("research_collections.id"), nullable=True)
+    scope: Mapped[str] = mapped_column(String(32), nullable=False)
+    title: Mapped[str] = mapped_column(String(255), nullable=False)
+    focus: Mapped[str | None] = mapped_column(Text, nullable=True)
+    overview: Mapped[str] = mapped_column(Text, nullable=False)
+    common_points_json: Mapped[str] = mapped_column(Text, nullable=False, default="[]")
+    differences_json: Mapped[str] = mapped_column(Text, nullable=False, default="[]")
+    recommended_next_steps_json: Mapped[str] = mapped_column(Text, nullable=False, default="[]")
+    items_json: Mapped[str] = mapped_column(Text, nullable=False, default="[]")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+    project: Mapped["ResearchProject | None"] = relationship(back_populates="compare_reports")
+    task: Mapped["ResearchTask | None"] = relationship(back_populates="compare_reports")
+    collection: Mapped["ResearchCollection | None"] = relationship(back_populates="compare_reports")
 
 
 class ResearchTask(Base):
@@ -265,6 +323,8 @@ class ResearchTask(Base):
     canvas_states: Mapped[list["ResearchCanvasState"]] = relationship(back_populates="task")
     run_events: Mapped[list["ResearchRunEvent"]] = relationship(back_populates="task")
     node_chats: Mapped[list["ResearchNodeChat"]] = relationship(back_populates="task")
+    export_records: Mapped[list["ResearchExportRecord"]] = relationship(back_populates="task")
+    compare_reports: Mapped[list["ResearchCompareReport"]] = relationship(back_populates="task")
 
 
 class ResearchDirection(Base):

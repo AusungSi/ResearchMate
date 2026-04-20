@@ -33,7 +33,10 @@
   - 从 `collection` 创建派生 `study task`
   - 全屏三栏工作台
   - 左右栏折叠与宽度持久化
-  - Zotero v1 导入
+  - Zotero 本地文件导入导出 v1
+- 已交付两套 demo 入口：
+  - 静态展示 Demo：一键初始化“具身智能 / Embodied AI”完整工作区
+  - 动态运行 Demo：顺序跑 `gpt_basic -> gpt_explore -> openclaw_auto`
 
 ## 默认访问地址
 
@@ -71,7 +74,15 @@ OPENCLAW_GATEWAY_TOKEN=...
 OPENCLAW_AGENT_ID=main
 ```
 
-如需启用 Zotero 导入：
+Zotero 默认走本地文件导入导出，不需要 API Key：
+
+1. 在 Zotero Desktop 中导出 `CSL JSON` 或 `BibTeX`
+2. 在工作台左侧点击“导入 Zotero 文件”
+3. 导入后会在当前项目下生成一个新的 collection
+4. 可以继续 `compare / summarize / build graph / create study task`
+5. task 和 collection 都支持导出为 `BibTeX / CSL JSON`
+
+如需保留旧的 Zotero Web API 兼容模式，再配置：
 
 ```env
 ZOTERO_BASE_URL=https://api.zotero.org
@@ -190,6 +201,32 @@ bash scripts/run_research_live_smoke_wsl.sh --scenario gpt_explore
 bash scripts/run_research_live_smoke_wsl.sh --scenario openclaw_auto
 ```
 
+### 3. 静态展示 Demo + 动态 Showcase
+
+如果你要直接演示现成结果，先初始化静态 Demo：
+
+```bash
+bash scripts/run_demo_showcase_wsl.sh --mode static --json-out artifacts/demo/showcase-static.json
+```
+
+如果你要现场跑一遍动态流程：
+
+```bash
+bash scripts/run_demo_showcase_wsl.sh --mode live --json-out artifacts/demo/showcase-live.json
+```
+
+如果你想把两者一起准备好：
+
+```bash
+bash scripts/run_demo_showcase_wsl.sh --mode all --json-out artifacts/demo/showcase-all.json
+```
+
+这套脚本默认主题固定为“具身智能 / Embodied AI”，并会：
+
+- 为静态展示写入可直接打开的 demo project / task / collection / compare / artifact 数据
+- 为动态展示顺序调用现有 live smoke 场景
+- 在 `artifacts/demo/` 下输出 JSON 结果，方便复盘和现场说明
+
 ## 日常使用入口
 
 推荐阅读顺序：
@@ -198,6 +235,8 @@ bash scripts/run_research_live_smoke_wsl.sh --scenario openclaw_auto
   - WSL 启动、OpenClaw 启停、API 自检、smoke 命令
 - [docs/RESEARCH_USAGE_ZH.md](docs/RESEARCH_USAGE_ZH.md)
   - 用户使用说明书，包含 `project / task / collection / GPT Step / OpenClaw Auto / Zotero`
+- [docs/DEMO_STEPS.md](docs/DEMO_STEPS.md)
+  - 静态展示 Demo 与动态 Showcase 的演示顺序
 - [docs/PROJECT_OVERVIEW_ZH.md](docs/PROJECT_OVERVIEW_ZH.md)
   - 当前架构、数据结构、接口与改造进度
 - [docs/ROADMAP_ZH.md](docs/ROADMAP_ZH.md)
@@ -240,7 +279,8 @@ bash scripts/run_research_live_smoke_wsl.sh --scenario openclaw_auto
   - `OpenAlex`
   - `Crossref`
 - integration：
-  - Zotero v1 只做“导入”
+  - Zotero v1 默认走本地文件导入导出
+  - 旧的 Web API 导入仅保留为兼容模式
 
 ## 仓库结构
 

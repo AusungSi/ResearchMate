@@ -14,6 +14,18 @@
 bash scripts/run_api_connectivity_check_wsl.sh --iterations 10
 ```
 
+如果你这次的目标是“直接展示”而不是从零创建任务，可以先准备 Demo：
+
+```bash
+bash scripts/run_demo_showcase_wsl.sh --mode static
+```
+
+如果你要现场演示动态流程：
+
+```bash
+bash scripts/run_demo_showcase_wsl.sh --mode live
+```
+
 ## 1. 进入系统
 
 默认地址：
@@ -249,27 +261,36 @@ artifact 默认会写到：
 artifacts/research/<task_id>/runs/<run_id>/
 ```
 
-## 7. Zotero v1 导入
+## 7. Zotero v1 本地导入导出
 
-当前 Zotero 只做第一阶段的“读入”。
+当前 Zotero 的默认主路径已经切换成“本地文件导入导出优先”。
 
 它的行为是：
 
-- 读取 Zotero collection / item
-- 映射到本地 project 下的 collection
+- 从 Zotero Desktop 导出的 `CSL JSON` / `BibTeX` 本地文件读取条目
+- 映射到当前 project 下的新 collection
+- collection 内按 `paper_id / DOI / title_norm` 去重
 - 不直接污染 canonical paper 表
+- 支持把 task / collection 导出为 `BibTeX / CSL JSON`
 
 推荐顺序：
 
-1. 在 `.env` 中配置 Zotero
-2. 在工作台左侧使用导入入口
-3. 选择要导入的 Zotero collection
+1. 在 Zotero Desktop 中导出 `CSL JSON` 或 `BibTeX`
+2. 在工作台左侧点击“导入 Zotero 文件”
+3. 选择文件，可选输入 collection 名称
 4. 导入后检查本地 collection
 5. 再从这个 collection 创建 study task
+6. 需要回到 Zotero 或其他文献工具时，再导出 `BibTeX / CSL JSON`
+
+legacy 兼容模式：
+
+- 旧的 Zotero Web API 导入接口仍保留
+- 只有在你明确配置 `ZOTERO_LIBRARY_ID / ZOTERO_API_KEY` 时才建议使用
 
 当前还不支持：
 
 - 双向同步
+- 直接读取 `zotero.sqlite`
 - 将本地注释写回 Zotero
 - 实时监听 Zotero 变化
 
@@ -383,7 +404,9 @@ OPENCLAW_AGENT_ID=main
 
 ### 11.3 Zotero
 
-如果要启用 Zotero 导入：
+默认本地文件导入导出不需要 Zotero API Key。
+
+如果你要启用 legacy Web API 兼容模式：
 
 ```env
 ZOTERO_BASE_URL=https://api.zotero.org
@@ -428,7 +451,7 @@ bash scripts/run_research_live_smoke_wsl.sh --scenario openclaw_auto
 4. 在这个 `project` 下先创建一个 `GPT Step` task。
 5. 熟悉方向规划、探索、候选、collection。
 6. 再创建一个 `OpenClaw Auto` task，体验 `checkpoint -> guidance -> continue`。
-7. 如果你已经配置了 Zotero，再导入一个 collection 做派生 study task。
+7. 如果你已经从 Zotero Desktop 导出了文件，再导入一个 collection 做派生 study task。
 
 ## 14. 当前最适合的使用方式
 
