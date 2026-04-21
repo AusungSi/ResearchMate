@@ -413,6 +413,34 @@ export function Workbench() {
     enabled: Boolean(activeTaskId && selectedPaperId),
   });
 
+  function resolveBrowserUrl(url?: string | null) {
+    if (!url) return "";
+    if (/^https?:\/\//i.test(url)) return url;
+    return new URL(url, window.location.origin).toString();
+  }
+
+  function openExternalUrl(url?: string | null) {
+    const nextUrl = resolveBrowserUrl(url);
+    if (!nextUrl) return false;
+    window.open(nextUrl, "_blank", "noopener,noreferrer");
+    return true;
+  }
+
+  function downloadExternalUrl(url?: string | null, filename?: string | null) {
+    const nextUrl = resolveBrowserUrl(url);
+    if (!nextUrl) return false;
+    const anchor = document.createElement("a");
+    anchor.href = nextUrl;
+    anchor.rel = "noreferrer";
+    if (filename) {
+      anchor.download = filename;
+    }
+    document.body.appendChild(anchor);
+    anchor.click();
+    document.body.removeChild(anchor);
+    return true;
+  }
+
   const chatHistoryQuery = useQuery({
     queryKey: ["node-chat-history", activeTaskId, chatTargetNodeId],
     queryFn: () => apiFetch<ChatResponse>(`/api/v1/research/tasks/${activeTaskId}/nodes/${encodeURIComponent(chatTargetNodeId)}/chat`),
@@ -1352,99 +1380,112 @@ export function Workbench() {
         </main>
       }
       detail={
-        <aside className="h-full overflow-auto bg-slate-50/60 p-5">
-          <div className="rounded-3xl border border-slate-200 bg-white p-4 shadow-sm">
-            <SectionTitle
-              eyebrow="Task Overview"
-              title={activeTask?.topic || "当前任务"}
-              description={activeTask ? `${activeTask.mode === "openclaw_auto" ? "OpenClaw Auto" : "GPT Step"} · ${activeTask.status}` : "选中任务后，这里会显示导出、全文和运行概况。"}
-            />
-            <div className="mt-3 flex flex-wrap gap-2">
-              <SmallButton disabled={!activeTask} onClick={() => exportTask.mutate("md")}>
-                导出 MD
-              </SmallButton>
-              <SmallButton disabled={!activeTask} onClick={() => exportTask.mutate("bib")}>
-                导出 BibTeX
-              </SmallButton>
-              <SmallButton disabled={!activeTask} onClick={() => exportTask.mutate("csljson")}>
-                导出 CSL JSON
-              </SmallButton>
-              <SmallButton disabled={!activeTask} onClick={() => exportTask.mutate("json")}>
-                导出 JSON
-              </SmallButton>
+        <aside className="flex h-full min-h-0 flex-col bg-slate-50/60 p-5">
+          <div className="rounded-3xl border border-slate-200 bg-white p-2 shadow-sm">
+            <div className="flex gap-2">
+              <button
+                className={`flex-1 rounded-2xl px-3 py-2 text-sm font-medium transition ${detailTab === "info" ? "bg-slate-900 text-white" : "bg-slate-50 text-slate-600 hover:bg-slate-100"}`}
+                onClick={() => setDetailTab("info")}
+              >
+                展示信息
+              </button>
+              <button
+                className={`flex-1 rounded-2xl px-3 py-2 text-sm font-medium transition ${detailTab === "chat" ? "bg-slate-900 text-white" : "bg-slate-50 text-slate-600 hover:bg-slate-100"}`}
+                onClick={() => setDetailTab("chat")}
+              >
+                对话
+              </button>
             </div>
-            {taskExportsQuery.data?.items?.length ? (
-              <div className="mt-3 space-y-2">
-                {taskExportsQuery.data.items.slice(0, 3).map((item) => (
-                  <div key={item.id} className="rounded-2xl border border-slate-200 bg-slate-50 p-3 text-xs text-slate-600">
-                    <div className="font-medium text-slate-900">
-                      {item.format.toUpperCase()} · {item.status}
-                    </div>
-                    {item.filename ? <div className="mt-1 text-slate-500">{item.filename}</div> : null}
-                    {item.output_path ? <div className="mt-1 break-all">{item.output_path}</div> : null}
-                    <div className="mt-2 flex flex-wrap gap-2">
-                      {item.download_url ? (
-                        <a className="rounded-xl border border-slate-200 bg-white px-3 py-2 text-xs font-medium text-slate-700" href={item.download_url} rel="noreferrer" target="_blank">
-                          打开 / 下载
-                        </a>
-                      ) : null}
-                    </div>
+          </div>
+
+          <div className="mt-4 min-h-0 flex-1 overflow-auto">
+            {detailTab === "chat" ? (
+              <ContextChatPanel
+                disabled={!activeTaskId}
+                nodeOptions={chatTargetOptions}
+                activeNodeId={chatTargetNodeId}
+                activeNodeLabel={chatTargetNode?.data?.label}
+                activeNodeType={chatTargetNode?.data?.type}
+                history={chatTargetHistory}
+                question={chatDraft}
+                busy={nodeChat.isPending}
+                onQuestionChange={setChatDraft}
+                onSelectNode={(nodeId) => setChatTargetNodeId(nodeId)}
+                onSend={(question, threadId) => chatTargetNodeId && nodeChat.mutate({ nodeId: chatTargetNodeId, question, threadId })}
+                onSaveAnswer={saveChatAnswerAsNode}
+              />
+            ) : (
+              <div className="space-y-4">
+                <div className="rounded-3xl border border-slate-200 bg-white p-4 shadow-sm">
+                  <SectionTitle
+                    eyebrow="Task Overview"
+                    title={activeTask?.topic || "当前任务"}
+                    description={activeTask ? `${activeTask.mode === "openclaw_auto" ? "OpenClaw Auto" : "GPT Step"} · ${activeTask.status}` : "选中任务后，这里会显示导出、全文和运行概况。"}
+                  />
+                  <div className="mt-3 flex flex-wrap gap-2">
+                    <SmallButton disabled={!activeTask} onClick={() => exportTask.mutate("md")}>
+                      导出 MD
+                    </SmallButton>
+                    <SmallButton disabled={!activeTask} onClick={() => exportTask.mutate("bib")}>
+                      导出 BibTeX
+                    </SmallButton>
+                    <SmallButton disabled={!activeTask} onClick={() => exportTask.mutate("csljson")}>
+                      导出 CSL JSON
+                    </SmallButton>
+                    <SmallButton disabled={!activeTask} onClick={() => exportTask.mutate("json")}>
+                      导出 JSON
+                    </SmallButton>
                   </div>
-                ))}
-              </div>
-            ) : null}
-          </div>
+                  {taskExportsQuery.data?.items?.length ? (
+                    <div className="mt-3 space-y-2">
+                      {taskExportsQuery.data.items.slice(0, 3).map((item) => (
+                        <div key={item.id} className="rounded-2xl border border-slate-200 bg-slate-50 p-3 text-xs text-slate-600">
+                          <div className="font-medium text-slate-900">
+                            {item.format.toUpperCase()} · {item.status}
+                          </div>
+                          {item.filename ? <div className="mt-1 text-slate-500">{item.filename}</div> : null}
+                          {item.output_path ? <div className="mt-1 break-all">{item.output_path}</div> : null}
+                          <div className="mt-2 flex flex-wrap gap-2">
+                            {item.download_url ? (
+                              <SmallButton onClick={() => downloadExternalUrl(item.download_url, item.filename)}>打开 / 下载</SmallButton>
+                            ) : null}
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  ) : null}
+                </div>
 
-          <ComparePanel report={compareReport} onSaveAsNote={() => saveCompareAsNode("note")} onSaveAsReport={() => saveCompareAsNode("report")} onClose={() => setCompareReport(null)} />
+                <ComparePanel report={compareReport} onSaveAsNote={() => saveCompareAsNode("note")} onSaveAsReport={() => saveCompareAsNode("report")} onClose={() => setCompareReport(null)} />
 
-          <div className="mt-4">
-            <CollectionDetailPanel
-              collection={activeCollection}
-              exportHistory={collectionExportsQuery.data?.items || []}
-              searchText={collectionSearchText}
-              selectedItemIds={selectedCollectionItemIds}
-              onSearchTextChange={setCollectionSearchText}
-              onToggleItem={(itemId) =>
-                setSelectedCollectionItemIds((current) => (current.includes(itemId) ? current.filter((value) => value !== itemId) : [...current, itemId]))
-              }
-              onToggleAllVisible={(itemIds) =>
-                setSelectedCollectionItemIds((current) => {
-                  const allSelected = itemIds.every((itemId) => current.includes(itemId));
-                  if (allSelected) {
-                    return current.filter((value) => !itemIds.includes(value));
+                <CollectionDetailPanel
+                  collection={activeCollection}
+                  exportHistory={collectionExportsQuery.data?.items || []}
+                  searchText={collectionSearchText}
+                  selectedItemIds={selectedCollectionItemIds}
+                  onSearchTextChange={setCollectionSearchText}
+                  onToggleItem={(itemId) =>
+                    setSelectedCollectionItemIds((current) => (current.includes(itemId) ? current.filter((value) => value !== itemId) : [...current, itemId]))
                   }
-                  return [...new Set([...current, ...itemIds])];
-                })
-              }
-              onSummarize={() => activeCollectionId && summarizeCollection.mutate(activeCollectionId)}
-              onCreateStudy={() => activeCollectionId && createStudyFromCollection.mutate({ collectionId: activeCollectionId })}
-              onBuildGraph={() => activeCollectionId && buildCollectionGraph.mutate(activeCollectionId)}
-              onCompare={() => activeCollectionId && compareCollection.mutate({ collectionId: activeCollectionId })}
-              onRemoveSelected={() => activeCollectionId && selectedCollectionItemIds.length && removeCollectionItems.mutate({ collectionId: activeCollectionId, itemIds: selectedCollectionItemIds })}
-              onExportBib={() => activeCollectionId && exportCollection.mutate({ collectionId: activeCollectionId, format: "bib" })}
-              onExportCslJson={() => activeCollectionId && exportCollection.mutate({ collectionId: activeCollectionId, format: "csljson" })}
-              onLoadMore={() => setCollectionLimit((current) => current + 50)}
-            />
-          </div>
+                  onToggleAllVisible={(itemIds) =>
+                    setSelectedCollectionItemIds((current) => {
+                      const allSelected = itemIds.every((itemId) => current.includes(itemId));
+                      if (allSelected) {
+                        return current.filter((value) => !itemIds.includes(value));
+                      }
+                      return [...new Set([...current, ...itemIds])];
+                    })
+                  }
+                  onSummarize={() => activeCollectionId && summarizeCollection.mutate(activeCollectionId)}
+                  onCreateStudy={() => activeCollectionId && createStudyFromCollection.mutate({ collectionId: activeCollectionId })}
+                  onBuildGraph={() => activeCollectionId && buildCollectionGraph.mutate(activeCollectionId)}
+                  onCompare={() => activeCollectionId && compareCollection.mutate({ collectionId: activeCollectionId })}
+                  onRemoveSelected={() => activeCollectionId && selectedCollectionItemIds.length && removeCollectionItems.mutate({ collectionId: activeCollectionId, itemIds: selectedCollectionItemIds })}
+                  onExportBib={() => activeCollectionId && exportCollection.mutate({ collectionId: activeCollectionId, format: "bib" })}
+                  onExportCslJson={() => activeCollectionId && exportCollection.mutate({ collectionId: activeCollectionId, format: "csljson" })}
+                  onLoadMore={() => setCollectionLimit((current) => current + 50)}
+                />
 
-          <div className="mt-4">
-            <div className="rounded-3xl border border-slate-200 bg-white p-2 shadow-sm">
-              <div className="flex gap-2 px-2 pb-2">
-                <button
-                  className={`flex-1 rounded-2xl px-3 py-2 text-sm font-medium transition ${detailTab === "info" ? "bg-slate-900 text-white" : "bg-slate-50 text-slate-600 hover:bg-slate-100"}`}
-                  onClick={() => setDetailTab("info")}
-                >
-                  节点信息
-                </button>
-                <button
-                  className={`flex-1 rounded-2xl px-3 py-2 text-sm font-medium transition ${detailTab === "chat" ? "bg-slate-900 text-white" : "bg-slate-50 text-slate-600 hover:bg-slate-100"}`}
-                  onClick={() => setDetailTab("chat")}
-                >
-                  聊天
-                </button>
-              </div>
-
-              {detailTab === "info" ? (
                 <DetailPanel
                   mode={activeTask?.mode || "gpt_step"}
                   node={selectedNode}
@@ -1456,12 +1497,29 @@ export function Workbench() {
                   onDeleteNode={deleteSelectedNode}
                   onOpenPdf={() => {
                     const pdf = paperAssetQuery.data?.items.find((item) => item.kind === "pdf" && item.status === "available");
-                    const openUrl = pdf?.open_url || pdf?.download_url || "";
-                    if (!openUrl) {
-                      setActionStatus({ tone: "warning", text: "当前论文还没有可打开的 PDF" });
+                    if (!pdf?.open_url && !pdf?.download_url) {
+                      setActionStatus({ tone: "warning", text: "当前论文还没有可打开的 PDF。" });
                       return;
                     }
-                    window.open(openUrl, "_blank", "noopener,noreferrer");
+                    openExternalUrl(pdf?.open_url || pdf?.download_url);
+                  }}
+                  onDownloadPdf={() => {
+                    const pdf = paperAssetQuery.data?.items.find((item) => item.kind === "pdf" && item.status === "available");
+                    if (!pdf?.download_url && !pdf?.open_url) {
+                      setActionStatus({ tone: "warning", text: "当前论文还没有可下载的 PDF。" });
+                      return;
+                    }
+                    downloadExternalUrl(pdf?.download_url || pdf?.open_url, pdf?.filename || "paper.pdf");
+                  }}
+                  onOpenAsset={(url) => {
+                    if (!openExternalUrl(url)) {
+                      setActionStatus({ tone: "warning", text: "当前资产还不能打开。" });
+                    }
+                  }}
+                  onDownloadAsset={(url, filename) => {
+                    if (!downloadExternalUrl(url, filename)) {
+                      setActionStatus({ tone: "warning", text: "当前资产还不能下载。" });
+                    }
                   }}
                   onSavePaper={() => selectedPaperId && workbenchAction.mutate({ type: "save_paper", paperId: selectedPaperId })}
                   onSummarizePaper={() => selectedPaperId && workbenchAction.mutate({ type: "summarize_paper", paperId: selectedPaperId })}
@@ -1480,65 +1538,60 @@ export function Workbench() {
                     setChatDraft(question);
                   }}
                 />
-              ) : (
-                <ContextChatPanel
-                  disabled={!activeTaskId}
-                  nodeOptions={chatTargetOptions}
-                  activeNodeId={chatTargetNodeId}
-                  activeNodeLabel={chatTargetNode?.data?.label}
-                  activeNodeType={chatTargetNode?.data?.type}
-                  history={chatTargetHistory}
-                  question={chatDraft}
-                  busy={nodeChat.isPending}
-                  onQuestionChange={setChatDraft}
-                  onSelectNode={(nodeId) => setChatTargetNodeId(nodeId)}
-                  onSend={(question, threadId) => chatTargetNodeId && nodeChat.mutate({ nodeId: chatTargetNodeId, question, threadId })}
-                  onSaveAnswer={saveChatAnswerAsNode}
+
+                <RunTimeline
+                  mode={activeTask?.mode || "gpt_step"}
+                  autoStatus={activeTask?.auto_status || ""}
+                  runId={runId}
+                  events={eventsState.items}
+                  summary={eventsState.summary}
+                  error={eventsState.error}
+                  onGuidance={(text) => workbenchAction.mutate({ type: "guidance", text })}
+                  onContinue={() => workbenchAction.mutate({ type: "auto_continue" })}
+                  onCancel={() => workbenchAction.mutate({ type: "auto_cancel" })}
                 />
-              )}
-            </div>
+
+                {selectedNode && isPaperNode(selectedNode.id) ? (
+                  <PdfPanel
+                    taskId={activeTaskId}
+                    paperId={selectedPaperId}
+                    previewUrl={pdfUrl}
+                    assets={paperAssetQuery.data || null}
+                    fulltextItem={selectedFulltextItem}
+                    fulltextSummary={fulltextStatusQuery.data?.summary || null}
+                    busy={uploadPdf.isPending || workbenchAction.isPending || rebuildPaperVisual.isPending}
+                    onClose={() => setPdfUrl("")}
+                    onPreviewPdf={(url) => setPdfUrl(resolveBrowserUrl(url))}
+                    onOpenAsset={(url) => {
+                      if (!openExternalUrl(url)) {
+                        setActionStatus({ tone: "warning", text: "当前资产还不能打开。" });
+                      }
+                    }}
+                    onDownloadAsset={(url, filename) => {
+                      if (!downloadExternalUrl(url, filename)) {
+                        setActionStatus({ tone: "warning", text: "当前资产还不能下载。" });
+                      }
+                    }}
+                    onBuildFulltext={() => workbenchAction.mutate({ type: "quick", action: "build_fulltext" })}
+                    onRetryFulltext={() =>
+                      apiFetch(`/api/v1/research/tasks/${activeTaskId}/fulltext/retry?paper_ids=${encodeURIComponent(selectedPaperId)}`, {
+                        method: "POST",
+                      })
+                        .then(() => {
+                          setActionStatus({ tone: "success", text: "已提交全文重试请求" });
+                          client.invalidateQueries({ queryKey: ["fulltext-status", activeTaskId] });
+                        })
+                        .catch((cause) => {
+                          setActionStatus({ tone: "danger", text: cause instanceof Error ? cause.message : String(cause) });
+                        })
+                    }
+                    onUploadPdf={(file) => uploadPdf.mutate(file)}
+                    onRebuildVisual={() => rebuildPaperVisual.mutate()}
+                  />
+                ) : null}
+              </div>
+            )}
           </div>
-
-          <RunTimeline
-            mode={activeTask?.mode || "gpt_step"}
-            autoStatus={activeTask?.auto_status || ""}
-            runId={runId}
-            events={eventsState.items}
-            summary={eventsState.summary}
-            error={eventsState.error}
-            onGuidance={(text) => workbenchAction.mutate({ type: "guidance", text })}
-            onContinue={() => workbenchAction.mutate({ type: "auto_continue" })}
-            onCancel={() => workbenchAction.mutate({ type: "auto_cancel" })}
-          />
-
-          {selectedNode && isPaperNode(selectedNode.id) ? (
-            <PdfPanel
-              taskId={activeTaskId}
-              paperId={selectedPaperId}
-              previewUrl={pdfUrl}
-              assets={paperAssetQuery.data || null}
-              fulltextItem={selectedFulltextItem}
-              fulltextSummary={fulltextStatusQuery.data?.summary || null}
-              busy={uploadPdf.isPending || workbenchAction.isPending || rebuildPaperVisual.isPending}
-              onClose={() => setPdfUrl("")}
-              onPreviewPdf={(url) => setPdfUrl(url)}
-              onBuildFulltext={() => workbenchAction.mutate({ type: "quick", action: "build_fulltext" })}
-              onRetryFulltext={() =>
-                apiFetch(`/api/v1/research/tasks/${activeTaskId}/fulltext/retry?paper_ids=${encodeURIComponent(selectedPaperId)}`, {
-                  method: "POST",
-                })
-                  .then(() => {
-                    setActionStatus({ tone: "success", text: "已提交全文重试请求" });
-                    client.invalidateQueries({ queryKey: ["fulltext-status", activeTaskId] });
-                  })
-                  .catch((cause) => {
-                    setActionStatus({ tone: "danger", text: cause instanceof Error ? cause.message : String(cause) });
-                  })
-              }
-              onUploadPdf={(file) => uploadPdf.mutate(file)}
-              onRebuildVisual={() => rebuildPaperVisual.mutate()}
-            />
-          ) : null}
         </aside>
       }
       />

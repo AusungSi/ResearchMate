@@ -5,6 +5,7 @@ import { DetailPanel } from "./DetailPanel";
 describe("DetailPanel", () => {
   it("shows round candidates and paper actions", () => {
     const onOpenPdf = vi.fn();
+    const onDownloadPdf = vi.fn();
 
     const { rerender } = render(
       <DetailPanel
@@ -22,6 +23,7 @@ describe("DetailPanel", () => {
         onToggleHidden={vi.fn()}
         onDeleteNode={vi.fn()}
         onOpenPdf={onOpenPdf}
+        onDownloadPdf={onDownloadPdf}
         onSavePaper={vi.fn()}
         onSummarizePaper={vi.fn()}
         onRebuildVisual={vi.fn()}
@@ -58,7 +60,7 @@ describe("DetailPanel", () => {
           url: "https://example.com",
           abstract: "paper abstract",
           method_summary: "",
-          card_summary: "Problem: grounded control\nMethod: demo model\nResult: stable gains",
+          card_summary: "问题：grounded control\n方法：demo model\n结果：stable gains",
           summary_source: "fulltext",
           summary_status: "done",
           source: "semantic_scholar",
@@ -71,13 +73,14 @@ describe("DetailPanel", () => {
           task_id: "R-1",
           paper_id: "paper:demo",
           primary_kind: "pdf",
-          items: [{ kind: "pdf", status: "available", open_url: "/pdf-inline", download_url: "/pdf" }],
+          items: [{ kind: "pdf", status: "available", open_url: "/pdf-inline", download_url: "/pdf", filename: "demo.pdf" }],
         }}
         roundCandidates={[]}
         onUpdateNote={vi.fn()}
         onToggleHidden={vi.fn()}
         onDeleteNode={vi.fn()}
         onOpenPdf={onOpenPdf}
+        onDownloadPdf={onDownloadPdf}
         onSavePaper={vi.fn()}
         onSummarizePaper={vi.fn()}
         onRebuildVisual={vi.fn()}
@@ -94,7 +97,9 @@ describe("DetailPanel", () => {
     expect(screen.getByText("打开 PDF")).toBeInTheDocument();
     fireEvent.click(screen.getByText("打开 PDF"));
     expect(onOpenPdf).toHaveBeenCalled();
+    fireEvent.click(screen.getByText("下载 PDF"));
+    expect(onDownloadPdf).toHaveBeenCalled();
     expect(screen.getAllByText("Paper Visual").length).toBeGreaterThan(0);
-    expect(screen.getByText("Why It Matters")).toBeInTheDocument();
+    expect(screen.getByText("Card Summary")).toBeInTheDocument();
   });
 });

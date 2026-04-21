@@ -1474,6 +1474,7 @@ class ResearchService:
 
     def save_canvas_state(self, db: Session, *, user_id: int, task_id: str, state: dict) -> dict:
         task = self.switch_task(db, user_id=user_id, task_id=task_id, remember_active=False)
+        task_token = task.task_id
         payload = {
             "nodes": list(state.get("nodes") or []),
             "edges": list(state.get("edges") or []),
@@ -1489,11 +1490,13 @@ class ResearchService:
             )
         except OperationalError as exc:
             if self._is_sqlite_locked_error(exc):
-                logger.warning("research_canvas_save_busy task_id=%s", task.task_id)
+                db.rollback()
+                logger.warning("research_canvas_save_busy task_id=%s", task_token)
                 raise CanvasStateBusyError("canvas_save_busy") from exc
+            db.rollback()
             raise
         return {
-            "task_id": task.task_id,
+            "task_id": task_token,
             "nodes": payload["nodes"],
             "edges": payload["edges"],
             "viewport": payload["viewport"],
@@ -1513,6 +1516,7 @@ class ResearchService:
         tags: list[str] | None = None,
     ) -> dict:
         task = self.switch_task(db, user_id=user_id, task_id=task_id, remember_active=False)
+        task_token = task.task_id
         repo = ResearchNodeChatRepo(db)
         thread = (thread_id or uuid4().hex[:12]).strip()[:64]
         context = self._resolve_node_context(db, task=task, node_id=node_id)
@@ -1526,8 +1530,10 @@ class ResearchService:
             )
         except OperationalError as exc:
             if self._is_sqlite_locked_error(exc):
-                logger.warning("research_node_chat_read_busy task_id=%s node_id=%s", task.task_id, node_id)
+                db.rollback()
+                logger.warning("research_node_chat_read_busy task_id=%s node_id=%s", task_token, node_id)
                 raise NodeChatBusyError("node_chat_busy") from exc
+            db.rollback()
             raise
         history_lines = [f"Q: {row.question}\nA: {row.answer}" for row in history_rows[-4:]]
         prompt = (
@@ -1592,15 +1598,17 @@ class ResearchService:
             )
         except OperationalError as exc:
             if self._is_sqlite_locked_error(exc):
-                logger.warning("research_node_chat_write_busy task_id=%s node_id=%s", task.task_id, node_id)
+                db.rollback()
+                logger.warning("research_node_chat_write_busy task_id=%s node_id=%s", task_token, node_id)
                 raise NodeChatBusyError("node_chat_busy") from exc
+            db.rollback()
             raise
         return {
-            "task_id": task.task_id,
+            "task_id": task_token,
             "node_id": node_id,
             "thread_id": thread,
-            "item": self._node_chat_to_dict(task.task_id, row),
-            "history": [self._node_chat_to_dict(task.task_id, item) for item in history_rows],
+            "item": self._node_chat_to_dict(task_token, row),
+            "history": [self._node_chat_to_dict(task_token, item) for item in history_rows],
         }
 
     def get_node_chat_history(
@@ -1614,6 +1622,7 @@ class ResearchService:
         limit: int = 50,
     ) -> dict:
         task = self.switch_task(db, user_id=user_id, task_id=task_id, remember_active=False)
+        task_token = task.task_id
         repo = ResearchNodeChatRepo(db)
         try:
             history_rows = self._run_with_locked_retry(
@@ -1624,17 +1633,19 @@ class ResearchService:
             )
         except OperationalError as exc:
             if self._is_sqlite_locked_error(exc):
-                logger.warning("research_node_chat_history_busy task_id=%s node_id=%s", task.task_id, node_id)
+                db.rollback()
+                logger.warning("research_node_chat_history_busy task_id=%s node_id=%s", task_token, node_id)
                 raise NodeChatBusyError("node_chat_busy") from exc
+            db.rollback()
             raise
         latest = history_rows[-1] if history_rows else None
         resolved_thread = thread_id or (latest.thread_id if latest else None)
         return {
-            "task_id": task.task_id,
+            "task_id": task_token,
             "node_id": node_id,
             "thread_id": resolved_thread,
-            "item": self._node_chat_to_dict(task.task_id, latest) if latest else None,
-            "history": [self._node_chat_to_dict(task.task_id, item) for item in history_rows],
+            "item": self._node_chat_to_dict(task_token, latest) if latest else None,
+            "history": [self._node_chat_to_dict(task_token, item) for item in history_rows],
         }
 
     def _project_context_prompt(self, db: Session, *, task: ResearchTask) -> str:

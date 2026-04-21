@@ -1,7 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import type { Node } from "@xyflow/react";
-import { assetKindLabel, nodeTypeLabel, summarizeForNode, summarySourceLabel, summaryStatusLabel } from "../display";
-import type { FlowNodeData, PaperAssetResponse, PaperDetail, RoundCandidate, TaskMode } from "../types";
+import type { FlowNodeData, PaperAssetItem, PaperAssetResponse, PaperDetail, RoundCandidate, TaskMode } from "../types";
 import { inferRoundId, isPaperNode, tone } from "../utils";
 import { Badge, MarkdownText, SectionTitle, SmallButton } from "./shared";
 
@@ -15,6 +14,9 @@ type Props = {
   onToggleHidden: () => void;
   onDeleteNode: () => void;
   onOpenPdf: () => void;
+  onDownloadPdf?: () => void;
+  onOpenAsset?: (url: string) => void;
+  onDownloadAsset?: (url: string, filename?: string | null) => void;
   onSavePaper: () => void;
   onSummarizePaper: () => void;
   onRebuildVisual: () => void;
@@ -34,6 +36,44 @@ const ACTION_OPTIONS = [
   { value: "converge", label: "收敛核心问题" },
 ];
 
+const NODE_TYPE_LABELS: Record<string, string> = {
+  topic: "主题",
+  direction: "方向",
+  round: "轮次",
+  paper: "论文",
+  checkpoint: "Checkpoint",
+  report: "阶段报告",
+  note: "笔记",
+  group: "分组",
+  reference: "参考",
+  question: "问题",
+};
+
+const SUMMARY_SOURCE_LABELS: Record<string, string> = {
+  fulltext: "基于全文",
+  abstract: "基于摘要",
+  method_fallback: "摘要回退",
+  none: "暂无来源",
+};
+
+const SUMMARY_STATUS_LABELS: Record<string, string> = {
+  done: "已生成",
+  running: "生成中",
+  queued: "已排队",
+  fallback: "回退摘要",
+  none: "暂无摘要",
+  failed: "生成失败",
+};
+
+const ASSET_KIND_LABELS: Record<string, string> = {
+  pdf: "PDF",
+  txt: "TXT",
+  md: "Markdown",
+  bib: "BibTeX",
+  figure: "主图",
+  visual: "展示图",
+};
+
 function assetByKind(assets: PaperAssetResponse | null, kind: string) {
   return assets?.items.find((item) => item.kind === kind) || null;
 }
@@ -45,6 +85,27 @@ function PreviewBox(props: { title: string; url?: string | null; emptyText: stri
   return (
     <div className="overflow-hidden rounded-2xl border border-slate-200 bg-slate-50">
       <img src={props.url} alt={props.title} className="h-48 w-full object-contain bg-white" />
+    </div>
+  );
+}
+
+function AssetActionButtons(props: {
+  item: PaperAssetItem;
+  onOpenAsset?: (url: string) => void;
+  onDownloadAsset?: (url: string, filename?: string | null) => void;
+}) {
+  return (
+    <div className="mt-2 flex flex-wrap gap-2">
+      {props.item.open_url ? (
+        <SmallButton onClick={() => props.onOpenAsset?.(props.item.open_url || "")} disabled={!props.onOpenAsset}>
+          打开
+        </SmallButton>
+      ) : null}
+      {props.item.download_url ? (
+        <SmallButton onClick={() => props.onDownloadAsset?.(props.item.download_url || "", props.item.filename)} disabled={!props.onDownloadAsset}>
+          下载
+        </SmallButton>
+      ) : null}
     </div>
   );
 }
@@ -67,8 +128,8 @@ export function DetailPanel(props: Props) {
   const preferredPreviewUrl = figureAsset?.open_url || visualAsset?.open_url || props.paperDetail?.preview_url || null;
   const summarySource = props.paperDetail?.summary_source || nodeData?.summary_source || null;
   const summaryStatus = props.paperDetail?.summary_status || nodeData?.summary_status || null;
-  const displaySummary = props.paperDetail?.card_summary || summarizeForNode(nodeData);
-  const canDeleteNode = Boolean(node);
+  const displaySummary =
+    props.paperDetail?.card_summary || nodeData?.card_summary || nodeData?.summary || nodeData?.method_summary || nodeData?.abstract || nodeData?.feedback_text || "当前还没有可展示的摘要。";
 
   useEffect(() => {
     setFeedback("");
@@ -93,23 +154,23 @@ export function DetailPanel(props: Props) {
       <SectionTitle
         eyebrow="节点信息"
         title={nodeData?.label || "未命名节点"}
-        description="这里聚合当前节点的解释、动作、论文资产和手工整理入口。"
+        description="这里聚合当前节点的解读、动作、论文资产和手工整理入口。"
       />
 
       <div className="mt-3 flex flex-wrap gap-2">
-        <Badge tone={tone(String(nodeData?.type || ""))}>{nodeTypeLabel(String(nodeData?.type || ""))}</Badge>
+        <Badge tone={tone(String(nodeData?.type || ""))}>{NODE_TYPE_LABELS[String(nodeData?.type || "")] || String(nodeData?.type || "节点")}</Badge>
         {nodeData?.status ? <Badge tone="slate">{String(nodeData.status)}</Badge> : null}
         {directionIndex ? <Badge tone="green">{`方向 ${directionIndex}`}</Badge> : null}
         {isPaper && props.paperDetail?.year ? <Badge tone="amber">{String(props.paperDetail.year)}</Badge> : null}
         {props.paperDetail?.venue ? <Badge tone="blue">{props.paperDetail.venue}</Badge> : null}
-        {summarySource ? <Badge tone="slate">{summarySourceLabel(summarySource)}</Badge> : null}
-        {summaryStatus ? <Badge tone="violet">{summaryStatusLabel(summaryStatus)}</Badge> : null}
+        {summarySource ? <Badge tone="slate">{SUMMARY_SOURCE_LABELS[summarySource] || summarySource}</Badge> : null}
+        {summaryStatus ? <Badge tone="violet">{SUMMARY_STATUS_LABELS[summaryStatus] || summaryStatus}</Badge> : null}
         {props.paperDetail?.preview_kind ? <Badge tone="amber">{props.paperDetail.preview_kind === "figure" ? "主图预览" : "展示图预览"}</Badge> : null}
         {nodeData?.isManual ? <Badge tone="amber">手工节点</Badge> : null}
       </div>
 
       <div className="mt-4 rounded-2xl border border-slate-200 bg-slate-50 p-3">
-        <div className="text-[11px] font-medium uppercase tracking-wide text-slate-500">Why It Matters</div>
+        <div className="text-[11px] font-medium uppercase tracking-wide text-slate-500">Card Summary</div>
         <div className="mt-2 whitespace-pre-line text-sm leading-6 text-slate-700">{displaySummary}</div>
       </div>
 
@@ -126,14 +187,12 @@ export function DetailPanel(props: Props) {
             去聊天里提问
           </SmallButton>
           <SmallButton onClick={props.onToggleHidden}>{node?.hidden ? "恢复显示" : "隐藏节点"}</SmallButton>
-          <SmallButton onClick={props.onDeleteNode} disabled={!canDeleteNode}>
-            删除节点
-          </SmallButton>
+          <SmallButton onClick={props.onDeleteNode}>删除节点</SmallButton>
         </div>
         <div className="mt-2 text-xs leading-5 text-slate-500">
           {nodeData?.isManual
             ? "手工节点会被真实删除，相关手工连线也会一起移除。"
-            : "系统节点会从画布隐藏，不会删除研究主数据；与它相连的展示连线也会一起隐藏。"}
+            : "系统节点会从画布中隐藏，不会删除研究主数据；与它相连的展示连线也会一起隐藏。"}
         </div>
       </div>
 
@@ -215,16 +274,9 @@ export function DetailPanel(props: Props) {
             <SmallButton tone="solid" disabled={pdfAsset?.status !== "available"} onClick={props.onOpenPdf}>
               打开 PDF
             </SmallButton>
-            {pdfAsset?.download_url ? (
-              <a
-                className="inline-flex items-center justify-center rounded-xl border border-slate-200 bg-white px-3 py-2 text-xs font-medium text-slate-700 transition hover:border-slate-300 hover:bg-slate-50"
-                href={pdfAsset.download_url}
-                rel="noreferrer"
-                target="_blank"
-              >
-                下载 PDF
-              </a>
-            ) : null}
+            <SmallButton disabled={pdfAsset?.status !== "available" || !props.onDownloadPdf} onClick={props.onDownloadPdf}>
+              下载 PDF
+            </SmallButton>
             <SmallButton onClick={() => props.onAskPreset("这篇论文解决什么问题？核心方法、关键证据和局限分别是什么？")}>去聊天里分析</SmallButton>
             <SmallButton onClick={props.onSavePaper}>保存论文</SmallButton>
             <SmallButton onClick={props.onSummarizePaper}>生成结构化摘要</SmallButton>
@@ -234,7 +286,7 @@ export function DetailPanel(props: Props) {
           <div className="mt-4">
             <div className="text-xs font-semibold uppercase tracking-[0.16em] text-slate-400">Paper Visual</div>
             <div className="mt-3 space-y-3">
-              <PreviewBox title={props.paperDetail?.title || "paper preview"} url={preferredPreviewUrl} emptyText="当前还没有可展示图片。若论文已有 PDF，可以点“重建展示图”尝试生成主图或模板图。" />
+              <PreviewBox title={props.paperDetail?.title || "paper preview"} url={preferredPreviewUrl} emptyText="当前还没有可展示图片。若论文已有 PDF，可以点击“重建展示图”尝试生成主图或模板图。" />
               <div className="grid gap-3 md:grid-cols-2">
                 <AssetStatusCard title="Main Figure" item={figureAsset} />
                 <AssetStatusCard title="Paper Visual" item={visualAsset} />
@@ -254,8 +306,8 @@ export function DetailPanel(props: Props) {
           <div className="mt-4 rounded-2xl border border-slate-200 bg-slate-50 p-3">
             <div className="text-xs font-semibold uppercase tracking-[0.16em] text-slate-400">完整结构化摘要</div>
             <div className="mt-2 flex flex-wrap gap-2">
-              {summarySource ? <Badge tone="slate">{summarySourceLabel(summarySource)}</Badge> : null}
-              {summaryStatus ? <Badge tone="violet">{summaryStatusLabel(summaryStatus)}</Badge> : null}
+              {summarySource ? <Badge tone="slate">{SUMMARY_SOURCE_LABELS[summarySource] || summarySource}</Badge> : null}
+              {summaryStatus ? <Badge tone="violet">{SUMMARY_STATUS_LABELS[summaryStatus] || summaryStatus}</Badge> : null}
             </div>
             <MarkdownText
               className="prose prose-sm mt-3 max-w-none text-sm leading-6 text-slate-700 prose-headings:mb-2 prose-headings:mt-3 prose-headings:text-slate-900 prose-p:my-2 prose-li:my-1 prose-code:rounded prose-code:bg-slate-100 prose-code:px-1 prose-code:py-0.5"
@@ -269,20 +321,9 @@ export function DetailPanel(props: Props) {
               <div className="mt-2 grid gap-2 text-xs text-slate-600 md:grid-cols-2">
                 {props.paperAssets.items.map((item) => (
                   <div key={item.kind} className="rounded-xl border border-slate-200 bg-white px-3 py-2">
-                    <div className="font-medium text-slate-900">{assetKindLabel(item.kind)}</div>
+                    <div className="font-medium text-slate-900">{ASSET_KIND_LABELS[item.kind] || item.kind}</div>
                     <div className="mt-1">{item.status === "available" ? "可访问" : "缺失"}</div>
-                    <div className="mt-2 flex flex-wrap gap-2">
-                      {item.open_url ? (
-                        <a className="text-blue-600 underline underline-offset-2" href={item.open_url} rel="noreferrer" target="_blank">
-                          打开
-                        </a>
-                      ) : null}
-                      {item.download_url ? (
-                        <a className="text-slate-600 underline underline-offset-2" href={item.download_url} rel="noreferrer" target="_blank">
-                          下载
-                        </a>
-                      ) : null}
-                    </div>
+                    <AssetActionButtons item={item} onOpenAsset={props.onOpenAsset} onDownloadAsset={props.onDownloadAsset} />
                   </div>
                 ))}
               </div>
@@ -294,15 +335,21 @@ export function DetailPanel(props: Props) {
               <div className="text-xs font-semibold uppercase tracking-[0.16em] text-slate-400">文本与引用</div>
               <div className="mt-3 flex flex-wrap gap-2">
                 {[txtAsset, mdAsset, bibAsset].filter(Boolean).map((item) => (
-                  <a
+                  <SmallButton
                     key={item?.kind}
-                    className="inline-flex items-center justify-center rounded-xl border border-slate-200 bg-slate-50 px-3 py-2 text-xs font-medium text-slate-700 transition hover:border-slate-300 hover:bg-white"
-                    href={item?.open_url || item?.download_url || "#"}
-                    rel="noreferrer"
-                    target="_blank"
+                    onClick={() => {
+                      if (!item?.open_url && !item?.download_url) return;
+                      if (item?.open_url && props.onOpenAsset) {
+                        props.onOpenAsset(item.open_url);
+                        return;
+                      }
+                      if (item?.download_url && props.onDownloadAsset) {
+                        props.onDownloadAsset(item.download_url, item.filename);
+                      }
+                    }}
                   >
-                    {assetKindLabel(item?.kind || "")}
-                  </a>
+                    {ASSET_KIND_LABELS[item?.kind || ""] || item?.kind}
+                  </SmallButton>
                 ))}
               </div>
             </div>
@@ -312,7 +359,7 @@ export function DetailPanel(props: Props) {
 
       {node && props.mode === "openclaw_auto" ? (
         <div className="mt-4 rounded-2xl border border-slate-200 bg-slate-50 p-3 text-sm text-slate-600">
-          OpenClaw Auto 模式下，节点信息面板只负责解释当前节点；完整自动研究推进和 checkpoint 引导仍在运行日志区域处理。
+          OpenClaw Auto 模式下，节点信息面板只负责解释当前节点；完整的自动研究推进和 checkpoint 引导仍在运行日志区域处理。
         </div>
       ) : null}
     </div>

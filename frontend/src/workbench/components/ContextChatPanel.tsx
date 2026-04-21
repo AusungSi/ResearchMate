@@ -41,19 +41,39 @@ function quickQuestionsForNodeType(nodeType?: string | null) {
     ];
   }
   if (nodeType === "direction") {
-    return ["这个方向的核心价值是什么？", "下一步最值得补哪些论文？", "这个方向和当前主题的关系是什么？"];
+    return [
+      "这个方向的核心价值是什么？",
+      "下一步最值得补哪些论文？",
+      "这个方向和当前主题的关系是什么？",
+    ];
   }
   if (nodeType === "round") {
-    return ["这一轮探索的目标是什么？", "当前候选方向各自的利弊是什么？", "下一轮应该如何收敛？"];
+    return [
+      "这一轮探索的目标是什么？",
+      "当前候选方向各自的利弊是什么？",
+      "下一轮应该如何收敛？",
+    ];
   }
   if (nodeType === "checkpoint") {
-    return ["这个 checkpoint 已经确认了什么？", "系统建议的下一步是什么？", "我应该如何给 guidance？"];
+    return [
+      "这个 checkpoint 已经确认了什么？",
+      "系统建议的下一步是什么？",
+      "我现在该如何给 guidance？",
+    ];
   }
   if (nodeType === "report") {
-    return ["这份阶段报告最重要的结论是什么？", "还有哪些空白没有补齐？", "下一步最值得继续扩展什么？"];
+    return [
+      "这份阶段报告最重要的结论是什么？",
+      "还有哪些空白没有补齐？",
+      "下一步最值得继续扩展什么？",
+    ];
   }
   if (nodeType === "question") {
-    return ["请回答这个问题节点。", "这个问题应该连接到哪些论文或方向？", "这个问题下一步该怎么验证？"];
+    return [
+      "请直接回答这个问题节点。",
+      "这个问题应该连接到哪些论文或方向？",
+      "这个问题下一步该怎么验证？",
+    ];
   }
   return DEFAULT_QUESTIONS;
 }
@@ -68,19 +88,19 @@ export function ContextChatPanel(props: Props) {
   }, [props.activeNodeId]);
 
   return (
-    <div className="rounded-3xl border border-slate-200 bg-white p-4 shadow-sm">
+    <div className="flex h-full min-h-0 flex-col rounded-3xl border border-slate-200 bg-white p-4 shadow-sm">
       <SectionTitle
         eyebrow="聊天"
         title="研究对话"
         description={
           props.disabled
-            ? "请先选择任务。聊天不会自动绑定节点，你可以在下面手动指定要围绕哪个节点提问。"
-            : "聊天区不再跟随当前选中节点自动切换。你可以手动选择聊天对象，再围绕该节点持续追问。"
+            ? "请先选择一个任务。聊天现在不会自动绑定右侧选中的节点，你可以手动指定要围绕哪个节点提问。"
+            : "聊天页现在是独立的整栏视图。你可以手动选择对话对象，再围绕该节点连续追问。"
         }
       />
 
       <div className="mt-4">
-        <label className="text-xs font-semibold uppercase tracking-[0.16em] text-slate-400">聊天对象</label>
+        <label className="text-xs font-semibold uppercase tracking-[0.16em] text-slate-400">对话对象</label>
         <select
           className="mt-2 w-full rounded-2xl border border-slate-200 bg-slate-50 px-3 py-2 text-sm text-slate-700 outline-none"
           value={props.activeNodeId}
@@ -95,7 +115,7 @@ export function ContextChatPanel(props: Props) {
           ))}
         </select>
         <div className="mt-2 text-xs text-slate-500">
-          {props.activeNodeId ? `当前聊天对象：${props.activeNodeLabel || props.activeNodeId}` : "还没有选定聊天对象。"}
+          {props.activeNodeId ? `当前对话对象：${props.activeNodeLabel || props.activeNodeId}` : "还没有选定对话对象。"}
         </div>
       </div>
 
@@ -119,7 +139,7 @@ export function ContextChatPanel(props: Props) {
         </button>
       </div>
 
-      <div className="mt-4 max-h-72 space-y-3 overflow-auto pr-1">
+      <div className="mt-4 min-h-0 flex-1 space-y-3 overflow-auto pr-1">
         {props.history.map((item, index) => (
           <div key={`${item.created_at}-${index}`} className="rounded-2xl border border-slate-200 bg-slate-50 p-3">
             <div className="flex items-center justify-between text-xs text-slate-500">
@@ -142,17 +162,17 @@ export function ContextChatPanel(props: Props) {
         ))}
         {!props.history.length ? (
           <div className="rounded-2xl bg-slate-50 p-3 text-sm text-slate-500">
-            {props.activeNodeId ? "这里会显示当前聊天对象的问答历史。" : "先选择一个节点，再开始提问。"}
+            {props.activeNodeId ? "这里会显示当前对话对象的问答历史。" : "先选择一个节点，再开始提问。"}
           </div>
         ) : null}
       </div>
 
       <div className="mt-4 flex gap-2">
         <textarea
-          className="h-24 flex-1 rounded-2xl border border-slate-200 bg-white px-3 py-3 text-sm outline-none"
+          className="h-28 flex-1 rounded-2xl border border-slate-200 bg-white px-3 py-3 text-sm outline-none"
           value={props.question}
           onChange={(event) => props.onQuestionChange(event.target.value)}
-          placeholder={props.activeNodeId ? "围绕当前聊天对象输入一个更具体的问题..." : "请先在上方选择聊天对象"}
+          placeholder={props.activeNodeId ? "围绕当前对话对象输入一个更具体的问题..." : "请先在上方选择对话对象"}
           disabled={props.disabled || !props.activeNodeId}
         />
         <div className="flex shrink-0 flex-col gap-2">

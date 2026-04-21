@@ -1,5 +1,4 @@
 import { useRef } from "react";
-import { assetKindLabel } from "../display";
 import type { FulltextItem, PaperAssetItem, PaperAssetResponse } from "../types";
 import { formatDateTime } from "../utils";
 import { Badge, SectionTitle, SmallButton } from "./shared";
@@ -14,10 +13,21 @@ type Props = {
   busy?: boolean;
   onClose: () => void;
   onPreviewPdf: (url: string) => void;
+  onOpenAsset?: (url: string) => void;
+  onDownloadAsset?: (url: string, filename?: string | null) => void;
   onBuildFulltext: () => void;
   onRetryFulltext: () => void;
   onUploadPdf: (file: File) => void;
   onRebuildVisual: () => void;
+};
+
+const ASSET_KIND_LABELS: Record<string, string> = {
+  figure: "主图",
+  visual: "展示图",
+  pdf: "PDF",
+  txt: "TXT",
+  md: "Markdown",
+  bib: "BibTeX",
 };
 
 function assetByKind(assets: PaperAssetResponse | null, kind: string) {
@@ -129,29 +139,16 @@ export function PdfPanel(props: Props) {
                 <div key={item?.kind} className="rounded-2xl border border-slate-200 bg-slate-50 p-3">
                   <div className="flex items-start justify-between gap-3">
                     <div>
-                      <div className="text-sm font-medium text-slate-900">{assetKindLabel(item?.kind || "")}</div>
+                      <div className="text-sm font-medium text-slate-900">{ASSET_KIND_LABELS[item?.kind || ""] || item?.kind}</div>
                       <div className="mt-1 text-xs text-slate-500">{item?.status === "available" ? "可访问" : item?.status || "缺失"}</div>
                       {item?.filename ? <div className="mt-1 break-all text-xs text-slate-500">{item.filename}</div> : null}
                     </div>
                     <div className="flex flex-wrap gap-2">
                       {item?.kind === "pdf" && item?.open_url ? (
-                        <button
-                          className="rounded-xl border border-slate-200 bg-white px-3 py-2 text-xs font-medium text-slate-700"
-                          onClick={() => props.onPreviewPdf(item.open_url || "")}
-                        >
-                          预览
-                        </button>
+                        <SmallButton onClick={() => props.onPreviewPdf(item.open_url || "")}>预览</SmallButton>
                       ) : null}
-                      {item?.open_url ? (
-                        <a className="rounded-xl border border-slate-200 bg-white px-3 py-2 text-xs font-medium text-slate-700" href={item.open_url} rel="noreferrer" target="_blank">
-                          打开
-                        </a>
-                      ) : null}
-                      {item?.download_url ? (
-                        <a className="rounded-xl border border-slate-200 bg-white px-3 py-2 text-xs font-medium text-slate-700" href={item.download_url} rel="noreferrer" target="_blank">
-                          下载
-                        </a>
-                      ) : null}
+                      {item?.open_url ? <SmallButton onClick={() => props.onOpenAsset?.(item.open_url || "")}>打开</SmallButton> : null}
+                      {item?.download_url ? <SmallButton onClick={() => props.onDownloadAsset?.(item.download_url || "", item.filename)}>下载</SmallButton> : null}
                     </div>
                   </div>
                 </div>
