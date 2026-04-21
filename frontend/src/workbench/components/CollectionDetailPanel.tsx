@@ -34,7 +34,11 @@ export function CollectionDetailPanel(props: Props) {
   if (!props.collection) {
     return (
       <div className="rounded-3xl border border-slate-200 bg-white p-4 shadow-sm">
-        <SectionTitle eyebrow="Collection Detail" title="当前没有选中 Collection" description="在左侧选择一个 Collection 后，这里会显示集合摘要、条目、导出记录，以及基于集合继续研究的入口。" />
+        <SectionTitle
+          eyebrow="Collection"
+          title="当前没有选中 Collection"
+          description="在左侧选择一个 Collection 后，这里会显示集合摘要、条目、导出记录，以及继续调研的入口。"
+        />
       </div>
     );
   }
@@ -43,7 +47,7 @@ export function CollectionDetailPanel(props: Props) {
 
   return (
     <div className="rounded-3xl border border-slate-200 bg-white p-4 shadow-sm">
-      <SectionTitle eyebrow="Collection Detail" title={props.collection.name} description={`${props.collection.item_count} 条条目 · 来源 ${props.collection.source_type}`} />
+      <SectionTitle eyebrow="Collection" title={props.collection.name} description={`${props.collection.item_count} 条条目 · 来源 ${props.collection.source_type}`} />
 
       <div className="mt-4 rounded-2xl border border-slate-200 bg-slate-50 p-3 text-sm leading-6 text-slate-700">
         {props.collection.summary_text || "这个 Collection 还没有摘要。你可以先生成摘要、做 compare、构建集合图谱，或直接从这个集合派生新的 study task。"}
@@ -99,7 +103,7 @@ export function CollectionDetailPanel(props: Props) {
           />
           <SmallButton onClick={() => props.onToggleAllVisible(visibleItems.map((item) => item.item_id))}>{allVisibleSelected ? "取消本页全选" : "全选本页"}</SmallButton>
           <SmallButton disabled={!props.selectedItemIds.length} onClick={props.onRemoveSelected}>
-            移除所选
+            移除选中
           </SmallButton>
         </div>
 

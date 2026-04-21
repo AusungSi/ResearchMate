@@ -2,7 +2,7 @@ import { useMemo, useState } from "react";
 import { autoStatusLabel, eventTypeLabel, formatRunState, stepLabel } from "../display";
 import type { RunEvent, RunSummary, TaskMode } from "../types";
 import { formatDateTime } from "../utils";
-import { Badge, SectionTitle, SmallButton } from "./shared";
+import { Badge, MarkdownText, SectionTitle, SmallButton } from "./shared";
 
 type Props = {
   mode: TaskMode;
@@ -47,7 +47,7 @@ export function RunTimeline(props: Props) {
       </div>
 
       {props.mode === "openclaw_auto" && props.autoStatus === "awaiting_guidance" ? (
-        <div className="mt-3 rounded-2xl border border-blue-200 bg-blue-50 p-3 text-sm text-blue-700">系统已经到达 checkpoint，正在等待你的 guidance 继续推进。</div>
+        <div className="mt-3 rounded-2xl border border-blue-200 bg-blue-50 p-3 text-sm text-blue-700">系统已经到达 checkpoint，正在等待你的 guidance 后继续。</div>
       ) : null}
       {props.error ? <div className="mt-3 rounded-2xl border border-rose-200 bg-rose-50 p-3 text-sm text-rose-700">{props.error}</div> : null}
 
@@ -88,7 +88,7 @@ export function RunTimeline(props: Props) {
           {props.summary?.latest_report_excerpt ? (
             <div className="rounded-2xl border border-violet-200 bg-violet-50 p-4">
               <div className="text-xs font-semibold uppercase tracking-[0.16em] text-violet-500">阶段报告</div>
-              <div className="mt-2 whitespace-pre-wrap text-sm leading-6 text-slate-700">{props.summary.latest_report_excerpt}</div>
+              <MarkdownText className="prose prose-sm mt-2 max-w-none text-sm leading-6 text-slate-700 prose-p:my-2 prose-li:my-1" text={props.summary.latest_report_excerpt} />
             </div>
           ) : null}
 
@@ -153,7 +153,7 @@ export function RunTimeline(props: Props) {
                     <span>{eventTypeLabel(event.event_type, event.payload)}</span>
                     <span>{formatDateTime(event.created_at)}</span>
                   </div>
-                  <div className="mt-2 whitespace-pre-wrap text-sm leading-6 text-slate-700">{describeEvent(event)}</div>
+                  <MarkdownText className="prose prose-sm mt-2 max-w-none text-sm leading-6 text-slate-700 prose-p:my-2 prose-li:my-1" text={describeEvent(event)} />
                 </div>
               ))}
             </div>

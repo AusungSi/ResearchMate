@@ -58,6 +58,7 @@ import {
 type ExportFormat = "md" | "bib" | "json" | "csljson";
 type WorkbenchActionResult = ActionResponse & { candidates?: RoundCandidate[] };
 type CanvasSavePayload = { taskId: string; payload: CanvasResponse };
+type DetailTab = "info" | "chat";
 
 type WorkbenchAction =
   | { type: "quick"; action: "plan" | "search_first" | "build_graph" | "build_fulltext" | "auto_start" }
@@ -98,11 +99,14 @@ export function Workbench() {
   const [activeTaskId, setActiveTaskId] = useState("");
   const [activeCollectionId, setActiveCollectionId] = useState("");
   const [selectedNodeId, setSelectedNodeId] = useState("");
+  const [detailTab, setDetailTab] = useState<DetailTab>("info");
   const [runId, setRunId] = useState("");
   const [viewport, setViewport] = useState({ x: 0, y: 0, zoom: 1 });
   const [uiState, setUiState] = useState<CanvasUiState>(defaultCanvasUi());
   const [pdfUrl, setPdfUrl] = useState("");
   const [chatByNode, setChatByNode] = useState<Record<string, ChatItem[]>>({});
+  const [chatTargetNodeId, setChatTargetNodeId] = useState("");
+  const [chatDraft, setChatDraft] = useState("");
   const [roundCandidates, setRoundCandidates] = useState<Record<number, RoundCandidate[]>>({});
   const [actionStatus, setActionStatus] = useState<ActionStatus | null>(null);
   const [compareReport, setCompareReport] = useState<CompareReport | null>(null);
@@ -349,12 +353,22 @@ export function Workbench() {
   }, [nodes, selectedNodeId]);
 
   useEffect(() => {
+    if (chatTargetNodeId && !nodes.some((node) => node.id === chatTargetNodeId)) {
+      setChatTargetNodeId("");
+      setChatDraft("");
+    }
+  }, [chatTargetNodeId, nodes]);
+
+  useEffect(() => {
     if (activeTaskId === lastTaskIdRef.current) return;
     lastTaskIdRef.current = activeTaskId;
     setActiveCollectionId("");
     setSelectedNodeId("");
+    setDetailTab("info");
     setPdfUrl("");
     setChatByNode({});
+    setChatTargetNodeId("");
+    setChatDraft("");
     setRoundCandidates({});
     setCompareReport(null);
     setCollectionSearchText("");
@@ -398,6 +412,25 @@ export function Workbench() {
     queryFn: () => apiFetch<PaperAssetResponse>(`/api/v1/research/tasks/${activeTaskId}/papers/${encodeURIComponent(selectedPaperId)}/asset/meta`),
     enabled: Boolean(activeTaskId && selectedPaperId),
   });
+
+  const chatHistoryQuery = useQuery({
+    queryKey: ["node-chat-history", activeTaskId, chatTargetNodeId],
+    queryFn: () => apiFetch<ChatResponse>(`/api/v1/research/tasks/${activeTaskId}/nodes/${encodeURIComponent(chatTargetNodeId)}/chat`),
+    enabled: Boolean(activeTaskId && chatTargetNodeId),
+    refetchOnWindowFocus: false,
+  });
+
+  useEffect(() => {
+    if (!chatTargetNodeId || !chatHistoryQuery.data) return;
+    setChatByNode((current) => {
+      const nextHistory = chatHistoryQuery.data?.history || [];
+      const existing = current[chatTargetNodeId] || [];
+      if (JSON.stringify(existing) === JSON.stringify(nextHistory)) {
+        return current;
+      }
+      return { ...current, [chatTargetNodeId]: nextHistory };
+    });
+  }, [chatHistoryQuery.data, chatTargetNodeId]);
 
   const saveCanvas = useMutation({
     mutationFn: ({ taskId, payload }: CanvasSavePayload) =>
@@ -831,7 +864,7 @@ export function Workbench() {
       }),
     onSuccess: (data) => {
       setChatByNode((current) => ({ ...current, [data.node_id]: data.history }));
-      const latest = data.history[data.history.length - 1] || data.item;
+      const latest = data.history[data.history.length - 1] || data.item || null;
       if (latest) {
         delete nodeChatRetryCountRef.current[`${data.node_id}:${latest.question}:${latest.thread_id || ""}`];
       }
@@ -853,6 +886,7 @@ export function Workbench() {
         queueSave(nextNodes, edgesRef.current);
       }
       setActionStatus({ tone: "neutral", text: "节点问答已更新" });
+      client.invalidateQueries({ queryKey: ["node-chat-history", activeTaskId, data.node_id] });
     },
     onError: (cause, variables) => {
       if (isTransientCanvasSaveError(cause)) {
@@ -895,6 +929,15 @@ export function Workbench() {
     queueSave(nextNodes, edgesRef.current);
   }
 
+  function applyHiddenEdgeVisibility(nextNodes: Array<Node<FlowNodeData>>, sourceEdges: Array<Edge>) {
+    const hiddenNodeIds = new Set(nextNodes.filter((node) => Boolean(node.hidden)).map((node) => node.id));
+    return sourceEdges.map((edge) => {
+      const nextHidden = hiddenNodeIds.has(edge.source) || hiddenNodeIds.has(edge.target);
+      if (Boolean(edge.hidden) === nextHidden) return edge;
+      return { ...edge, hidden: nextHidden };
+    });
+  }
+
   function updateSelectedNote(note: string) {
     const nextNodes = nodesRef.current.map((node) => (node.id === selectedNodeId ? { ...node, data: { ...node.data, userNote: note } } : node));
     setNodes(nextNodes);
@@ -904,8 +947,10 @@ export function Workbench() {
   function toggleSelectedHidden() {
     if (!selectedNodeId) return;
     const nextNodes = nodesRef.current.map((node) => (node.id === selectedNodeId ? { ...node, hidden: !node.hidden } : node));
+    const nextEdges = applyHiddenEdgeVisibility(nextNodes, edgesRef.current);
     setNodes(nextNodes);
-    queueSave(nextNodes, edgesRef.current);
+    setEdges(nextEdges);
+    queueSave(nextNodes, nextEdges);
   }
 
   function deleteSelectedNode() {
@@ -914,9 +959,11 @@ export function Workbench() {
     if (!target) return;
     if (!target.data?.isManual) {
       const nextNodes = nodesRef.current.map((node) => (node.id === selectedNodeId ? { ...node, hidden: true } : node));
+      const nextEdges = applyHiddenEdgeVisibility(nextNodes, edgesRef.current);
       setSelectedNodeId("");
       setNodes(nextNodes);
-      queueSave(nextNodes, edgesRef.current);
+      setEdges(nextEdges);
+      queueSave(nextNodes, nextEdges);
       setActionStatus({ tone: "success", text: "系统节点已从画布隐藏；研究数据仍然保留，可从画布状态中恢复。" });
       return;
     }
@@ -951,7 +998,10 @@ export function Workbench() {
     const nextNodes = nodesRef.current
       .filter((node) => !manualIds.has(node.id))
       .map((node) => (systemIds.has(node.id) ? { ...node, hidden: true } : node));
-    const nextEdges = edgesRef.current.filter((edge) => !manualIds.has(edge.source) && !manualIds.has(edge.target));
+    const nextEdges = applyHiddenEdgeVisibility(
+      nextNodes,
+      edgesRef.current.filter((edge) => !manualIds.has(edge.source) && !manualIds.has(edge.target)),
+    );
     setSelectedNodeId("");
     setNodes(nextNodes);
     setEdges(nextEdges);
@@ -997,7 +1047,10 @@ export function Workbench() {
   async function handleAddSelectionToCollection() {
     if (!activeTaskId) return;
     const selected = selectedPaperNodes(nodesRef.current);
-    if (!selected.length) return;
+    if (!selected.length) {
+      setActionStatus({ tone: "warning", text: "请先框选或多选论文节点，再加入 Collection。" });
+      return;
+    }
     const collectionId = await ensureCollectionForSelection();
     await addItemsToCollection.mutateAsync({
       collectionId,
@@ -1008,7 +1061,10 @@ export function Workbench() {
   async function handleCreateStudyFromSelection() {
     if (!activeTaskId) return;
     const selected = selectedPaperNodes(nodesRef.current);
-    if (!selected.length) return;
+    if (!selected.length) {
+      setActionStatus({ tone: "warning", text: "请先框选或多选论文节点，再派生研究任务。" });
+      return;
+    }
     const collectionId = await ensureCollectionForSelection();
     await addItemsToCollection.mutateAsync({
       collectionId,
@@ -1032,6 +1088,26 @@ export function Workbench() {
   }, [roundCandidates, selectedNode?.data, selectedNode?.id]);
 
   const activeCollection = collectionDetailQuery.data || null;
+  const chatTargetNode = useMemo(
+    () => nodes.find((node) => node.id === chatTargetNodeId) || null,
+    [chatTargetNodeId, nodes],
+  );
+  const chatTargetHistory = useMemo(
+    () => (chatTargetNode ? chatByNode[chatTargetNode.id] || [] : []),
+    [chatByNode, chatTargetNode],
+  );
+  const chatTargetOptions = useMemo(
+    () =>
+      nodes
+        .filter((node) => !node.hidden)
+        .map((node) => ({
+          id: node.id,
+          label: `${String(node.data?.label || node.id)} · ${String(node.data?.type || "node")}`,
+          type: String(node.data?.type || ""),
+        }))
+        .sort((left, right) => left.label.localeCompare(right.label, "zh-CN")),
+    [nodes],
+  );
 
   return (
     <>
@@ -1092,8 +1168,11 @@ export function Workbench() {
             setRunId("");
             setActiveCollectionId("");
             setSelectedNodeId("");
+            setDetailTab("info");
             setPdfUrl("");
             setChatByNode({});
+            setChatTargetNodeId("");
+            setChatDraft("");
             setRoundCandidates({});
             setCompareReport(null);
             setCollectionSearchText("");
@@ -1106,6 +1185,7 @@ export function Workbench() {
             if (taskId === activeTaskId) {
               setActiveCollectionId("");
               setSelectedNodeId("");
+              setDetailTab("info");
               setPdfUrl("");
               setActionStatus({ tone: "neutral", text: "已切回当前任务视图" });
               return;
@@ -1113,8 +1193,11 @@ export function Workbench() {
             setActiveTaskId(taskId);
             setActiveCollectionId("");
             setSelectedNodeId("");
+            setDetailTab("info");
             setPdfUrl("");
             setChatByNode({});
+            setChatTargetNodeId("");
+            setChatDraft("");
             setRoundCandidates({});
             setCompareReport(null);
             setCollectionSearchText("");
@@ -1123,7 +1206,10 @@ export function Workbench() {
             layoutSignatureRef.current = "";
             setActionStatus(null);
           }}
-          onSelectCollection={(collectionId) => setActiveCollectionId(collectionId)}
+          onSelectCollection={(collectionId) => {
+            setActiveCollectionId(collectionId);
+            setSelectedNodeId("");
+          }}
           onCreateProject={(payload) => createProject.mutate(payload)}
           onCreateCollection={(payload) => createCollection.mutate(payload)}
           onCreateTask={(payload) => createTask.mutate(payload)}
@@ -1198,7 +1284,15 @@ export function Workbench() {
                 setEdges(nextEdges);
                 queueSave(nodesRef.current, nextEdges);
               }}
-              onNodeClick={(nodeId) => setSelectedNodeId(nodeId)}
+              onNodeClick={(nodeId) => {
+                setSelectedNodeId(nodeId);
+                setActiveCollectionId("");
+                setDetailTab("info");
+                setPdfUrl("");
+                if (!chatTargetNodeId) {
+                  setChatTargetNodeId(nodeId);
+                }
+              }}
               onPaneClick={() => setSelectedNodeId("")}
               onMoveStart={() => {
                 interactionLockRef.current = true;
@@ -1334,46 +1428,76 @@ export function Workbench() {
           </div>
 
           <div className="mt-4">
-            <DetailPanel
-              mode={activeTask?.mode || "gpt_step"}
-              node={selectedNode}
-              paperDetail={paperDetailQuery.data || null}
-              paperAssets={paperAssetQuery.data || null}
-              roundCandidates={selectedRoundCandidates}
-              onUpdateNote={updateSelectedNote}
-              onToggleHidden={toggleSelectedHidden}
-              onDeleteNode={deleteSelectedNode}
-              onOpenPdf={() => {
-                const pdf = paperAssetQuery.data?.items.find((item) => item.kind === "pdf" && item.status === "available");
-                const openUrl = pdf?.open_url || pdf?.download_url || "";
-                if (!openUrl) {
-                  setActionStatus({ tone: "warning", text: "当前论文还没有可打开的 PDF" });
-                  return;
-                }
-                window.open(openUrl, "_blank", "noopener,noreferrer");
-              }}
-              onSavePaper={() => selectedPaperId && workbenchAction.mutate({ type: "save_paper", paperId: selectedPaperId })}
-              onSummarizePaper={() => selectedPaperId && workbenchAction.mutate({ type: "summarize_paper", paperId: selectedPaperId })}
-              onRebuildVisual={() => rebuildPaperVisual.mutate()}
-              onSearchDirection={(directionIndex) => workbenchAction.mutate({ type: "search_direction", directionIndex })}
-              onStartExplore={(directionIndex) => workbenchAction.mutate({ type: "start_explore", directionIndex })}
-              onBuildGraph={(directionIndex, roundId) => workbenchAction.mutate({ type: "build_graph", directionIndex, roundId })}
-              onProposeCandidates={(roundId, action, feedbackText) => workbenchAction.mutate({ type: "propose", roundId, action, feedbackText })}
-              onSelectCandidate={(roundId, candidateId) => workbenchAction.mutate({ type: "select_candidate", roundId, candidateId })}
-              onNextRound={(roundId, intentText) => workbenchAction.mutate({ type: "next_round", roundId, intentText })}
-              onAskPreset={(question) => selectedNode && nodeChat.mutate({ nodeId: selectedNode.id, question })}
-            />
-          </div>
+            <div className="rounded-3xl border border-slate-200 bg-white p-2 shadow-sm">
+              <div className="flex gap-2 px-2 pb-2">
+                <button
+                  className={`flex-1 rounded-2xl px-3 py-2 text-sm font-medium transition ${detailTab === "info" ? "bg-slate-900 text-white" : "bg-slate-50 text-slate-600 hover:bg-slate-100"}`}
+                  onClick={() => setDetailTab("info")}
+                >
+                  节点信息
+                </button>
+                <button
+                  className={`flex-1 rounded-2xl px-3 py-2 text-sm font-medium transition ${detailTab === "chat" ? "bg-slate-900 text-white" : "bg-slate-50 text-slate-600 hover:bg-slate-100"}`}
+                  onClick={() => setDetailTab("chat")}
+                >
+                  聊天
+                </button>
+              </div>
 
-          <ContextChatPanel
-            disabled={!selectedNode}
-            nodeId={selectedNode?.id}
-            nodeLabel={selectedNode?.data?.label}
-            nodeType={selectedNode?.data?.type}
-            history={selectedNode ? chatByNode[selectedNode.id] || [] : []}
-            onSend={(question, threadId) => selectedNode && nodeChat.mutate({ nodeId: selectedNode.id, question, threadId })}
-            onSaveAnswer={saveChatAnswerAsNode}
-          />
+              {detailTab === "info" ? (
+                <DetailPanel
+                  mode={activeTask?.mode || "gpt_step"}
+                  node={selectedNode}
+                  paperDetail={paperDetailQuery.data || null}
+                  paperAssets={paperAssetQuery.data || null}
+                  roundCandidates={selectedRoundCandidates}
+                  onUpdateNote={updateSelectedNote}
+                  onToggleHidden={toggleSelectedHidden}
+                  onDeleteNode={deleteSelectedNode}
+                  onOpenPdf={() => {
+                    const pdf = paperAssetQuery.data?.items.find((item) => item.kind === "pdf" && item.status === "available");
+                    const openUrl = pdf?.open_url || pdf?.download_url || "";
+                    if (!openUrl) {
+                      setActionStatus({ tone: "warning", text: "当前论文还没有可打开的 PDF" });
+                      return;
+                    }
+                    window.open(openUrl, "_blank", "noopener,noreferrer");
+                  }}
+                  onSavePaper={() => selectedPaperId && workbenchAction.mutate({ type: "save_paper", paperId: selectedPaperId })}
+                  onSummarizePaper={() => selectedPaperId && workbenchAction.mutate({ type: "summarize_paper", paperId: selectedPaperId })}
+                  onRebuildVisual={() => rebuildPaperVisual.mutate()}
+                  onSearchDirection={(directionIndex) => workbenchAction.mutate({ type: "search_direction", directionIndex })}
+                  onStartExplore={(directionIndex) => workbenchAction.mutate({ type: "start_explore", directionIndex })}
+                  onBuildGraph={(directionIndex, roundId) => workbenchAction.mutate({ type: "build_graph", directionIndex, roundId })}
+                  onProposeCandidates={(roundId, action, feedbackText) => workbenchAction.mutate({ type: "propose", roundId, action, feedbackText })}
+                  onSelectCandidate={(roundId, candidateId) => workbenchAction.mutate({ type: "select_candidate", roundId, candidateId })}
+                  onNextRound={(roundId, intentText) => workbenchAction.mutate({ type: "next_round", roundId, intentText })}
+                  onAskPreset={(question) => {
+                    setDetailTab("chat");
+                    if (selectedNode?.id) {
+                      setChatTargetNodeId(selectedNode.id);
+                    }
+                    setChatDraft(question);
+                  }}
+                />
+              ) : (
+                <ContextChatPanel
+                  disabled={!activeTaskId}
+                  nodeOptions={chatTargetOptions}
+                  activeNodeId={chatTargetNodeId}
+                  activeNodeLabel={chatTargetNode?.data?.label}
+                  activeNodeType={chatTargetNode?.data?.type}
+                  history={chatTargetHistory}
+                  question={chatDraft}
+                  busy={nodeChat.isPending}
+                  onQuestionChange={setChatDraft}
+                  onSelectNode={(nodeId) => setChatTargetNodeId(nodeId)}
+                  onSend={(question, threadId) => chatTargetNodeId && nodeChat.mutate({ nodeId: chatTargetNodeId, question, threadId })}
+                  onSaveAnswer={saveChatAnswerAsNode}
+                />
+              )}
+            </div>
+          </div>
 
           <RunTimeline
             mode={activeTask?.mode || "gpt_step"}

@@ -46,10 +46,10 @@ export function PdfPanel(props: Props) {
           description={
             props.fulltextItem
               ? `当前状态：${props.fulltextItem.status}`
-              : "这里用于查看 PDF、全文处理状态和论文可视化资产。不会在选中节点时自动下载 PDF。"
+              : "这里用于查看 PDF、全文处理状态和论文可视化资产。选中论文节点本身不会自动下载 PDF。"
           }
         />
-        <SmallButton onClick={props.onClose}>{props.previewUrl ? "清空预览" : "收起预览"}</SmallButton>
+        <SmallButton onClick={props.onClose}>{props.previewUrl ? "关闭预览" : "收起预览"}</SmallButton>
       </div>
 
       <div className="grid gap-4 p-4 xl:grid-cols-[1.2fr_1fr]">
@@ -59,7 +59,7 @@ export function PdfPanel(props: Props) {
           ) : (
             <div className="rounded-2xl border border-dashed border-slate-300 bg-slate-50 p-5 text-sm leading-6 text-slate-600">
               {pdfAsset?.status === "available"
-                ? "已找到 PDF。点击右侧资产卡片中的“打开”会在新标签页查看，点击“预览”则会在当前面板内展示。"
+                ? "已找到 PDF。点击右侧资产卡片中的“打开”会在新标签页查看；点击“预览”则会在当前面板内展示。"
                 : "当前没有可用 PDF。你可以先执行全文处理；如果仍然缺失，再手动上传 PDF。"}
             </div>
           )}
@@ -129,7 +129,7 @@ export function PdfPanel(props: Props) {
                 <div key={item?.kind} className="rounded-2xl border border-slate-200 bg-slate-50 p-3">
                   <div className="flex items-start justify-between gap-3">
                     <div>
-                      <div className="text-sm font-medium text-slate-900">{assetKindLabel(item?.kind)}</div>
+                      <div className="text-sm font-medium text-slate-900">{assetKindLabel(item?.kind || "")}</div>
                       <div className="mt-1 text-xs text-slate-500">{item?.status === "available" ? "可访问" : item?.status || "缺失"}</div>
                       {item?.filename ? <div className="mt-1 break-all text-xs text-slate-500">{item.filename}</div> : null}
                     </div>

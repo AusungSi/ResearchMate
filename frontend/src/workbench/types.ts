@@ -296,8 +296,8 @@ export type ChatItem = {
 export type ChatResponse = {
   task_id: string;
   node_id: string;
-  thread_id: string;
-  item: ChatItem;
+  thread_id?: string | null;
+  item?: ChatItem | null;
   history: ChatItem[];
 };
 

@@ -474,6 +474,7 @@ class ResearchService:
             query_terms=_load_json_list(round_row.query_terms_json),
             references=references,
             candidate_count=candidate_n,
+            project_context=self._project_context_prompt(db, task=task),
         )
         repo = ResearchRoundCandidateRepo(db)
         rows = self._run_with_locked_retry(db, lambda: repo.replace_for_round(round_row.id, generated))
@@ -601,6 +602,7 @@ class ResearchService:
             intent_text=intent,
             current_queries=_load_json_list(parent.query_terms_json),
             references=references,
+            project_context=self._project_context_prompt(db, task=task),
         )
         child = ResearchRoundRepo(db).create(
             task_id=task.id,
@@ -1514,6 +1516,7 @@ class ResearchService:
         repo = ResearchNodeChatRepo(db)
         thread = (thread_id or uuid4().hex[:12]).strip()[:64]
         context = self._resolve_node_context(db, task=task, node_id=node_id)
+        project_context = self._project_context_prompt(db, task=task)
         try:
             history_rows = self._run_with_locked_retry(
                 db,
@@ -1545,10 +1548,21 @@ class ResearchService:
             f"User question: {question.strip()}\n"
             f"Tags: {orjson.dumps(tags or []).decode('utf-8')}"
         )
+        prompt = (
+            "You are a node-level research assistant inside a larger research project.\n"
+            "Answer only from the provided node context and project context. Do not invent facts and do not take over the whole workflow.\n\n"
+            f"Project context:\n{project_context}\n\n"
+            f"Task topic: {task.topic}\n"
+            f"Node ID: {node_id}\n"
+            f"Node context JSON: {orjson.dumps(context).decode('utf-8')}\n"
+            f"Existing chat: {orjson.dumps(history_lines).decode('utf-8')}\n"
+            f"User question: {question.strip()}\n"
+            f"Tags: {orjson.dumps(tags or []).decode('utf-8')}"
+        )
         result = self.llm_gateway.chat_text(
             backend=task.llm_backend.value,
             model=task.llm_model,
-            system_prompt="Answer in concise Chinese. Prefer evidence already present in the node context.",
+            system_prompt="Answer in concise Chinese Markdown. Use short headings or bullet lists when helpful. Prefer evidence already present in the node context and say explicitly when evidence is limited.",
             prompt=prompt,
             temperature=0.2,
             max_tokens=900,
@@ -1588,6 +1602,76 @@ class ResearchService:
             "item": self._node_chat_to_dict(task.task_id, row),
             "history": [self._node_chat_to_dict(task.task_id, item) for item in history_rows],
         }
+
+    def get_node_chat_history(
+        self,
+        db: Session,
+        *,
+        user_id: int,
+        task_id: str,
+        node_id: str,
+        thread_id: str | None = None,
+        limit: int = 50,
+    ) -> dict:
+        task = self.switch_task(db, user_id=user_id, task_id=task_id, remember_active=False)
+        repo = ResearchNodeChatRepo(db)
+        try:
+            history_rows = self._run_with_locked_retry(
+                db,
+                lambda: repo.list_for_node(task_id=task.id, node_id=node_id, thread_id=thread_id, limit=max(1, min(200, int(limit)))),
+                attempts=6,
+                base_delay_seconds=0.25,
+            )
+        except OperationalError as exc:
+            if self._is_sqlite_locked_error(exc):
+                logger.warning("research_node_chat_history_busy task_id=%s node_id=%s", task.task_id, node_id)
+                raise NodeChatBusyError("node_chat_busy") from exc
+            raise
+        latest = history_rows[-1] if history_rows else None
+        resolved_thread = thread_id or (latest.thread_id if latest else None)
+        return {
+            "task_id": task.task_id,
+            "node_id": node_id,
+            "thread_id": resolved_thread,
+            "item": self._node_chat_to_dict(task.task_id, latest) if latest else None,
+            "history": [self._node_chat_to_dict(task.task_id, item) for item in history_rows],
+        }
+
+    def _project_context_prompt(self, db: Session, *, task: ResearchTask) -> str:
+        project = task.project
+        if project is None and task.project_id is not None:
+            project = next((row for row in ResearchProjectRepo(db).list_for_user(task.user_id) if row.id == task.project_id), None)
+        if project is None:
+            return "No explicit project context."
+
+        lines = [f"Project name: {project.name}"]
+        if project.description:
+            lines.append(f"Project description: {self._compact_text(project.description, 320)}")
+
+        recent_tasks = [
+            row.topic
+            for row in ResearchTaskRepo(db).list_recent(user_id=task.user_id, project_id=project.id, limit=6)
+            if row.id != task.id and row.topic
+        ][:3]
+        if recent_tasks:
+            lines.append("Recent sibling tasks:")
+            lines.extend(f"- {self._compact_text(topic, 160)}" for topic in recent_tasks)
+
+        collections = ResearchCollectionRepo(db).list_for_project(project.id)[:3]
+        if collections:
+            lines.append("Project collections:")
+            item_repo = ResearchCollectionItemRepo(db)
+            for collection in collections:
+                count = item_repo.count_for_collection(collection.id)
+                summary = self._compact_text(collection.summary_text or collection.description or "", 180)
+                collection_line = f"- {collection.name} ({collection.source_type}, {count} items)"
+                if summary:
+                    collection_line += f": {summary}"
+                lines.append(collection_line)
+        else:
+            lines.append("Project collections: none yet.")
+
+        return "\n".join(lines)
 
     def get_paper_asset_path(
         self,
@@ -2610,6 +2694,7 @@ class ResearchService:
             seed_rows,
             backend=task.llm_backend.value,
             model=task.llm_model,
+            project_context=self._project_context_prompt(db, task=task),
         )
         ResearchDirectionRepo(db).replace_for_task(task, directions)
         task.status = ResearchTaskStatus.CREATED
@@ -3185,7 +3270,14 @@ class ResearchService:
             if not directions:
                 constraints = _load_json_dict(task.constraints_json)
                 seed_rows = self._build_seed_corpus_for_task(db, task=task, constraints=constraints)
-                directions = self._plan_directions_from_seed(task.topic, constraints, seed_rows)
+                directions = self._plan_directions_from_seed(
+                    task.topic,
+                    constraints,
+                    seed_rows,
+                    backend=task.llm_backend.value,
+                    model=task.llm_model,
+                    project_context=self._project_context_prompt(db, task=task),
+                )
                 ResearchDirectionRepo(db).replace_for_task(task, directions)
             if touch_lease:
                 touch_lease()
@@ -3592,6 +3684,13 @@ class ResearchService:
                 f"- 当前摘要：{summary or '还没有足够摘要信息，建议先执行“检索方向”。'}\n\n"
                 f"如果要继续推进，可以沿这个方向补论文、生成候选分支，或者构建图谱看看它和其它方向的关系。"
             )
+        if node_type == "topic":
+            return (
+                f"Topic node overview for: {label}\n\n"
+                f"- Current context: {summary or 'No structured direction or paper summary is available yet.'}\n"
+                "- Suggested next step: inspect which directions already have papers, which directions still lack evidence, "
+                "and then decide whether to continue search, build graph, process fulltext, or branch into a new exploration round."
+            )
         if node_type in {"question", "note", "reference", "group", "report"}:
             return (
                 f"这是一个手工{node_type}节点，核心价值在于承接你的人工判断和阶段性整理。\n\n"
@@ -3606,6 +3705,33 @@ class ResearchService:
         )
 
     def _resolve_node_context(self, db: Session, *, task: ResearchTask, node_id: str) -> dict:
+        if node_id == f"topic:{task.task_id}":
+            directions = ResearchDirectionRepo(db).list_for_task(task.id)
+            direction_items = [
+                {
+                    "direction_index": row.direction_index,
+                    "name": row.name,
+                    "papers_count": len(row.papers or []),
+                }
+                for row in directions[:8]
+            ]
+            summary_lines = [f"研究主题：{task.topic}", f"任务状态：{task.status.value}"]
+            if direction_items:
+                summary_lines.append("已规划方向：")
+                summary_lines.extend(f"- 方向 {item['direction_index']}：{item['name']}（{item['papers_count']} 篇论文）" for item in direction_items[:5])
+            else:
+                summary_lines.append("当前还没有方向结果。")
+            return {
+                "id": node_id,
+                "type": "topic",
+                "label": task.topic,
+                "status": task.status.value,
+                "mode": task.mode.value,
+                "auto_status": task.auto_status.value if task.auto_status else None,
+                "project_name": task.project.name if task.project else None,
+                "summary": "\n".join(summary_lines),
+                "directions": direction_items,
+            }
         if node_id.startswith("paper:"):
             paper = ResearchPaperRepo(db).get_by_token(task.id, node_id)
             if paper:
@@ -4181,12 +4307,14 @@ class ResearchService:
         intent_text: str,
         current_queries: list[str],
         references: list[str],
+        project_context: str | None = None,
     ) -> list[str]:
         prompt = (
             "你是 memomate-research-planner，请根据用户意图生成下一轮检索 query。"
             '返回严格 JSON: {"queries":["q1","q2","q3"]}。\n\n'
             f"Topic: {task_topic}\n"
             f"Direction: {direction_name}\n"
+            f"Project context: {project_context or 'none'}\n"
             f"User intent: {intent_text}\n"
             f"Current queries: {orjson.dumps(current_queries).decode('utf-8')}\n"
             f"Reference titles: {orjson.dumps(references).decode('utf-8')}\n"
@@ -4242,11 +4370,13 @@ class ResearchService:
         query_terms: list[str],
         references: list[str],
         candidate_count: int,
+        project_context: str | None = None,
     ) -> list[dict]:
         prompt = (
             "你是 memomate-research-planner，请根据输入生成下一轮调研候选方向。"
             "返回 JSON: {\"candidates\":[{\"name\":\"\",\"queries\":[\"\"],\"reason\":\"\"}]}。\n\n"
             f"Topic: {task_topic}\n"
+            f"Project context: {project_context or 'none'}\n"
             f"Action: {action}\n"
             f"Feedback: {feedback_text}\n"
             f"Current queries: {orjson.dumps(query_terms).decode('utf-8')}\n"
@@ -4328,7 +4458,17 @@ class ResearchService:
         seen: set[tuple[str, str, str]] = set()
 
         topic_id = f"topic:{task.task_id}"
-        nodes[topic_id] = {"id": topic_id, "type": "topic", "label": task.topic}
+        direction_names = [row.name for row in direction_rows[:5] if row.name]
+        topic_summary = (
+            f"当前研究主题：{task.topic}\n"
+            f"任务状态：{task.status.value}\n"
+            + (
+                "已规划方向：\n- " + "\n- ".join(direction_names)
+                if direction_names
+                else "当前还没有方向结果，下一步可先做方向规划。"
+            )
+        )
+        nodes[topic_id] = {"id": topic_id, "type": "topic", "label": task.topic, "summary": topic_summary, "status": task.status.value}
 
         per_round_paper_limit = max(
             1,
@@ -4491,9 +4631,18 @@ class ResearchService:
         deduped = self._dedupe_papers(collected)[:top_n]
         return ResearchSeedPaperRepo(db).replace_for_task(task.id, deduped)
 
-    def _plan_directions_from_seed(self, topic: str, constraints: dict, seed_rows: list, *, backend: str = "gpt", model: str | None = None) -> list[dict]:
+    def _plan_directions_from_seed(
+        self,
+        topic: str,
+        constraints: dict,
+        seed_rows: list,
+        *,
+        backend: str = "gpt",
+        model: str | None = None,
+        project_context: str | None = None,
+    ) -> list[dict]:
         if not seed_rows:
-            return self._plan_directions(topic, constraints, backend=backend, model=model)
+            return self._plan_directions(topic, constraints, backend=backend, model=model, project_context=project_context)
         max_abs = max(120, int(self.settings.research_seed_max_abstract_chars))
         snippets = []
         for idx, row in enumerate(seed_rows[:40], start=1):
@@ -4513,7 +4662,7 @@ class ResearchService:
                 }
             )
         if not snippets:
-            return self._plan_directions(topic, constraints, backend=backend, model=model)
+            return self._plan_directions(topic, constraints, backend=backend, model=model, project_context=project_context)
 
         direction_min = max(1, int(self.settings.research_direction_min))
         direction_max = max(direction_min, int(self.settings.research_direction_max))
@@ -4543,6 +4692,7 @@ class ResearchService:
             "You are an academic research planner. Use the seed papers to propose domain-specific research tracks.\n"
             'Return strict JSON: {"directions":[{"name":"...","queries":["q1","q2"],"exclude_terms":["x"]}]}\n'
             f"Topic: {topic}\n"
+            f"Project context: {project_context or 'none'}\n"
             f"Directions count: {direction_min}-{direction_max}\n"
             "Rules:\n"
             "- Directions must be scholarly research tracks directly related to the topic, not generic software solution routes.\n"
@@ -4567,9 +4717,17 @@ class ResearchService:
                 return directions
         except Exception:
             logger.exception("research_plan_from_seed_failed")
-        return self._plan_directions(topic, constraints, backend=backend, model=model)
+        return self._plan_directions(topic, constraints, backend=backend, model=model, project_context=project_context)
 
-    def _plan_directions(self, topic: str, constraints: dict, *, backend: str = "gpt", model: str | None = None) -> list[dict]:
+    def _plan_directions(
+        self,
+        topic: str,
+        constraints: dict,
+        *,
+        backend: str = "gpt",
+        model: str | None = None,
+        project_context: str | None = None,
+    ) -> list[dict]:
         direction_min = max(1, int(self.settings.research_direction_min))
         direction_max = max(direction_min, int(self.settings.research_direction_max))
         system_prompt = (
@@ -4578,6 +4736,8 @@ class ResearchService:
         prompt = (
             "Input topic:\n"
             f"{topic}\n\n"
+            "Project context:\n"
+            f"{project_context or 'none'}\n\n"
             "Constraints JSON:\n"
             f"{orjson.dumps(constraints).decode('utf-8')}\n\n"
             "Return JSON schema:\n"

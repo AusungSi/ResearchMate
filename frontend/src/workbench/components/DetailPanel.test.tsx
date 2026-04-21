@@ -35,7 +35,7 @@ describe("DetailPanel", () => {
       />,
     );
 
-    expect(screen.getByText("Selected Node")).toBeInTheDocument();
+    expect(screen.getByText("节点信息")).toBeInTheDocument();
     expect(screen.getByText("Candidate A")).toBeInTheDocument();
 
     rerender(
@@ -91,8 +91,8 @@ describe("DetailPanel", () => {
       />,
     );
 
-    expect(screen.getByText("Open PDF")).toBeInTheDocument();
-    fireEvent.click(screen.getByText("Open PDF"));
+    expect(screen.getByText("打开 PDF")).toBeInTheDocument();
+    fireEvent.click(screen.getByText("打开 PDF"));
     expect(onOpenPdf).toHaveBeenCalled();
     expect(screen.getAllByText("Paper Visual").length).toBeGreaterThan(0);
     expect(screen.getByText("Why It Matters")).toBeInTheDocument();

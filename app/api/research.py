@@ -908,6 +908,32 @@ def get_paper_detail(
     return ResearchPaperDetailResponse(**data)
 
 
+@router.get("/tasks/{task_id}/nodes/{node_id:path}/chat", response_model=ResearchNodeChatResponse)
+def get_node_chat_history(
+    task_id: str,
+    node_id: str,
+    thread_id: str | None = None,
+    limit: int = 50,
+    user_id: int = Depends(get_current_user_id),
+    db: Session = Depends(get_db),
+    research_service: ResearchService = Depends(get_research_service),
+) -> ResearchNodeChatResponse:
+    try:
+        data = research_service.get_node_chat_history(
+            db,
+            user_id=user_id,
+            task_id=task_id,
+            node_id=node_id,
+            thread_id=thread_id,
+            limit=limit,
+        )
+    except NodeChatBusyError as exc:
+        raise HTTPException(status_code=409, detail="节点问答正在和后台研究结果同步，系统会自动重试或请稍后再问一次。") from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return ResearchNodeChatResponse(**data)
+
+
 @router.post("/tasks/{task_id}/nodes/{node_id:path}/chat", response_model=ResearchNodeChatResponse)
 def chat_with_node(
     task_id: str,

@@ -1003,8 +1003,8 @@ class ResearchNodeChatItem(BaseModel):
 class ResearchNodeChatResponse(BaseModel):
     task_id: str
     node_id: str
-    thread_id: str
-    item: ResearchNodeChatItem
+    thread_id: str | None = None
+    item: ResearchNodeChatItem | None = None
     history: list[ResearchNodeChatItem] = Field(default_factory=list)
 
 

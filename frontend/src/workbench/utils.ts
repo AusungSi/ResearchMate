@@ -414,6 +414,7 @@ export function mergeCanvasWithGraph(graph?: GraphResponse, canvas?: CanvasRespo
     });
   }
 
+  const hiddenNodeIds = new Set(nodes.filter((node) => Boolean(node.hidden)).map((node) => node.id));
   const edges: Array<Edge> = [];
   const existing = new Set<string>();
   const nodeIds = new Set(nodes.map((node) => node.id));
@@ -429,6 +430,7 @@ export function mergeCanvasWithGraph(graph?: GraphResponse, canvas?: CanvasRespo
       style: edgeVisual.style,
       markerEnd: edgeVisual.markerEnd,
       data: { ...edge, kind: "graph" },
+      hidden: hiddenNodeIds.has(edge.source) || hiddenNodeIds.has(edge.target),
     });
   }
 
@@ -443,7 +445,7 @@ export function mergeCanvasWithGraph(graph?: GraphResponse, canvas?: CanvasRespo
       style: edgeVisual.style,
       markerEnd: edgeVisual.markerEnd,
       data: edge.data,
-      hidden: edge.hidden,
+      hidden: Boolean(edge.hidden) || hiddenNodeIds.has(edge.source) || hiddenNodeIds.has(edge.target),
     });
   }
 
