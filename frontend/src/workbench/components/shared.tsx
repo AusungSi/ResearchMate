@@ -1,4 +1,4 @@
-import type { ReactNode } from "react";
+import type { ButtonHTMLAttributes, ReactNode } from "react";
 
 export function Badge(props: { children: ReactNode; tone: "slate" | "blue" | "green" | "violet" | "amber" }) {
   const tones = {
@@ -22,21 +22,22 @@ export function SectionTitle(props: { eyebrow: string; title: string; descriptio
   );
 }
 
-export function SmallButton(props: {
+export function SmallButton(props: ButtonHTMLAttributes<HTMLButtonElement> & {
   children: ReactNode;
   tone?: "solid" | "ghost";
-  disabled?: boolean;
-  onClick?: () => void;
 }) {
-  const tone = props.tone || "ghost";
-  const className =
+  const { children, className, tone = "ghost", ...buttonProps } = props;
+  const baseClassName =
     tone === "solid"
       ? "rounded-xl bg-slate-900 px-3 py-2 text-xs font-medium text-white disabled:opacity-50"
       : "rounded-xl border border-slate-200 px-3 py-2 text-xs font-medium text-slate-700 disabled:opacity-50";
 
   return (
-    <button className={className} disabled={props.disabled} onClick={props.onClick}>
-      {props.children}
+    <button
+      {...buttonProps}
+      className={`${baseClassName}${className ? ` ${className}` : ""}`}
+    >
+      {children}
     </button>
   );
 }

@@ -1,22 +1,11 @@
 import ELK from "elkjs/lib/elk.bundled.js";
 import { MarkerType, Position, type Edge, type Node } from "@xyflow/react";
-import type {
-  Backend,
-  CanvasResponse,
-  CanvasUiState,
-  FlowNodeData,
-  GraphEdge,
-  GraphNode,
-  GraphResponse,
-  RunEvent,
-  RunSummary,
-  TaskMode,
-} from "./types";
+import type { Backend, CanvasResponse, CanvasUiState, FlowNodeData, GraphEdge, GraphNode, GraphResponse, RunEvent, RunSummary, TaskMode } from "./types";
 
 const elk = new ELK();
 
 export const edgeVisual = {
-  type: "smoothstep" as const,
+  type: "step" as const,
   style: { stroke: "#64748b", strokeWidth: 2.25, strokeDasharray: "10 8" },
   markerEnd: {
     type: MarkerType.ArrowClosed,
@@ -55,7 +44,7 @@ export function nodeTypeLabel(type?: string) {
     report: "阶段报告",
     note: "笔记",
     group: "分组",
-    reference: "参考资料",
+    reference: "参考",
     question: "问题",
   };
   return labels[type || ""] || type || "节点";
@@ -64,23 +53,23 @@ export function nodeTypeLabel(type?: string) {
 export function stepLabel(step?: string) {
   const labels: Record<string, string> = {
     task_created: "任务创建",
-    plan_queued: "方向规划排队",
+    plan_queued: "方向规划已排队",
     plan_completed: "方向规划完成",
-    search_queued: "论文检索排队",
+    search_queued: "论文检索已排队",
     search_completed: "论文检索完成",
     exploration_started: "开始探索",
-    candidates_generated: "生成候选方向",
-    candidate_selected: "选择候选方向",
-    next_round_created: "进入下一轮",
-    graph_queued: "图谱构建排队",
-    tree_graph_completed: "树图生成完成",
-    citation_graph_completed: "引文图生成完成",
-    fulltext_queued: "全文处理排队",
+    candidates_generated: "候选方向已生成",
+    candidate_selected: "候选方向已选择",
+    next_round_created: "继续下一轮",
+    graph_queued: "图谱构建已排队",
+    tree_graph_completed: "树状图谱完成",
+    citation_graph_completed: "引文图谱完成",
+    fulltext_queued: "全文处理已排队",
     fulltext_completed: "全文处理完成",
     paper_saved: "论文已保存",
-    paper_summary_queued: "论文总结排队",
+    paper_summary_queued: "论文总结已排队",
     paper_summary_completed: "论文总结完成",
-    export_requested: "导出排队",
+    export_requested: "导出已排队",
     export_completed: "导出完成",
   };
   return labels[step || ""] || step || "步骤";
@@ -90,7 +79,7 @@ export function manualNodeDefaultLabel(type: "note" | "question" | "reference" |
   const labels = {
     note: "新的笔记",
     question: "新的问题",
-    reference: "新的参考资料",
+    reference: "新的参考",
     group: "新的分组",
     report: "新的报告",
   };
@@ -143,7 +132,147 @@ function typeColumn(type: string) {
 }
 
 function defaultPositionForNode(type: string, row: number) {
-  return { x: 140 + typeColumn(type) * 420, y: 120 + row * 240 };
+  return { x: 160 + typeColumn(type) * 500, y: 120 + row * 320 };
+}
+
+function layoutTypeRank(type: string) {
+  const order: Record<string, number> = {
+    topic: 0,
+    direction: 1,
+    round: 2,
+    paper: 3,
+    checkpoint: 4,
+    report: 5,
+  };
+  return order[type] ?? 9;
+}
+
+function semanticStage(node: Node<FlowNodeData>) {
+  const type = String(node.data?.type || node.type || "");
+  if (type === "topic") return 0;
+  if (type === "direction") return 1;
+  if (type === "round") return 1 + Math.max(1, Number(node.data?.depth || 1));
+  if (type === "paper") return 4;
+  if (type === "checkpoint") return 5;
+  if (type === "report") return 6;
+  return 7;
+}
+
+function stageKey(node: Node<FlowNodeData>) {
+  const directionIndex = typeof node.data?.direction_index === "number" ? node.data.direction_index : 999;
+  const depth = typeof node.data?.depth === "number" ? node.data.depth : 0;
+  const rank = layoutTypeRank(String(node.data?.type || node.type || ""));
+  return `${String(directionIndex).padStart(3, "0")}:${String(rank).padStart(2, "0")}:${String(depth).padStart(3, "0")}:${String(node.data?.label || node.id)}`;
+}
+
+function buildStageLayout(nodes: Array<Node<FlowNodeData>>, edges: Array<Edge>) {
+  const systemNodes = nodes.filter((node) => !isManualNode(node));
+  if (!systemNodes.length) {
+    return new Map<string, { x: number; y: number }>();
+  }
+
+  const nodeMap = new Map(systemNodes.map((node) => [node.id, node]));
+  const systemEdges = edges.filter((edge) => nodeMap.has(edge.source) && nodeMap.has(edge.target));
+  const incoming = new Map<string, string[]>();
+  const outgoing = new Map<string, string[]>();
+
+  for (const node of systemNodes) {
+    incoming.set(node.id, []);
+    outgoing.set(node.id, []);
+  }
+  for (const edge of systemEdges) {
+    outgoing.get(edge.source)?.push(edge.target);
+    incoming.get(edge.target)?.push(edge.source);
+  }
+
+  const stage = new Map<string, number>();
+  const branch = new Map<string, number>();
+
+  for (const node of systemNodes) {
+    const type = String(node.data?.type || node.type || "");
+    if (type === "topic") {
+      stage.set(node.id, 0);
+      branch.set(node.id, 0);
+      continue;
+    }
+    if (typeof node.data?.direction_index === "number") {
+      branch.set(node.id, node.data.direction_index);
+    }
+    if (type === "direction") {
+      stage.set(node.id, 1);
+    }
+  }
+
+  const maxPasses = Math.max(4, systemNodes.length * 2);
+  for (let pass = 0; pass < maxPasses; pass += 1) {
+    let changed = false;
+    for (const edge of systemEdges) {
+      const sourceStage = stage.get(edge.source);
+      if (typeof sourceStage === "number") {
+        const nextStage = sourceStage + 1;
+        const currentStage = stage.get(edge.target);
+        if (typeof currentStage !== "number" || nextStage > currentStage) {
+          stage.set(edge.target, nextStage);
+          changed = true;
+        }
+      }
+      const sourceBranch = branch.get(edge.source);
+      if (typeof sourceBranch === "number" && !branch.has(edge.target)) {
+        branch.set(edge.target, sourceBranch);
+        changed = true;
+      }
+    }
+    if (!changed) {
+      break;
+    }
+  }
+
+  for (const node of systemNodes) {
+    if (!stage.has(node.id)) {
+      stage.set(node.id, semanticStage(node));
+    }
+    if (!branch.has(node.id)) {
+      branch.set(node.id, 0);
+    }
+  }
+
+  const branchValues = [...new Set([...branch.values()].filter((value) => value > 0))].sort((left, right) => left - right);
+  const branchBaseY = new Map<number, number>();
+  branchValues.forEach((value, index) => {
+    branchBaseY.set(value, 120 + index * 460);
+  });
+
+  const fallbackBranchY = branchBaseY.size
+    ? [...branchBaseY.values()].reduce((sum, value) => sum + value, 0) / branchBaseY.size
+    : 240;
+
+  const stageGroups = new Map<number, Array<Node<FlowNodeData>>>();
+  for (const node of systemNodes) {
+    const level = stage.get(node.id) || 0;
+    const current = stageGroups.get(level) || [];
+    current.push(node);
+    stageGroups.set(level, current);
+  }
+
+  const positions = new Map<string, { x: number; y: number }>();
+  const stageGapX = 430;
+  const innerGapY = 300;
+
+  for (const [level, items] of [...stageGroups.entries()].sort((left, right) => left[0] - right[0])) {
+    const x = 140 + level * stageGapX;
+    const laneCounts = new Map<number, number>();
+    items.sort((left, right) => stageKey(left).localeCompare(stageKey(right), "zh-CN"));
+    for (const node of items) {
+      const currentBranch = branch.get(node.id) || 0;
+      const laneIndex = laneCounts.get(currentBranch) || 0;
+      laneCounts.set(currentBranch, laneIndex + 1);
+      const baseY = currentBranch > 0 ? branchBaseY.get(currentBranch) || fallbackBranchY : fallbackBranchY;
+      const y = String(node.data?.type || node.type || "") === "topic" ? fallbackBranchY + 180 : baseY + laneIndex * innerGapY;
+      positions.set(node.id, { x, y });
+    }
+  }
+
+  return positions;
 }
 
 function buildEventGraph(taskId: string, events: RunEvent[]) {
@@ -224,23 +353,27 @@ function buildEventGraph(taskId: string, events: RunEvent[]) {
   return { nodes: [...nodes.values()], edges: [...edges.values()] };
 }
 
-export function mergeCanvasWithGraph(
-  graph?: GraphResponse,
-  canvas?: CanvasResponse,
-  events: RunEvent[] = [],
-  fallbackUi: CanvasUiState = defaultCanvasUi(),
-) {
+export function mergeCanvasWithGraph(graph?: GraphResponse, canvas?: CanvasResponse, events: RunEvent[] = [], fallbackUi: CanvasUiState = defaultCanvasUi()) {
   const eventGraph = buildEventGraph(graph?.task_id || canvas?.task_id || "", events);
   const canonicalNodes = new Map<string, GraphNode>();
   const canonicalEdges = new Map<string, GraphEdge>();
+  const savedNodes = new Map((canvas?.nodes || []).map((node) => [node.id, node]));
+  const allowEventOnlyGraph = !(graph?.nodes?.length || canvas?.nodes?.length);
 
   for (const node of graph?.nodes || []) canonicalNodes.set(node.id, node);
-  for (const node of eventGraph.nodes) canonicalNodes.set(node.id, { ...(canonicalNodes.get(node.id) || {}), ...node });
+  for (const node of eventGraph.nodes) {
+    if (!allowEventOnlyGraph && !canonicalNodes.has(node.id) && !savedNodes.has(node.id)) continue;
+    canonicalNodes.set(node.id, { ...(canonicalNodes.get(node.id) || {}), ...node });
+  }
 
   for (const edge of graph?.edges || []) canonicalEdges.set(`${edge.source}:${edge.target}:${edge.type}`, edge);
-  for (const edge of eventGraph.edges) canonicalEdges.set(`${edge.source}:${edge.target}:${edge.type}`, edge);
+  for (const edge of eventGraph.edges) {
+    if (!allowEventOnlyGraph && (!canonicalNodes.has(edge.source) || !canonicalNodes.has(edge.target)) && (!savedNodes.has(edge.source) || !savedNodes.has(edge.target))) {
+      continue;
+    }
+    canonicalEdges.set(`${edge.source}:${edge.target}:${edge.type}`, edge);
+  }
 
-  const savedNodes = new Map((canvas?.nodes || []).map((node) => [node.id, node]));
   const counts: Record<string, number> = {};
   const nodes: Array<Node<FlowNodeData>> = [];
 
@@ -283,7 +416,9 @@ export function mergeCanvasWithGraph(
 
   const edges: Array<Edge> = [];
   const existing = new Set<string>();
+  const nodeIds = new Set(nodes.map((node) => node.id));
   for (const edge of canonicalEdges.values()) {
+    if (!nodeIds.has(edge.source) || !nodeIds.has(edge.target)) continue;
     const key = `${edge.source}:${edge.target}:${edge.type}`;
     existing.add(key);
     edges.push({
@@ -326,20 +461,24 @@ export async function runAutoLayout(nodes: Array<Node<FlowNodeData>>, edges: Arr
     return new Map<string, { x: number; y: number }>();
   }
 
+  if (mode === "elk_layered") {
+    return buildStageLayout(nodes, edges);
+  }
+
   const layout = await elk.layout({
     id: "research-canvas",
     layoutOptions: {
       "elk.algorithm": mode === "elk_stress" ? "stress" : "layered",
       "elk.direction": "RIGHT",
-      "elk.spacing.nodeNode": "160",
-      "elk.layered.spacing.nodeNodeBetweenLayers": "260",
+      "elk.spacing.nodeNode": "240",
+      "elk.layered.spacing.nodeNodeBetweenLayers": "320",
       "elk.layered.nodePlacement.strategy": "NETWORK_SIMPLEX",
-      "elk.padding": "[top=60,left=100,bottom=60,right=100]",
+      "elk.padding": "[top=80,left=120,bottom=80,right=140]",
     },
     children: systemNodes.map((node) => ({
       id: node.id,
-      width: 340,
-      height: 220,
+      width: 380,
+      height: 320,
     })),
     edges: edges
       .filter((edge) => nodes.some((node) => node.id === edge.source) && nodes.some((node) => node.id === edge.target))
@@ -357,12 +496,7 @@ export async function runAutoLayout(nodes: Array<Node<FlowNodeData>>, edges: Arr
   return positions;
 }
 
-export function reconcileFlowState(
-  currentNodes: Array<Node<FlowNodeData>>,
-  currentEdges: Array<Edge>,
-  nextNodes: Array<Node<FlowNodeData>>,
-  nextEdges: Array<Edge>,
-) {
+export function reconcileFlowState(currentNodes: Array<Node<FlowNodeData>>, currentEdges: Array<Edge>, nextNodes: Array<Node<FlowNodeData>>, nextEdges: Array<Edge>) {
   const currentNodeMap = new Map(currentNodes.map((node) => [node.id, node]));
   const currentEdgeMap = new Map(currentEdges.map((edge) => [edge.id, edge]));
 
@@ -386,13 +520,7 @@ export function reconcileFlowState(
   return { nodes, edges };
 }
 
-export function buildCanvasPayload(
-  taskId: string,
-  nodes: Array<Node<FlowNodeData>>,
-  edges: Array<Edge>,
-  viewport: { x: number; y: number; zoom: number },
-  ui: CanvasUiState,
-) {
+export function buildCanvasPayload(taskId: string, nodes: Array<Node<FlowNodeData>>, edges: Array<Edge>, viewport: { x: number; y: number; zoom: number }, ui: CanvasUiState) {
   return {
     task_id: taskId,
     nodes: nodes.map((node) => {
@@ -448,7 +576,7 @@ export function canonicalGraphSignature(graph?: GraphResponse, events: RunEvent[
 }
 
 export function summarizeForNode(data?: Partial<FlowNodeData> | null) {
-  return stringifyBest(data?.summary, data?.method_summary, data?.abstract, data?.feedback_text) || "这个节点还没有摘要信息。";
+  return stringifyBest(data?.card_summary, data?.summary, data?.method_summary, data?.abstract, data?.feedback_text) || "这个节点暂时还没有可展示的摘要。";
 }
 
 export function formatRunState(mode: TaskMode, runId: string, autoStatus: string, summary?: RunSummary | null) {
@@ -475,7 +603,7 @@ export function isPaperNode(nodeId?: string) {
 }
 
 export function isManualNode(node: Node<FlowNodeData>) {
-  return Boolean(node.data?.isManual) || /^(note|question|reference|group|report):/.test(node.id);
+  return Boolean(node.data?.isManual) || /^(note|question|reference|group|report|checkpoint):/.test(node.id);
 }
 
 export function selectedPaperNodes(nodes: Array<Node<FlowNodeData>>) {

@@ -3,8 +3,8 @@ import { describe, expect, it, vi } from "vitest";
 import { DetailPanel } from "./DetailPanel";
 
 describe("DetailPanel", () => {
-  it("shows round candidate actions and paper actions", () => {
-    const onSelectCandidate = vi.fn();
+  it("shows round candidates and paper actions", () => {
+    const onOpenPdf = vi.fn();
 
     const { rerender } = render(
       <DetailPanel
@@ -12,15 +12,16 @@ describe("DetailPanel", () => {
         node={{
           id: "round:12",
           position: { x: 0, y: 0 },
-          data: { id: "round:12", type: "round", label: "第 2 轮", depth: 2, status: "done" },
+          data: { id: "round:12", type: "round", label: "Round 12", depth: 2, status: "done" },
           type: "cardNode",
         } as never}
         paperDetail={null}
         paperAssets={null}
-        roundCandidates={[{ candidate_id: 3, candidate_index: 1, name: "Candidate A", queries: ["graph retrieval"], reason: "更聚焦引文网络" }]}
+        roundCandidates={[{ candidate_id: 3, candidate_index: 1, name: "Candidate A", queries: ["graph retrieval"], reason: "Focus on citations." }]}
         onUpdateNote={vi.fn()}
         onToggleHidden={vi.fn()}
-        onOpenPdf={vi.fn()}
+        onDeleteNode={vi.fn()}
+        onOpenPdf={onOpenPdf}
         onSavePaper={vi.fn()}
         onSummarizePaper={vi.fn()}
         onRebuildVisual={vi.fn()}
@@ -28,15 +29,14 @@ describe("DetailPanel", () => {
         onStartExplore={vi.fn()}
         onBuildGraph={vi.fn()}
         onProposeCandidates={vi.fn()}
-        onSelectCandidate={onSelectCandidate}
+        onSelectCandidate={vi.fn()}
         onNextRound={vi.fn()}
         onAskPreset={vi.fn()}
       />,
     );
 
-    expect(screen.getByText("轮次动作")).toBeTruthy();
-    fireEvent.click(screen.getByText("选择这个候选"));
-    expect(onSelectCandidate).toHaveBeenCalledWith(12, 3);
+    expect(screen.getByText("Selected Node")).toBeInTheDocument();
+    expect(screen.getByText("Candidate A")).toBeInTheDocument();
 
     rerender(
       <DetailPanel
@@ -58,21 +58,26 @@ describe("DetailPanel", () => {
           url: "https://example.com",
           abstract: "paper abstract",
           method_summary: "",
+          card_summary: "Problem: grounded control\nMethod: demo model\nResult: stable gains",
+          summary_source: "fulltext",
+          summary_status: "done",
           source: "semantic_scholar",
           fulltext_status: "parsed",
           saved: false,
-          key_points_status: "none",
+          key_points_status: "done",
+          key_points: "1. Research problem: ...\n2. Core method: ...",
         }}
         paperAssets={{
           task_id: "R-1",
           paper_id: "paper:demo",
           primary_kind: "pdf",
-          items: [{ kind: "pdf", status: "available", download_url: "/pdf" }],
+          items: [{ kind: "pdf", status: "available", open_url: "/pdf-inline", download_url: "/pdf" }],
         }}
         roundCandidates={[]}
         onUpdateNote={vi.fn()}
         onToggleHidden={vi.fn()}
-        onOpenPdf={vi.fn()}
+        onDeleteNode={vi.fn()}
+        onOpenPdf={onOpenPdf}
         onSavePaper={vi.fn()}
         onSummarizePaper={vi.fn()}
         onRebuildVisual={vi.fn()}
@@ -86,8 +91,10 @@ describe("DetailPanel", () => {
       />,
     );
 
-    expect(screen.getByText("论文动作")).toBeTruthy();
-    expect(screen.getByText("Open PDF")).toBeTruthy();
+    expect(screen.getByText("Open PDF")).toBeInTheDocument();
+    fireEvent.click(screen.getByText("Open PDF"));
+    expect(onOpenPdf).toHaveBeenCalled();
     expect(screen.getAllByText("Paper Visual").length).toBeGreaterThan(0);
+    expect(screen.getByText("Why It Matters")).toBeInTheDocument();
   });
 });

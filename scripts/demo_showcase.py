@@ -106,7 +106,7 @@ def _live_notes() -> list[dict[str, str]]:
 
 def run_static_demo() -> dict:
     output_path = ROOT / "artifacts" / "demo" / "embodied-static-demo.json"
-    proc = _run_python("seed_embodied_demo.py", "--json-out", str(output_path))
+    proc = _run_python("seed_embodied_demo.py", "--refresh", "--json-out", str(output_path))
     if proc.returncode != 0:
         raise RuntimeError(
             "static demo seed failed\n"

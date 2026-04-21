@@ -13,8 +13,10 @@ import { QuickActionBar } from "./components/QuickActionBar";
 import { ResearchCanvas, buildManualConnection } from "./components/ResearchCanvas";
 import { RunTimeline } from "./components/RunTimeline";
 import { SectionTitle, SmallButton } from "./components/shared";
+import { edgeCountLabel } from "./display";
 import { useRunEvents } from "./hooks/useRunEvents";
 import type {
+  ActionResponse,
   ActionStatus,
   Backend,
   CanvasResponse,
@@ -25,6 +27,7 @@ import type {
   CollectionSummary,
   CompareReport,
   ExportListResponse,
+  ExportResponse,
   FlowNodeData,
   FulltextStatusResponse,
   GraphResponse,
@@ -54,6 +57,8 @@ import {
 } from "./utils";
 
 type ExportFormat = "md" | "bib" | "json" | "csljson";
+type WorkbenchActionResult = ActionResponse & { candidates?: RoundCandidate[] };
+type CanvasSavePayload = { taskId: string; payload: CanvasResponse };
 
 type WorkbenchAction =
   | { type: "quick"; action: "plan" | "search_first" | "build_graph" | "build_fulltext" | "auto_start" }
@@ -68,6 +73,17 @@ type WorkbenchAction =
   | { type: "guidance"; text: string }
   | { type: "auto_continue" }
   | { type: "auto_cancel" };
+
+function isTransientCanvasSaveError(cause: unknown) {
+  const message = cause instanceof Error ? cause.message.toLowerCase() : String(cause).toLowerCase();
+  return (
+    message.includes("画布正在和后台研究结果同步") ||
+    message.includes("节点问答正在和后台研究结果同步") ||
+    message.includes("canvas_save_busy") ||
+    message.includes("node_chat_busy") ||
+    message.includes("database is locked")
+  );
+}
 
 export function Workbench() {
   const client = useQueryClient();
@@ -86,6 +102,7 @@ export function Workbench() {
   const [collectionSearchText, setCollectionSearchText] = useState("");
   const [collectionLimit, setCollectionLimit] = useState(50);
   const [selectedCollectionItemIds, setSelectedCollectionItemIds] = useState<number[]>([]);
+  const [relayoutNonce, setRelayoutNonce] = useState(0);
   const flowRef = useRef<ReactFlowInstance<Node<FlowNodeData>, Edge> | null>(null);
   const zoteroFileInputRef = useRef<HTMLInputElement | null>(null);
   const persistTimer = useRef<number | null>(null);
@@ -93,10 +110,13 @@ export function Workbench() {
   const interactionLockRef = useRef(false);
   const lastSavedCanvasSignature = useRef("");
   const pendingCanvasSignature = useRef("");
+  const canvasRetryCountRef = useRef<Record<string, number>>({});
+  const nodeChatRetryCountRef = useRef<Record<string, number>>({});
   const nodesRef = useRef<Array<Node<FlowNodeData>>>([]);
   const edgesRef = useRef<Array<Edge>>([]);
   const viewportRef = useRef(viewport);
   const layoutSignatureRef = useRef("");
+  const lastTaskIdRef = useRef("");
 
   const configQuery = useQuery({
     queryKey: ["workbench-config"],
@@ -256,10 +276,18 @@ export function Workbench() {
   }, [canvasQuery.data]);
 
   useEffect(() => {
-    const reconciled = reconcileFlowState(nodesRef.current, edgesRef.current, merged.nodes, merged.edges);
+    const preservePositions = interactionLockRef.current || Boolean(pendingCanvasSignature.current);
+    const incomingNodes = preservePositions
+      ? merged.nodes.map((node) => {
+          const current = nodesRef.current.find((item) => item.id === node.id);
+          if (!current) return node;
+          return { ...node, position: current.position };
+        })
+      : merged.nodes;
+    const reconciled = reconcileFlowState(nodesRef.current, edgesRef.current, incomingNodes, merged.edges);
     setNodes(reconciled.nodes);
     setEdges(reconciled.edges);
-    if (!interactionLockRef.current && !isSameViewport(viewportRef.current, merged.viewport)) {
+    if (!interactionLockRef.current && !pendingCanvasSignature.current && !isSameViewport(viewportRef.current, merged.viewport)) {
       setViewport(merged.viewport);
       if (flowRef.current) {
         suppressViewportPersistRef.current = true;
@@ -269,10 +297,18 @@ export function Workbench() {
   }, [merged, setEdges, setNodes]);
 
   const canonicalSignature = useMemo(() => canonicalGraphSignature(graphQuery.data, eventsState.items), [graphQuery.data, eventsState.items]);
+  const canvasReady = canvasQuery.isFetched;
+  const hasSavedSystemLayout = useMemo(
+    () => Boolean(canvasQuery.data?.nodes?.some((node) => !/^(note|question|reference|group|report|checkpoint):/.test(node.id))),
+    [canvasQuery.data?.nodes],
+  );
 
   useEffect(() => {
-    if (!activeTaskId || !nodesRef.current.length || interactionLockRef.current) return;
-    if (layoutSignatureRef.current === `${activeTaskId}:${canonicalSignature}:${uiState.layout_mode}`) return;
+    if (!activeTaskId || !canvasReady || !nodesRef.current.length || interactionLockRef.current) return;
+    const shouldRelayout = relayoutNonce > 0 || !hasSavedSystemLayout;
+    if (!shouldRelayout) return;
+    const signature = `${activeTaskId}:${canonicalSignature}:${uiState.layout_mode}:${relayoutNonce}`;
+    if (layoutSignatureRef.current === signature) return;
     let canceled = false;
     runAutoLayout(nodesRef.current, edgesRef.current, uiState.layout_mode)
       .then((positions) => {
@@ -283,21 +319,46 @@ export function Workbench() {
           if (!position) return node;
           return { ...node, position };
         });
-        layoutSignatureRef.current = `${activeTaskId}:${canonicalSignature}:${uiState.layout_mode}`;
+        layoutSignatureRef.current = signature;
         setNodes(nextNodes);
         queueSave(nextNodes, edgesRef.current, viewportRef.current, uiState);
+        if (flowRef.current && (!hasSavedSystemLayout || relayoutNonce > 0)) {
+          suppressViewportPersistRef.current = true;
+          window.setTimeout(() => {
+            flowRef.current?.fitView({ duration: 180, padding: 0.14 });
+          }, 40);
+        }
       })
       .catch(() => undefined);
     return () => {
       canceled = true;
     };
-  }, [activeTaskId, canonicalSignature, setNodes, uiState]);
+  }, [activeTaskId, canvasReady, canonicalSignature, hasSavedSystemLayout, relayoutNonce, setNodes, uiState]);
 
   useEffect(() => {
     if (selectedNodeId && !nodes.some((node) => node.id === selectedNodeId)) {
       setSelectedNodeId("");
     }
   }, [nodes, selectedNodeId]);
+
+  useEffect(() => {
+    if (activeTaskId === lastTaskIdRef.current) return;
+    lastTaskIdRef.current = activeTaskId;
+    setActiveCollectionId("");
+    setSelectedNodeId("");
+    setPdfUrl("");
+    setChatByNode({});
+    setRoundCandidates({});
+    setCompareReport(null);
+    setCollectionSearchText("");
+    setCollectionLimit(50);
+    setSelectedCollectionItemIds([]);
+    layoutSignatureRef.current = "";
+    lastSavedCanvasSignature.current = "";
+    pendingCanvasSignature.current = "";
+    canvasRetryCountRef.current = {};
+    nodeChatRetryCountRef.current = {};
+  }, [activeTaskId]);
 
   useEffect(() => {
     return () => {
@@ -315,6 +376,10 @@ export function Workbench() {
     [fulltextStatusQuery.data?.items, selectedPaperId],
   );
 
+  useEffect(() => {
+    setPdfUrl("");
+  }, [selectedPaperId]);
+
   const paperDetailQuery = useQuery({
     queryKey: ["paper-detail", activeTaskId, selectedPaperId],
     queryFn: () => apiFetch<PaperDetail>(`/api/v1/research/tasks/${activeTaskId}/papers/${encodeURIComponent(selectedPaperId)}`),
@@ -328,18 +393,34 @@ export function Workbench() {
   });
 
   const saveCanvas = useMutation({
-    mutationFn: (payload: CanvasResponse) =>
-      apiFetch<CanvasResponse>(`/api/v1/research/tasks/${activeTaskId}/canvas`, {
+    mutationFn: ({ taskId, payload }: CanvasSavePayload) =>
+      apiFetch<CanvasResponse>(`/api/v1/research/tasks/${taskId}/canvas`, {
         method: "PUT",
         body: JSON.stringify(payload),
       }),
-    onSuccess: (data) => {
+    onSuccess: (data, variables) => {
       lastSavedCanvasSignature.current = canvasPayloadSignature(data);
       pendingCanvasSignature.current = "";
-      client.setQueryData(["canvas", activeTaskId], data);
+      delete canvasRetryCountRef.current[canvasPayloadSignature(variables.payload)];
+      client.setQueryData(["canvas", variables.taskId], data);
     },
-    onError: (cause) => {
+    onError: (cause, variables) => {
+      const signature = canvasPayloadSignature(variables.payload);
+      const retryCount = canvasRetryCountRef.current[signature] || 0;
       pendingCanvasSignature.current = "";
+      if (isTransientCanvasSaveError(cause)) {
+        if (variables.taskId === activeTaskId && retryCount < 2) {
+          canvasRetryCountRef.current[signature] = retryCount + 1;
+          window.setTimeout(() => {
+            if (variables.taskId !== activeTaskId) return;
+            pendingCanvasSignature.current = signature;
+            saveCanvas.mutate(variables);
+          }, 1200 * (retryCount + 1));
+        }
+        setActionStatus({ tone: "warning", text: "后台正在同步研究结果，画布会自动重试保存。" });
+        return;
+      }
+      delete canvasRetryCountRef.current[signature];
       setActionStatus({ tone: "warning", text: cause instanceof Error ? `画布保存失败：${cause.message}` : "画布保存失败" });
     },
   });
@@ -361,7 +442,7 @@ export function Workbench() {
     }
     pendingCanvasSignature.current = signature;
     persistTimer.current = window.setTimeout(() => {
-      saveCanvas.mutate(payload);
+      saveCanvas.mutate({ taskId: activeTaskId, payload });
     }, 450);
   }
 
@@ -564,9 +645,10 @@ export function Workbench() {
 
   const exportTask = useMutation({
     mutationFn: async (format: ExportFormat) =>
-      apiFetch<{ path: string }>(`/api/v1/research/tasks/${activeTaskId}/export?format=${format}`),
+      apiFetch<ExportResponse>(`/api/v1/research/tasks/${activeTaskId}/export?format=${format}`),
     onSuccess: (data, format) => {
-      setActionStatus({ tone: "success", text: `${format.toUpperCase()} 导出完成：${data.path}` });
+      const filename = data.filename || `${activeTaskId}.${format}`;
+      setActionStatus({ tone: "success", text: `${format.toUpperCase()} 导出已生成：${filename}。可在右侧导出历史中打开或下载。` });
       client.invalidateQueries({ queryKey: ["task-exports", activeTaskId] });
       client.invalidateQueries({ queryKey: ["project-dashboard", activeProjectId] });
     },
@@ -577,9 +659,10 @@ export function Workbench() {
 
   const exportCollection = useMutation({
     mutationFn: async (payload: { collectionId: string; format: "bib" | "csljson" }) =>
-      apiFetch<{ path: string }>(`/api/v1/research/collections/${payload.collectionId}/export?format=${payload.format}`),
+      apiFetch<ExportResponse>(`/api/v1/research/collections/${payload.collectionId}/export?format=${payload.format}`),
     onSuccess: (data, payload) => {
-      setActionStatus({ tone: "success", text: `Collection ${payload.format.toUpperCase()} 导出完成：${data.path}` });
+      const filename = data.filename || `${payload.collectionId}.${payload.format}`;
+      setActionStatus({ tone: "success", text: `Collection ${payload.format.toUpperCase()} 导出已生成：${filename}。可在右侧导出历史中打开或下载。` });
       client.invalidateQueries({ queryKey: ["collection-exports", payload.collectionId] });
       client.invalidateQueries({ queryKey: ["project-dashboard", activeProjectId] });
     },
@@ -632,39 +715,39 @@ export function Workbench() {
       switch (action.type) {
         case "quick":
           if (action.action === "plan") {
-            return apiFetch(`/api/v1/research/tasks/${activeTaskId}/plan`, { method: "POST" });
+            return apiFetch<WorkbenchActionResult>(`/api/v1/research/tasks/${activeTaskId}/plan`, { method: "POST" });
           }
           if (action.action === "search_first") {
-            return apiFetch(`/api/v1/research/tasks/${activeTaskId}/search`, {
+            return apiFetch<WorkbenchActionResult>(`/api/v1/research/tasks/${activeTaskId}/search`, {
               method: "POST",
               body: JSON.stringify({ direction_index: 1, top_n: 12 }),
             });
           }
           if (action.action === "build_graph") {
-            return apiFetch(`/api/v1/research/tasks/${activeTaskId}/graph/build`, {
+            return apiFetch<WorkbenchActionResult>(`/api/v1/research/tasks/${activeTaskId}/graph/build`, {
               method: "POST",
               body: JSON.stringify({ view: "tree" }),
             });
           }
           if (action.action === "build_fulltext") {
-            return apiFetch(`/api/v1/research/tasks/${activeTaskId}/fulltext/build`, { method: "POST" });
+            return apiFetch<WorkbenchActionResult>(`/api/v1/research/tasks/${activeTaskId}/fulltext/build`, { method: "POST" });
           }
           if (action.action === "auto_start") {
-            return apiFetch<{ run_id: string }>(`/api/v1/research/tasks/${activeTaskId}/auto/start`, { method: "POST" });
+            return apiFetch<WorkbenchActionResult>(`/api/v1/research/tasks/${activeTaskId}/auto/start`, { method: "POST" });
           }
           return null;
         case "search_direction":
-          return apiFetch(`/api/v1/research/tasks/${activeTaskId}/search`, {
+          return apiFetch<WorkbenchActionResult>(`/api/v1/research/tasks/${activeTaskId}/search`, {
             method: "POST",
             body: JSON.stringify({ direction_index: action.directionIndex, top_n: 12 }),
           });
         case "start_explore":
-          return apiFetch<{ round_id: number }>(`/api/v1/research/tasks/${activeTaskId}/explore/start`, {
+          return apiFetch<WorkbenchActionResult>(`/api/v1/research/tasks/${activeTaskId}/explore/start`, {
             method: "POST",
             body: JSON.stringify({ direction_index: action.directionIndex, top_n: 8 }),
           });
         case "build_graph":
-          return apiFetch(`/api/v1/research/tasks/${activeTaskId}/graph/build`, {
+          return apiFetch<WorkbenchActionResult>(`/api/v1/research/tasks/${activeTaskId}/graph/build`, {
             method: "POST",
             body: JSON.stringify({
               view: action.roundId ? "citation" : "tree",
@@ -673,53 +756,53 @@ export function Workbench() {
             }),
           });
         case "propose":
-          return apiFetch<{ round_id: number; candidates: RoundCandidate[] }>(`/api/v1/research/tasks/${activeTaskId}/explore/rounds/${action.roundId}/propose`, {
+          return apiFetch<WorkbenchActionResult>(`/api/v1/research/tasks/${activeTaskId}/explore/rounds/${action.roundId}/propose`, {
             method: "POST",
             body: JSON.stringify({ action: action.action, feedback_text: action.feedbackText, candidate_count: 4 }),
           });
         case "select_candidate":
-          return apiFetch(`/api/v1/research/tasks/${activeTaskId}/explore/rounds/${action.roundId}/select`, {
+          return apiFetch<WorkbenchActionResult>(`/api/v1/research/tasks/${activeTaskId}/explore/rounds/${action.roundId}/select`, {
             method: "POST",
             body: JSON.stringify({ candidate_id: action.candidateId, top_n: 8 }),
           });
         case "next_round":
-          return apiFetch(`/api/v1/research/tasks/${activeTaskId}/explore/rounds/${action.roundId}/next`, {
+          return apiFetch<WorkbenchActionResult>(`/api/v1/research/tasks/${activeTaskId}/explore/rounds/${action.roundId}/next`, {
             method: "POST",
             body: JSON.stringify({ intent_text: action.intentText, top_n: 8 }),
           });
         case "save_paper":
-          return apiFetch(`/api/v1/research/tasks/${activeTaskId}/papers/${encodeURIComponent(action.paperId)}/save`, {
+          return apiFetch<WorkbenchActionResult>(`/api/v1/research/tasks/${activeTaskId}/papers/${encodeURIComponent(action.paperId)}/save`, {
             method: "POST",
             body: JSON.stringify({}),
           });
         case "summarize_paper":
-          return apiFetch(`/api/v1/research/tasks/${activeTaskId}/papers/${encodeURIComponent(action.paperId)}/summarize`, {
+          return apiFetch<WorkbenchActionResult>(`/api/v1/research/tasks/${activeTaskId}/papers/${encodeURIComponent(action.paperId)}/summarize`, {
             method: "POST",
           });
         case "guidance":
-          return apiFetch(`/api/v1/research/tasks/${activeTaskId}/runs/${runId}/guidance`, {
+          return apiFetch<WorkbenchActionResult>(`/api/v1/research/tasks/${activeTaskId}/runs/${runId}/guidance`, {
             method: "POST",
             body: JSON.stringify({ text: action.text }),
           });
         case "auto_continue":
-          return apiFetch(`/api/v1/research/tasks/${activeTaskId}/runs/${runId}/continue`, { method: "POST" });
+          return apiFetch<WorkbenchActionResult>(`/api/v1/research/tasks/${activeTaskId}/runs/${runId}/continue`, { method: "POST" });
         case "auto_cancel":
-          return apiFetch(`/api/v1/research/tasks/${activeTaskId}/runs/${runId}/cancel`, { method: "POST" });
+          return apiFetch<WorkbenchActionResult>(`/api/v1/research/tasks/${activeTaskId}/runs/${runId}/cancel`, { method: "POST" });
         default:
           return null;
       }
     },
     onSuccess: (data, action) => {
-      if (action.type === "quick" && action.action === "auto_start" && data && typeof data === "object" && "run_id" in data) {
+      if (action.type === "quick" && action.action === "auto_start" && data?.run_id) {
         setRunId(String(data.run_id || ""));
       }
-      if (action.type === "propose" && data && typeof data === "object" && "candidates" in data) {
-        setRoundCandidates((current) => ({ ...current, [action.roundId]: (data.candidates as RoundCandidate[]) || [] }));
+      if (action.type === "propose" && data?.candidates) {
+        setRoundCandidates((current) => ({ ...current, [action.roundId]: data.candidates || [] }));
       }
       if (activeTask?.mode === "gpt_step") {
         setRunId(`step-${activeTaskId}`);
       }
-      setActionStatus({ tone: "success", text: buildSuccessText(action) });
+      setActionStatus(resolveActionStatus(action, data));
       client.invalidateQueries({ queryKey: ["tasks", activeProjectId] });
       client.invalidateQueries({ queryKey: ["task", activeTaskId] });
       client.invalidateQueries({ queryKey: ["graph", activeTaskId] });
@@ -741,9 +824,43 @@ export function Workbench() {
       }),
     onSuccess: (data) => {
       setChatByNode((current) => ({ ...current, [data.node_id]: data.history }));
+      const latest = data.history[data.history.length - 1] || data.item;
+      if (latest) {
+        delete nodeChatRetryCountRef.current[`${data.node_id}:${latest.question}:${latest.thread_id || ""}`];
+      }
+      const target = nodesRef.current.find((node) => node.id === data.node_id);
+      if (latest && target?.data?.isManual && target.data.type === "question") {
+        const nextNodes = nodesRef.current.map((node) =>
+          node.id === data.node_id
+            ? {
+                ...node,
+                data: {
+                  ...node.data,
+                  label: latest.question.slice(0, 28) || node.data.label,
+                  summary: `问题：${latest.question}\n\n回答：${latest.answer}`,
+                },
+              }
+            : node,
+        );
+        setNodes(nextNodes);
+        queueSave(nextNodes, edgesRef.current);
+      }
       setActionStatus({ tone: "neutral", text: "节点问答已更新" });
     },
-    onError: (cause) => {
+    onError: (cause, variables) => {
+      if (isTransientCanvasSaveError(cause)) {
+        const key = `${variables.nodeId}:${variables.question}:${variables.threadId || ""}`;
+        const retryCount = nodeChatRetryCountRef.current[key] || 0;
+        if (retryCount < 2) {
+          nodeChatRetryCountRef.current[key] = retryCount + 1;
+          setActionStatus({ tone: "warning", text: "后台正在同步研究结果，节点问答会自动重试。" });
+          window.setTimeout(() => nodeChat.mutate(variables), 1200 * (retryCount + 1));
+        } else {
+          delete nodeChatRetryCountRef.current[key];
+          setActionStatus({ tone: "warning", text: "后台仍在同步，请稍后再问一次。" });
+        }
+        return;
+      }
       setActionStatus({ tone: "danger", text: cause instanceof Error ? cause.message : String(cause) });
     },
   });
@@ -782,6 +899,27 @@ export function Workbench() {
     const nextNodes = nodesRef.current.map((node) => (node.id === selectedNodeId ? { ...node, hidden: !node.hidden } : node));
     setNodes(nextNodes);
     queueSave(nextNodes, edgesRef.current);
+  }
+
+  function deleteSelectedNode() {
+    if (!selectedNodeId) return;
+    const target = nodesRef.current.find((node) => node.id === selectedNodeId);
+    if (!target) return;
+    if (!target.data?.isManual) {
+      setActionStatus({ tone: "warning", text: "系统节点当前不能直接删除，只能隐藏。" });
+      return;
+    }
+    const nextNodes = nodesRef.current.filter((node) => node.id !== selectedNodeId);
+    const nextEdges = edgesRef.current.filter(
+      (edge) =>
+        edge.source !== selectedNodeId &&
+        edge.target !== selectedNodeId,
+    );
+    setSelectedNodeId("");
+    setNodes(nextNodes);
+    setEdges(nextEdges);
+    queueSave(nextNodes, nextEdges);
+    setActionStatus({ tone: "success", text: "已删除手工节点。" });
   }
 
   function saveChatAnswerAsNode(kind: "note" | "question" | "reference" | "report", item: ChatItem) {
@@ -897,7 +1035,6 @@ export function Workbench() {
         <ProjectSidebar
           config={configQuery.data || null}
           dashboard={dashboardQuery.data || null}
-          currentExports={taskExportsQuery.data?.items || []}
           zoteroConfig={zoteroConfigQuery.data || null}
           projects={projectsQuery.data?.items || []}
           tasks={tasksQuery.data?.items || []}
@@ -906,19 +1043,41 @@ export function Workbench() {
           activeTaskId={activeTaskId}
           activeCollectionId={activeCollectionId}
           activeTask={activeTask}
-          actionStatus={actionStatus}
           onSelectProject={(projectId) => {
             setActiveProjectId(projectId);
+            setActiveTaskId("");
+            setRunId("");
             setActiveCollectionId("");
-            setActionStatus(null);
-          }}
-          onSelectTask={(taskId) => {
-            setActiveTaskId(taskId);
             setSelectedNodeId("");
             setPdfUrl("");
             setChatByNode({});
             setRoundCandidates({});
             setCompareReport(null);
+            setCollectionSearchText("");
+            setCollectionLimit(50);
+            setSelectedCollectionItemIds([]);
+            layoutSignatureRef.current = "";
+            setActionStatus(null);
+          }}
+          onSelectTask={(taskId) => {
+            if (taskId === activeTaskId) {
+              setActiveCollectionId("");
+              setSelectedNodeId("");
+              setPdfUrl("");
+              setActionStatus({ tone: "neutral", text: "已切回当前任务视图" });
+              return;
+            }
+            setActiveTaskId(taskId);
+            setActiveCollectionId("");
+            setSelectedNodeId("");
+            setPdfUrl("");
+            setChatByNode({});
+            setRoundCandidates({});
+            setCompareReport(null);
+            setCollectionSearchText("");
+            setCollectionLimit(50);
+            setSelectedCollectionItemIds([]);
+            layoutSignatureRef.current = "";
             setActionStatus(null);
           }}
           onSelectCollection={(collectionId) => setActiveCollectionId(collectionId)}
@@ -927,7 +1086,6 @@ export function Workbench() {
           onCreateTask={(payload) => createTask.mutate(payload)}
           onQuickAction={(action) => workbenchAction.mutate({ type: "quick", action })}
           onImportZoteroFile={() => zoteroFileInputRef.current?.click()}
-          onExport={(format) => exportTask.mutate(format)}
         />
       }
       canvas={
@@ -938,11 +1096,12 @@ export function Workbench() {
                 <div className="text-xs font-semibold uppercase tracking-[0.18em] text-slate-400">Research Canvas</div>
                 <div className="mt-1 text-lg font-semibold text-slate-900">卡片式研究画布</div>
                 <div className="mt-1 text-sm text-slate-500">
-                  {activeTask ? `${activeTask.topic} · ${merged.nodes.length} 个节点 / ${merged.edges.length} 条连线` : "请选择任务，或先在左侧创建一个新的研究任务。"}
+                  {activeTask ? `${activeTask.topic} · ${merged.nodes.length} 个节点 / ${edgeCountLabel(merged.edges)}` : "请选择任务，或先在左侧创建一个新的研究任务。"}
                 </div>
                 <div className="mt-1 text-xs text-slate-400">
                   系统节点来自 canonical graph，手工节点与手工连线只写入 canvas state。多选论文卡片后可以直接加入 Collection 或做 Compare。
                 </div>
+                {actionStatus ? <ActionBanner status={actionStatus} /> : null}
               </div>
               <div className="flex items-center gap-2">
                 <button
@@ -962,12 +1121,22 @@ export function Workbench() {
                     const next = { ...uiState, layout_mode: event.target.value };
                     setUiState(next);
                     layoutSignatureRef.current = "";
+                    setRelayoutNonce((current) => current + 1);
                     queueSave(nodesRef.current, edgesRef.current, viewportRef.current, next);
                   }}
                 >
-                  <option value="elk_layered">ELK Layered</option>
-                  <option value="elk_stress">ELK Stress</option>
+                  <option value="elk_layered">分层工作流</option>
+                  <option value="elk_stress">自由图谱</option>
                 </select>
+                <button
+                  className="rounded-full border border-slate-200 bg-white px-3 py-1 text-xs text-slate-600"
+                  onClick={() => {
+                    layoutSignatureRef.current = "";
+                    setRelayoutNonce((current) => current + 1);
+                  }}
+                >
+                  重新布局
+                </button>
                 <div className="rounded-full border border-slate-200 bg-white px-3 py-1 text-xs text-slate-600">已选论文 {selectedPaperCount}</div>
               </div>
             </div>
@@ -1079,7 +1248,15 @@ export function Workbench() {
                     <div className="font-medium text-slate-900">
                       {item.format.toUpperCase()} · {item.status}
                     </div>
-                    <div className="mt-1 break-all">{item.output_path || item.error || "无路径"}</div>
+                    {item.filename ? <div className="mt-1 text-slate-500">{item.filename}</div> : null}
+                    {item.output_path ? <div className="mt-1 break-all">{item.output_path}</div> : null}
+                    <div className="mt-2 flex flex-wrap gap-2">
+                      {item.download_url ? (
+                        <a className="rounded-xl border border-slate-200 bg-white px-3 py-2 text-xs font-medium text-slate-700" href={item.download_url} rel="noreferrer" target="_blank">
+                          打开 / 下载
+                        </a>
+                      ) : null}
+                    </div>
                   </div>
                 ))}
               </div>
@@ -1127,9 +1304,15 @@ export function Workbench() {
               roundCandidates={selectedRoundCandidates}
               onUpdateNote={updateSelectedNote}
               onToggleHidden={toggleSelectedHidden}
+              onDeleteNode={deleteSelectedNode}
               onOpenPdf={() => {
                 const pdf = paperAssetQuery.data?.items.find((item) => item.kind === "pdf" && item.status === "available");
-                setPdfUrl(pdf?.download_url || "");
+                const openUrl = pdf?.open_url || pdf?.download_url || "";
+                if (!openUrl) {
+                  setActionStatus({ tone: "warning", text: "当前论文还没有可打开的 PDF" });
+                  return;
+                }
+                window.open(openUrl, "_blank", "noopener,noreferrer");
               }}
               onSavePaper={() => selectedPaperId && workbenchAction.mutate({ type: "save_paper", paperId: selectedPaperId })}
               onSummarizePaper={() => selectedPaperId && workbenchAction.mutate({ type: "summarize_paper", paperId: selectedPaperId })}
@@ -1146,6 +1329,9 @@ export function Workbench() {
 
           <ContextChatPanel
             disabled={!selectedNode}
+            nodeId={selectedNode?.id}
+            nodeLabel={selectedNode?.data?.label}
+            nodeType={selectedNode?.data?.type}
             history={selectedNode ? chatByNode[selectedNode.id] || [] : []}
             onSend={(question, threadId) => selectedNode && nodeChat.mutate({ nodeId: selectedNode.id, question, threadId })}
             onSaveAnswer={saveChatAnswerAsNode}
@@ -1167,12 +1353,13 @@ export function Workbench() {
             <PdfPanel
               taskId={activeTaskId}
               paperId={selectedPaperId}
-              pdfUrl={pdfUrl}
+              previewUrl={pdfUrl}
               assets={paperAssetQuery.data || null}
               fulltextItem={selectedFulltextItem}
               fulltextSummary={fulltextStatusQuery.data?.summary || null}
               busy={uploadPdf.isPending || workbenchAction.isPending || rebuildPaperVisual.isPending}
               onClose={() => setPdfUrl("")}
+              onPreviewPdf={(url) => setPdfUrl(url)}
               onBuildFulltext={() => workbenchAction.mutate({ type: "quick", action: "build_fulltext" })}
               onRetryFulltext={() =>
                 apiFetch(`/api/v1/research/tasks/${activeTaskId}/fulltext/retry?paper_ids=${encodeURIComponent(selectedPaperId)}`, {
@@ -1230,6 +1417,59 @@ export function Workbench() {
         return "操作已提交。";
     }
   }
+
+  function resolveActionStatus(action: WorkbenchAction, data?: WorkbenchActionResult | null): ActionStatus {
+    const noopReason = data?.noop_reason || "";
+    const message = data?.message?.trim();
+    if (noopReason) {
+      return {
+        tone: isMissingPrerequisite(noopReason) ? "warning" : "neutral",
+        text: message || buildNoopText(noopReason),
+      };
+    }
+    if (data?.queued === false) {
+      return {
+        tone: "neutral",
+        text: message || "当前操作没有执行。",
+      };
+    }
+    return {
+      tone: "success",
+      text: message || buildSuccessText(action),
+    };
+  }
+}
+
+function buildNoopText(noopReason: string) {
+  const labels: Record<string, string> = {
+    directions_already_available: "已有方向结果，无需重复规划。",
+    plan_already_pending: "方向规划已在队列中，无需重复提交。",
+    search_already_pending: "论文检索已在队列中，无需重复提交。",
+    direction_missing: "缺少方向信息，请先规划方向。",
+    fulltext_already_pending: "全文处理已在队列中，无需重复提交。",
+    graph_already_pending: "图谱构建已在队列中，无需重复提交。",
+    paper_missing: "缺少论文节点，请先选择有效论文。",
+    no_papers: "当前任务还没有论文，无法执行全文处理。",
+    no_graph_seed: "当前缺少图谱种子，请先完成检索或探索。",
+  };
+  return labels[noopReason] || "当前操作没有执行。";
+}
+
+function isMissingPrerequisite(noopReason: string) {
+  return noopReason.includes("missing") || noopReason.startsWith("no_") || noopReason === "paper_missing";
+}
+
+function ActionBanner(props: { status: ActionStatus }) {
+  const className =
+    props.status.tone === "success"
+      ? "border-emerald-200 bg-emerald-50 text-emerald-700"
+      : props.status.tone === "warning"
+        ? "border-amber-200 bg-amber-50 text-amber-700"
+        : props.status.tone === "danger"
+          ? "border-rose-200 bg-rose-50 text-rose-700"
+          : "border-slate-200 bg-slate-50 text-slate-600";
+
+  return <div className={`mt-3 rounded-2xl border px-3 py-2 text-sm ${className}`}>{props.status.text}</div>;
 }
 
 function isSameViewport(

@@ -100,6 +100,14 @@ class SearchFetchResult:
     error: str | None = None
 
 
+class CanvasStateBusyError(RuntimeError):
+    """Raised when canvas persistence collides with an ongoing SQLite write lock."""
+
+
+class NodeChatBusyError(RuntimeError):
+    """Raised when node chat persistence collides with an ongoing SQLite write lock."""
+
+
 class ResearchService:
     def __init__(
         self,
@@ -142,7 +150,7 @@ class ResearchService:
         mode: str | ResearchRunMode = ResearchRunMode.GPT_STEP,
         llm_backend: str | ResearchLLMBackend = ResearchLLMBackend.GPT,
         llm_model: str | None = None,
-    ) -> ResearchTask:
+    ) -> tuple[ResearchTask, bool, str | None]:
         task_repo = ResearchTaskRepo(db)
         session_repo = ResearchSessionRepo(db)
         project = self._get_or_create_project(db, user_id=user_id, project_id=project_id)
@@ -218,12 +226,18 @@ class ResearchService:
             raise ValueError("no active research task")
         if direction_index < 1:
             raise ValueError("direction index must be >= 1")
+        direction = ResearchDirectionRepo(db).get_by_index(task.id, direction_index)
+        if not direction:
+            return task, False, "direction_missing"
+        job_repo = ResearchJobRepo(db)
+        if job_repo.has_pending(task.id, ResearchJobType.SEARCH):
+            return task, False, "search_already_pending"
         payload = {
             "direction_index": direction_index,
             "top_n": top_n or self.settings.research_topn_default,
             "force_refresh": bool(force_refresh),
         }
-        ResearchJobRepo(db).enqueue(task.id, ResearchJobType.SEARCH, payload, queue_name=self.settings.research_queue_name)
+        job_repo.enqueue(task.id, ResearchJobType.SEARCH, payload, queue_name=self.settings.research_queue_name)
         task.status = ResearchTaskStatus.SEARCHING
         task.updated_at = datetime.now(timezone.utc)
         db.add(task)
@@ -237,16 +251,16 @@ class ResearchService:
             status="queued",
             details=payload,
         )
-        return task
+        return task, True, None
 
-    def enqueue_plan(self, db: Session, *, user_id: int, task_id: str, force: bool = False) -> tuple[ResearchTask, bool]:
+    def enqueue_plan(self, db: Session, *, user_id: int, task_id: str, force: bool = False) -> tuple[ResearchTask, bool, str | None]:
         task = self.switch_task(db, user_id=user_id, task_id=task_id)
         direction_count = len(ResearchDirectionRepo(db).list_for_task(task.id))
         job_repo = ResearchJobRepo(db)
         if not force and direction_count > 0:
-            return task, False
+            return task, False, "directions_already_available"
         if job_repo.has_pending(task.id, ResearchJobType.PLAN):
-            return task, False
+            return task, False, "plan_already_pending"
         payload = {
             "topic": task.topic,
             "constraints": _load_json_dict(task.constraints_json),
@@ -265,7 +279,7 @@ class ResearchService:
             status="queued",
             details={"force": bool(force)},
         )
-        return task, True
+        return task, True, None
 
     def enqueue_fulltext_build(
         self,
@@ -275,17 +289,25 @@ class ResearchService:
         task_id: str,
         force: bool = False,
         paper_ids: list[str] | None = None,
-    ) -> tuple[ResearchTask, bool]:
+    ) -> tuple[ResearchTask, bool, str | None]:
         task = self.switch_task(db, user_id=user_id, task_id=task_id)
         if not self.settings.research_fulltext_enabled:
             raise ValueError("research fulltext is disabled")
         job_repo = ResearchJobRepo(db)
         if not force and job_repo.has_pending(task.id, ResearchJobType.FULLTEXT):
-            return task, False
+            return task, False, "fulltext_already_pending"
+        target_paper_ids = [str(x).strip() for x in (paper_ids or []) if str(x).strip()]
+        paper_rows = ResearchPaperRepo(db).list_for_task(task.id)
+        if target_paper_ids:
+            known_ids = {_paper_token(row) for row in paper_rows}
+            if not any(paper_id in known_ids for paper_id in target_paper_ids):
+                return task, False, "paper_missing"
+        elif not paper_rows:
+            return task, False, "no_papers"
         job_repo.enqueue(
             task.id,
             ResearchJobType.FULLTEXT,
-            {"force": bool(force), "paper_ids": [str(x).strip() for x in (paper_ids or []) if str(x).strip()]},
+            {"force": bool(force), "paper_ids": target_paper_ids},
             queue_name=self.settings.research_queue_name,
         )
         task.status = ResearchTaskStatus.SEARCHING
@@ -299,9 +321,9 @@ class ResearchService:
             title="全文处理已排队",
             message="正在准备抓取与解析论文全文。",
             status="queued",
-            details={"force": bool(force), "paper_count": len(paper_filter := [str(x).strip() for x in (paper_ids or []) if str(x).strip()])},
+            details={"force": bool(force), "paper_count": len(target_paper_ids)},
         )
-        return task, True
+        return task, True, None
 
     def enqueue_graph_build(
         self,
@@ -317,13 +339,19 @@ class ResearchService:
         expand_limit_per_paper: int | None = None,
         force_refresh: bool = False,
         force: bool = False,
-    ) -> tuple[ResearchTask, bool]:
+    ) -> tuple[ResearchTask, bool, str | None]:
         task = self.switch_task(db, user_id=user_id, task_id=task_id)
         if not self.settings.research_graph_enabled:
             raise ValueError("research graph is disabled")
         job_repo = ResearchJobRepo(db)
         if not force and job_repo.has_pending(task.id, ResearchJobType.GRAPH_BUILD):
-            return task, False
+            return task, False, "graph_already_pending"
+        if not round_id:
+            direction_count = len(ResearchDirectionRepo(db).list_for_task(task.id))
+            round_count = len(ResearchRoundRepo(db).list_for_task(task.id))
+            paper_count = len(ResearchPaperRepo(db).list_for_task(task.id))
+            if direction_count == 0 and round_count == 0 and paper_count == 0:
+                return task, False, "no_graph_seed"
         payload = {
             "direction_index": direction_index,
             "round_id": round_id,
@@ -348,7 +376,7 @@ class ResearchService:
             status="queued",
             details=payload,
         )
-        return task, True
+        return task, True, None
 
     def start_exploration(
         self,
@@ -1143,6 +1171,28 @@ class ResearchService:
             "items": [self._export_record_to_dict(row) for row in rows],
         }
 
+    def get_task_export_download_path(self, db: Session, *, user_id: int, task_id: str, record_id: int) -> str:
+        task = self.switch_task(db, user_id=user_id, task_id=task_id, remember_active=False)
+        row = ResearchExportRecordRepo(db).get_for_task(task.id, record_id)
+        if not row or not row.output_path:
+            raise ValueError("export record not found")
+        path = Path(row.output_path)
+        if not path.exists():
+            raise ValueError("export artifact not found")
+        return str(path)
+
+    def get_collection_export_download_path(self, db: Session, *, user_id: int, collection_id: str, record_id: int) -> str:
+        collection = ResearchCollectionRepo(db).get_by_collection_id(user_id=user_id, collection_id=collection_id)
+        if not collection:
+            raise ValueError("collection not found")
+        row = ResearchCollectionExportRecordRepo(db).get_for_collection(collection.id, record_id)
+        if not row or not row.output_path:
+            raise ValueError("export record not found")
+        path = Path(row.output_path)
+        if not path.exists():
+            raise ValueError("export artifact not found")
+        return str(path)
+
     def get_zotero_config(self) -> dict:
         legacy_enabled = bool(self.settings.zotero_base_url)
         legacy_configured = bool(self.settings.zotero_base_url and self.settings.zotero_library_id.strip())
@@ -1416,14 +1466,25 @@ class ResearchService:
         }
 
     def save_canvas_state(self, db: Session, *, user_id: int, task_id: str, state: dict) -> dict:
-        task = self.switch_task(db, user_id=user_id, task_id=task_id)
+        task = self.switch_task(db, user_id=user_id, task_id=task_id, remember_active=False)
         payload = {
             "nodes": list(state.get("nodes") or []),
             "edges": list(state.get("edges") or []),
             "viewport": dict(state.get("viewport") or {"x": 0, "y": 0, "zoom": 1}),
             "ui": {**self._default_canvas_ui(), **dict(state.get("ui") or {})},
         }
-        row = self._run_with_locked_retry(db, lambda: ResearchCanvasStateRepo(db).upsert(task.id, payload))
+        try:
+            row = self._run_with_locked_retry(
+                db,
+                lambda: ResearchCanvasStateRepo(db).upsert(task.id, payload),
+                attempts=8,
+                base_delay_seconds=0.35,
+            )
+        except OperationalError as exc:
+            if self._is_sqlite_locked_error(exc):
+                logger.warning("research_canvas_save_busy task_id=%s", task.task_id)
+                raise CanvasStateBusyError("canvas_save_busy") from exc
+            raise
         return {
             "task_id": task.task_id,
             "nodes": payload["nodes"],
@@ -1444,12 +1505,32 @@ class ResearchService:
         thread_id: str | None = None,
         tags: list[str] | None = None,
     ) -> dict:
-        task = self.switch_task(db, user_id=user_id, task_id=task_id)
+        task = self.switch_task(db, user_id=user_id, task_id=task_id, remember_active=False)
         repo = ResearchNodeChatRepo(db)
         thread = (thread_id or uuid4().hex[:12]).strip()[:64]
         context = self._resolve_node_context(db, task=task, node_id=node_id)
-        history_rows = repo.list_for_node(task_id=task.id, node_id=node_id, thread_id=thread, limit=12)
+        try:
+            history_rows = self._run_with_locked_retry(
+                db,
+                lambda: repo.list_for_node(task_id=task.id, node_id=node_id, thread_id=thread, limit=12),
+                attempts=6,
+                base_delay_seconds=0.25,
+            )
+        except OperationalError as exc:
+            if self._is_sqlite_locked_error(exc):
+                logger.warning("research_node_chat_read_busy task_id=%s node_id=%s", task.task_id, node_id)
+                raise NodeChatBusyError("node_chat_busy") from exc
+            raise
         history_lines = [f"Q: {row.question}\nA: {row.answer}" for row in history_rows[-4:]]
+        prompt = (
+            "你是 research node assistant。请只基于给定节点上下文回答，不要接管整个研究流程。\n\n"
+            f"Task topic: {task.topic}\n"
+            f"Node ID: {node_id}\n"
+            f"Node context JSON: {orjson.dumps(context).decode('utf-8')}\n"
+            f"Existing chat: {orjson.dumps(history_lines).decode('utf-8')}\n"
+            f"User question: {question.strip()}\n"
+            f"Tags: {orjson.dumps(tags or []).decode('utf-8')}"
+        )
         prompt = (
             "你是 research node assistant。请只基于给定节点上下文回答，不要接管整个研究流程。\n\n"
             f"Task topic: {task.topic}\n"
@@ -1467,20 +1548,34 @@ class ResearchService:
             temperature=0.2,
             max_tokens=900,
         )
-        row = self._run_with_locked_retry(
-            db,
-            lambda: repo.create(
-                task_id=task.id,
-                node_id=node_id,
-                thread_id=thread,
-                question=question,
-                answer=result.text,
-                provider=result.provider,
-                model=result.model,
-                context=context,
-            ),
-        )
-        history_rows = repo.list_for_node(task_id=task.id, node_id=node_id, thread_id=thread, limit=50)
+        answer = self._sanitize_node_chat_answer(result.text, context=context, question=question)
+        try:
+            row = self._run_with_locked_retry(
+                db,
+                lambda: repo.create(
+                    task_id=task.id,
+                    node_id=node_id,
+                    thread_id=thread,
+                    question=question,
+                    answer=answer,
+                    provider=result.provider,
+                    model=result.model,
+                    context=context,
+                ),
+                attempts=8,
+                base_delay_seconds=0.35,
+            )
+            history_rows = self._run_with_locked_retry(
+                db,
+                lambda: repo.list_for_node(task_id=task.id, node_id=node_id, thread_id=thread, limit=50),
+                attempts=6,
+                base_delay_seconds=0.25,
+            )
+        except OperationalError as exc:
+            if self._is_sqlite_locked_error(exc):
+                logger.warning("research_node_chat_write_busy task_id=%s node_id=%s", task.task_id, node_id)
+                raise NodeChatBusyError("node_chat_busy") from exc
+            raise
         return {
             "task_id": task.task_id,
             "node_id": node_id,
@@ -1563,8 +1658,13 @@ class ResearchService:
                     "status": "available" if exists else "missing",
                     "filename": item.get("filename"),
                     "path": item.get("path"),
+                    "open_url": (
+                        self._paper_asset_url(task_id=task.task_id, paper_token=paper_token, kind=kind, disposition="inline")
+                        if exists
+                        else None
+                    ),
                     "download_url": (
-                        f"/api/v1/research/tasks/{quote_plus(task.task_id)}/papers/{quote_plus(paper_token)}/asset?kind={kind}"
+                        self._paper_asset_url(task_id=task.task_id, paper_token=paper_token, kind=kind, disposition="attachment")
                         if exists
                         else None
                     ),
@@ -1817,6 +1917,7 @@ class ResearchService:
         paper_id = _paper_token(paper)
         fulltext = ResearchPaperFulltextRepo(db).get(task.id, paper_id)
         preview = self._paper_visual_preview(task=task, paper=paper, fulltext=fulltext)
+        summary = self._paper_summary_view(paper=paper, fulltext=fulltext)
         return {
             "task_id": task.task_id,
             "paper_id": paper_id,
@@ -1828,21 +1929,186 @@ class ResearchService:
             "url": paper.url,
             "abstract": paper.abstract,
             "method_summary": paper.method_summary,
+            "card_summary": summary["card_summary"],
+            "summary_source": summary["summary_source"],
+            "summary_status": summary["summary_status"],
             "source": paper.source,
             "fulltext_status": fulltext.status.value if fulltext else None,
             "saved": bool(paper.saved),
             "saved_path": paper.saved_path,
             "saved_bib_path": paper.saved_bib_path,
             "saved_at": paper.saved_at,
-            "key_points_status": paper.key_points_status or "none",
-            "key_points_source": paper.key_points_source,
-            "key_points": paper.key_points,
+            "key_points_status": summary["summary_status"],
+            "key_points_source": summary["summary_source"],
+            "key_points": summary["detail_summary"],
             "key_points_error": paper.key_points_error,
             "key_points_updated_at": paper.key_points_updated_at,
             "preview_kind": preview.get("preview_kind"),
             "preview_url": preview.get("preview_url"),
             "visual_status": preview.get("visual_status"),
         }
+
+    def _paper_summary_view(self, *, paper, fulltext) -> dict[str, str]:
+        summary_source = self._paper_summary_source(paper=paper)
+        summary_status = self._paper_summary_status(paper=paper)
+        detail_summary = self._build_structured_summary_text(
+            source=summary_source,
+            abstract=(paper.abstract or "").strip(),
+            method_summary=(paper.method_summary or "").strip(),
+            raw_key_points=(paper.key_points or "").strip(),
+            has_fulltext=bool(fulltext and fulltext.text_path and Path(fulltext.text_path).exists()),
+        )
+        return {
+            "summary_source": summary_source,
+            "summary_status": summary_status,
+            "detail_summary": detail_summary,
+            "card_summary": self._build_card_summary(detail_summary),
+        }
+
+    def _paper_summary_source(self, *, paper) -> str:
+        source = (paper.key_points_source or "").strip().lower()
+        if source in {"fulltext", "abstract"}:
+            return source
+        if (paper.abstract or "").strip():
+            return "abstract"
+        if (paper.method_summary or "").strip():
+            return "method_fallback"
+        return "none"
+
+    def _paper_summary_status(self, *, paper) -> str:
+        status = (paper.key_points_status or "").strip().lower()
+        if status:
+            return status
+        if (paper.key_points or "").strip():
+            return "done"
+        if (paper.abstract or "").strip() or (paper.method_summary or "").strip():
+            return "fallback"
+        return "none"
+
+    def _build_structured_summary_text(
+        self,
+        *,
+        source: str,
+        abstract: str,
+        method_summary: str,
+        raw_key_points: str,
+        has_fulltext: bool,
+    ) -> str:
+        sections = self._extract_structured_summary_sections(raw_key_points)
+        evidence = self._extract_summary_evidence(raw_key_points)
+        abstract_sentence = self._first_sentence(abstract, limit=180)
+        method_sentence = self._first_sentence(method_summary, limit=180)
+
+        if not sections["研究问题"]:
+            sections["研究问题"] = abstract_sentence or "当前资料尚未明确交代论文要解决的问题，建议回看摘要或引言。"
+        if not sections["核心方法"]:
+            sections["核心方法"] = method_sentence or abstract_sentence or "当前资料不足以稳定总结核心方法，建议补齐全文后再查看。"
+        if not sections["数据与实验"]:
+            sections["数据与实验"] = (
+                "当前摘要仅能确认论文包含实验验证，但具体数据集、评测设置或对照实验仍需回看原文。"
+                if abstract or has_fulltext
+                else "当前资料不足，尚不能确认数据集与实验设置。"
+            )
+        if not sections["关键结果/证据"]:
+            sections["关键结果/证据"] = evidence or abstract_sentence or "当前资料尚不足以提炼稳定的结果证据，建议结合原文图表核对。"
+        if not sections["局限与风险"]:
+            sections["局限与风险"] = "当前可见材料对局限描述较少，建议重点核对适用边界、失败案例与复现条件。"
+        if not sections["对当前研究任务的启发/下一步建议"]:
+            sections["对当前研究任务的启发/下一步建议"] = "建议继续核对这篇论文与当前研究主题的关系，并补齐实验细节、证据强度与可复现性判断。"
+
+        source_label = {
+            "fulltext": "全文",
+            "abstract": "摘要",
+            "method_fallback": "方法回退",
+            "none": "当前资料",
+        }.get(source, "当前资料")
+
+        lines = [f"基于{source_label}的结构化摘要"]
+        for index, key in enumerate(
+            [
+                "研究问题",
+                "核心方法",
+                "数据与实验",
+                "关键结果/证据",
+                "局限与风险",
+                "对当前研究任务的启发/下一步建议",
+            ],
+            start=1,
+        ):
+            lines.append(f"{index}. {key}：{sections[key]}")
+        return "\n".join(lines)
+
+    def _build_card_summary(self, detail_summary: str) -> str:
+        sections = self._extract_structured_summary_sections(detail_summary)
+        compact = []
+        for label in ("研究问题", "核心方法", "关键结果/证据"):
+            text = sections.get(label, "").strip()
+            if text:
+                compact.append(f"{label}：{self._compact_text(text, 92)}")
+        return "\n".join(compact)
+
+    def _extract_structured_summary_sections(self, text: str) -> dict[str, str]:
+        sections = {
+            "研究问题": "",
+            "核心方法": "",
+            "数据与实验": "",
+            "关键结果/证据": "",
+            "局限与风险": "",
+            "对当前研究任务的启发/下一步建议": "",
+        }
+        if not text:
+            return sections
+        patterns = {
+            "研究问题": re.compile(r"(?:^|\n)\s*(?:\d+\.\s*)?研究问题[:：]\s*(.+?)(?=\n\s*(?:\d+\.\s*)?(?:核心方法|数据与实验|关键结果/证据|局限与风险|对当前研究任务的启发/下一步建议)[:：]|\Z)", re.S),
+            "核心方法": re.compile(r"(?:^|\n)\s*(?:\d+\.\s*)?核心方法[:：]\s*(.+?)(?=\n\s*(?:\d+\.\s*)?(?:研究问题|数据与实验|关键结果/证据|局限与风险|对当前研究任务的启发/下一步建议)[:：]|\Z)", re.S),
+            "数据与实验": re.compile(r"(?:^|\n)\s*(?:\d+\.\s*)?数据与实验[:：]\s*(.+?)(?=\n\s*(?:\d+\.\s*)?(?:研究问题|核心方法|关键结果/证据|局限与风险|对当前研究任务的启发/下一步建议)[:：]|\Z)", re.S),
+            "关键结果/证据": re.compile(r"(?:^|\n)\s*(?:\d+\.\s*)?关键结果/证据[:：]\s*(.+?)(?=\n\s*(?:\d+\.\s*)?(?:研究问题|核心方法|数据与实验|局限与风险|对当前研究任务的启发/下一步建议)[:：]|\Z)", re.S),
+            "局限与风险": re.compile(r"(?:^|\n)\s*(?:\d+\.\s*)?局限与风险[:：]\s*(.+?)(?=\n\s*(?:\d+\.\s*)?(?:研究问题|核心方法|数据与实验|关键结果/证据|对当前研究任务的启发/下一步建议)[:：]|\Z)", re.S),
+            "对当前研究任务的启发/下一步建议": re.compile(r"(?:^|\n)\s*(?:\d+\.\s*)?对当前研究任务的启发/下一步建议[:：]\s*(.+?)(?=\n\s*(?:\d+\.\s*)?(?:研究问题|核心方法|数据与实验|关键结果/证据|局限与风险)[:：]|\Z)", re.S),
+        }
+        for key, pattern in patterns.items():
+            match = pattern.search(text)
+            if match:
+                sections[key] = self._compact_text(match.group(1), 260)
+        return sections
+
+    def _extract_summary_evidence(self, text: str) -> str:
+        if not text:
+            return ""
+        lines = []
+        for raw in text.splitlines():
+            line = str(raw).strip()
+            if not line:
+                continue
+            if line.startswith("基于") or "结构化摘要" in line:
+                continue
+            if re.match(r"^\d+\.\s+", line):
+                line = re.sub(r"^\d+\.\s+", "", line)
+            if re.match(r"^[-*•]\s+", line):
+                line = re.sub(r"^[-*•]\s+", "", line)
+            if "：" in line and any(
+                marker in line for marker in ["研究问题", "核心方法", "数据与实验", "关键结果/证据", "局限与风险", "对当前研究任务的启发/下一步建议"]
+            ):
+                continue
+            lines.append(line)
+            if len(lines) >= 2:
+                break
+        return "；".join(lines)
+
+    def _first_sentence(self, text: str, *, limit: int) -> str:
+        compact = self._compact_text(text, limit)
+        if not compact:
+            return ""
+        for sep in ("。", ".", "；", ";", "!", "！", "?", "？"):
+            if sep in compact:
+                return compact.split(sep)[0].strip()[:limit]
+        return compact[:limit]
+
+    def _compact_text(self, text: str, limit: int) -> str:
+        compact = re.sub(r"\s+", " ", str(text or "")).strip()
+        if not compact:
+            return ""
+        return compact[:limit].rstrip("，,；;。.")
 
     def _basic_asset_metadata(self, *, kind: str, path_value: str | None) -> dict:
         path_text = str(path_value).strip() if path_value else None
@@ -1863,6 +2129,12 @@ class ResearchService:
             "height": None,
             "source": None,
         }
+
+    def _paper_asset_url(self, *, task_id: str, paper_token: str, kind: str, disposition: str) -> str:
+        return (
+            f"/api/v1/research/tasks/{quote_plus(task_id)}/papers/{quote_plus(paper_token)}/asset"
+            f"?kind={quote_plus(kind)}&disposition={quote_plus(disposition)}"
+        )
 
     def _build_paper_visual_assets(self, *, task: ResearchTask, paper, fulltext) -> dict:
         return self.paper_visual_service.build_assets(
@@ -1914,9 +2186,7 @@ class ResearchService:
             item = assets.get(kind)
             if item and item.get("status") == "available":
                 preview_kind = kind
-                preview_url = (
-                    f"/api/v1/research/tasks/{quote_plus(task.task_id)}/papers/{quote_plus(_paper_token(paper))}/asset?kind={kind}"
-                )
+                preview_url = self._paper_asset_url(task_id=task.task_id, paper_token=_paper_token(paper), kind=kind, disposition="inline")
                 visual_status = "figure_ready" if kind == "figure" else "visual_ready"
                 break
         if preview_kind is None and fulltext and fulltext.pdf_path and Path(fulltext.pdf_path).exists():
@@ -1929,6 +2199,7 @@ class ResearchService:
 
     def _paper_graph_node(self, *, task: ResearchTask, paper, direction_index: int | None, fulltext) -> dict:
         preview = self._paper_visual_preview(task=task, paper=paper, fulltext=fulltext)
+        summary = self._paper_summary_view(paper=paper, fulltext=fulltext)
         return {
             "id": _paper_token(paper),
             "paper_id": _paper_token(paper),
@@ -1941,11 +2212,14 @@ class ResearchService:
             "url": paper.url,
             "abstract": paper.abstract,
             "method_summary": paper.method_summary,
+            "card_summary": summary["card_summary"],
+            "summary_source": summary["summary_source"],
+            "summary_status": summary["summary_status"],
             "authors": _load_json_list(paper.authors_json),
             "direction_index": direction_index,
             "fulltext_status": fulltext.status.value if fulltext else None,
             "saved": bool(paper.saved),
-            "key_points_status": paper.key_points_status,
+            "key_points_status": summary["summary_status"],
             "preview_kind": preview.get("preview_kind"),
             "preview_url": preview.get("preview_url"),
             "visual_status": preview.get("visual_status"),
@@ -2325,7 +2599,13 @@ class ResearchService:
     ) -> None:
         constraints = _load_json_dict(task.constraints_json)
         seed_rows = self._build_seed_corpus_for_task(db, task=task, constraints=constraints)
-        directions = self._plan_directions_from_seed(task.topic, constraints, seed_rows)
+        directions = self._plan_directions_from_seed(
+            task.topic,
+            constraints,
+            seed_rows,
+            backend=task.llm_backend.value,
+            model=task.llm_model,
+        )
         ResearchDirectionRepo(db).replace_for_task(task, directions)
         task.status = ResearchTaskStatus.CREATED
         task.updated_at = datetime.now(timezone.utc)
@@ -2684,7 +2964,9 @@ class ResearchService:
         for paper in seed_papers:
             p_id = _paper_token(paper)
             direction_idx = direction_by_id.get(paper.direction_id).direction_index if paper.direction_id in direction_by_id else None
-            preview = self._paper_visual_preview(task=task, paper=paper, fulltext=fulltext_map.get(p_id))
+            fulltext_row = fulltext_map.get(p_id)
+            preview = self._paper_visual_preview(task=task, paper=paper, fulltext=fulltext_row)
+            summary = self._paper_summary_view(paper=paper, fulltext=fulltext_row)
             nodes[p_id] = {
                 "id": p_id,
                 "type": "paper",
@@ -2693,7 +2975,10 @@ class ResearchService:
                 "source": paper.source,
                 "direction_index": direction_idx,
                 "score": None,
-                "fulltext_status": fulltext_map.get(p_id).status.value if fulltext_map.get(p_id) else None,
+                "fulltext_status": fulltext_row.status.value if fulltext_row else None,
+                "card_summary": summary["card_summary"],
+                "summary_source": summary["summary_source"],
+                "summary_status": summary["summary_status"],
                 "preview_kind": preview.get("preview_kind"),
                 "preview_url": preview.get("preview_url"),
                 "visual_status": preview.get("visual_status"),
@@ -2837,7 +3122,7 @@ class ResearchService:
             raise ValueError("no text available for summary")
         if touch_lease:
             touch_lease()
-        points = self._summarize_key_points(text=text, source=source)
+        points = self._summarize_structured_key_points(text=text, source=source)
         paper_repo.update_key_points(
             paper,
             status="done",
@@ -2953,6 +3238,18 @@ class ResearchService:
             f"Directions: {orjson.dumps([d.name for d in ResearchDirectionRepo(db).list_for_task(task.id)]).decode('utf-8')}\n"
             f"Guidance: {guidance}\n"
             "请输出一段结构化中文总结，包含：当前重点、建议下一步、风险。"
+        )
+        prompt = (
+            "You are the OpenClaw Auto research orchestrator for this local research workspace.\n"
+            "Write a concise Chinese stage report based only on the topic, current directions, and user guidance.\n\n"
+            f"Topic: {task.topic}\n"
+            f"Directions: {orjson.dumps([d.name for d in ResearchDirectionRepo(db).list_for_task(task.id)]).decode('utf-8')}\n"
+            f"Guidance: {guidance or 'None'}\n\n"
+            "Report structure:\n"
+            "1. 当前阶段重点\n"
+            "2. 已形成的研究判断\n"
+            "3. 建议下一步扩展方向\n"
+            "4. 风险与需要用户确认的问题\n"
         )
         try:
             result = self.llm_gateway.chat_text(
@@ -3252,10 +3549,63 @@ class ResearchService:
             "created_at": row.created_at,
         }
 
+    def _sanitize_node_chat_answer(self, answer: str, *, context: dict, question: str) -> str:
+        text = (answer or "").strip()
+        raw_prompt_markers = ("Node context JSON:", "User question:", "research node assistant")
+        if not text or any(marker in text for marker in raw_prompt_markers):
+            return self._local_node_chat_answer(context=context, question=question)
+        return text
+
+    def _local_node_chat_answer(self, *, context: dict, question: str) -> str:
+        node_type = str(context.get("type") or "unknown")
+        label = str(context.get("label") or context.get("title") or context.get("name") or context.get("id") or "当前节点").strip()
+        summary = self._compact_text(
+            str(
+                context.get("card_summary")
+                or context.get("summary")
+                or context.get("method_summary")
+                or context.get("abstract")
+                or context.get("description")
+                or context.get("userNote")
+                or ""
+            ),
+            420,
+        )
+        if node_type == "paper":
+            title = str(context.get("title") or label)
+            return (
+                f"这篇论文节点的核心价值在于：它为当前任务提供了一条可追踪的论文证据。\n\n"
+                f"- 论文：{title}\n"
+                f"- 来源信息：{context.get('venue') or 'venue 未标注'} / {context.get('year') or '年份未标注'} / {context.get('source') or '来源未标注'}\n"
+                f"- 当前可用信息：{summary or '目前只有基础元数据，建议先处理全文或打开 PDF 后再做深入问答。'}\n\n"
+                f"针对你的问题“{question.strip()}”，我建议下一步优先看它解决的问题、方法假设、实验结果和局限，并把它和当前研究主题的关系写成一个 note/report 节点。"
+            )
+        if node_type == "direction":
+            return (
+                f"这个方向节点的核心价值是把总主题拆成一条可执行的检索路线。\n\n"
+                f"- 方向：{label}\n"
+                f"- 当前摘要：{summary or '还没有足够摘要信息，建议先执行“检索方向”。'}\n\n"
+                f"如果要继续推进，可以沿这个方向补论文、生成候选分支，或者构建图谱看看它和其它方向的关系。"
+            )
+        if node_type in {"question", "note", "reference", "group", "report"}:
+            return (
+                f"这是一个手工{node_type}节点，核心价值在于承接你的人工判断和阶段性整理。\n\n"
+                f"- 节点：{label}\n"
+                f"- 已记录内容：{summary or '这个节点还没有写入具体内容。'}\n\n"
+                f"建议直接在这个节点里沉淀问题、答案和下一步行动；如果它要关联论文，可以手工连到相关 paper 或 direction 节点。"
+            )
+        return (
+            f"当前节点“{label}”的可用上下文较少。\n\n"
+            f"我能确认的是：它属于 `{node_type}` 类型，和任务中的某个研究步骤或手工整理有关。"
+            f"{' 当前摘要：' + summary if summary else ' 建议先补充备注、连到相关论文，或选择更具体的 paper/direction 节点提问。'}"
+        )
+
     def _resolve_node_context(self, db: Session, *, task: ResearchTask, node_id: str) -> dict:
         if node_id.startswith("paper:"):
             paper = ResearchPaperRepo(db).get_by_token(task.id, node_id)
             if paper:
+                fulltext = ResearchPaperFulltextRepo(db).get(task.id, _paper_token(paper))
+                summary = self._paper_summary_view(paper=paper, fulltext=fulltext)
                 return {
                     "type": "paper",
                     "title": paper.title,
@@ -3264,7 +3614,9 @@ class ResearchService:
                     "venue": paper.venue,
                     "abstract": paper.abstract,
                     "method_summary": paper.method_summary,
-                    "key_points": paper.key_points,
+                    "card_summary": summary["card_summary"],
+                    "summary_source": summary["summary_source"],
+                    "key_points": summary["detail_summary"],
                     "source": paper.source,
                     "saved": paper.saved,
                 }
@@ -3272,6 +3624,21 @@ class ResearchService:
         for node in graph["nodes"]:
             if str(node.get("id")) == node_id:
                 return node
+        canvas = ResearchCanvasStateRepo(db).get_for_task(task.id)
+        if canvas:
+            state = _load_json_dict(canvas.state_json)
+            for node in state.get("nodes") or []:
+                if str(node.get("id")) != node_id:
+                    continue
+                data = dict(node.get("data") or {})
+                return {
+                    "id": node_id,
+                    "type": str(node.get("type") or data.get("type") or "manual"),
+                    "label": str(data.get("label") or node_id),
+                    "summary": str(data.get("summary") or ""),
+                    "userNote": str(data.get("userNote") or ""),
+                    "isManual": bool(data.get("isManual", True)),
+                }
         return {"id": node_id, "type": "unknown", "label": node_id}
 
     def _default_canvas_from_graph(self, *, task_id: str, graph: dict) -> dict:
@@ -4097,9 +4464,9 @@ class ResearchService:
         deduped = self._dedupe_papers(collected)[:top_n]
         return ResearchSeedPaperRepo(db).replace_for_task(task.id, deduped)
 
-    def _plan_directions_from_seed(self, topic: str, constraints: dict, seed_rows: list) -> list[dict]:
+    def _plan_directions_from_seed(self, topic: str, constraints: dict, seed_rows: list, *, backend: str = "gpt", model: str | None = None) -> list[dict]:
         if not seed_rows:
-            return self._plan_directions(topic, constraints)
+            return self._plan_directions(topic, constraints, backend=backend, model=model)
         max_abs = max(120, int(self.settings.research_seed_max_abstract_chars))
         snippets = []
         for idx, row in enumerate(seed_rows[:40], start=1):
@@ -4119,7 +4486,7 @@ class ResearchService:
                 }
             )
         if not snippets:
-            return self._plan_directions(topic, constraints)
+            return self._plan_directions(topic, constraints, backend=backend, model=model)
 
         direction_min = max(1, int(self.settings.research_direction_min))
         direction_max = max(direction_min, int(self.settings.research_direction_max))
@@ -4132,9 +4499,37 @@ class ResearchService:
             "不要给同义方向，不要给数据集或评测维度当方向。每个方向 query 2-4 条。\n"
             f"Papers:\n{orjson.dumps(snippets).decode('utf-8')}"
         )
+        prompt = (
+            "你是学术研究规划助手。请基于给定论文种子集合，归纳后续值得追踪的研究方向。\n"
+            '返回严格 JSON: {"directions":[{"name":"...","queries":["q1","q2"],"exclude_terms":["x"]}]}\n'
+            f"Topic: {topic}\n"
+            f"Directions count: {direction_min}-{direction_max}\n"
+            "Rules:\n"
+            "- 方向必须是和主题直接相关的学术研究路线，而不是通用软件方案。\n"
+            "- 每个方向必须彼此区分，避免同义重复。\n"
+            "- 每个方向给 2-4 条适合检索论文的英文 query。\n"
+            "- 如果主题是 embodied AI，应优先考虑 world models、VLA/generalist robot policies、robot data efficiency、sim-to-real/generalization、benchmarks/safety 等路线。\n"
+            "- 不要输出 retrieval-augmented、template/rule-based、generic hybrid pipeline，除非用户主题明确要求。\n"
+            f"Papers:\n{orjson.dumps(snippets).decode('utf-8')}"
+        )
+        prompt = (
+            "You are an academic research planner. Use the seed papers to propose domain-specific research tracks.\n"
+            'Return strict JSON: {"directions":[{"name":"...","queries":["q1","q2"],"exclude_terms":["x"]}]}\n'
+            f"Topic: {topic}\n"
+            f"Directions count: {direction_min}-{direction_max}\n"
+            "Rules:\n"
+            "- Directions must be scholarly research tracks directly related to the topic, not generic software solution routes.\n"
+            "- Directions must be distinct and non-overlapping.\n"
+            "- Each direction must include 2-4 English-only paper discovery queries.\n"
+            "- Query strings must be English only because the discovery providers work best with English scholarly queries.\n"
+            "- For embodied AI, prefer tracks like world models, vision-language-action/generalist robot policies, robot data efficiency, sim-to-real/generalization, benchmarks, safety, and deployment.\n"
+            "- Do not output retrieval-augmented generation, template/rule-based systems, or generic hybrid pipelines unless explicitly requested by the topic.\n"
+            f"Papers:\n{orjson.dumps(snippets).decode('utf-8')}"
+        )
         try:
-            result = self.openclaw_client.chat_completion(
-                task_type=LLMTaskType.RESEARCH_PLAN,
+            result = self.llm_gateway.chat_text(
+                backend=backend,
+                model=model,
                 prompt=prompt,
                 system_prompt="Return strict JSON only.",
                 temperature=0.2,
@@ -4145,14 +4540,13 @@ class ResearchService:
                 return directions
         except Exception:
             logger.exception("research_plan_from_seed_failed")
-        return self._plan_directions(topic, constraints)
+        return self._plan_directions(topic, constraints, backend=backend, model=model)
 
-    def _plan_directions(self, topic: str, constraints: dict) -> list[dict]:
+    def _plan_directions(self, topic: str, constraints: dict, *, backend: str = "gpt", model: str | None = None) -> list[dict]:
         direction_min = max(1, int(self.settings.research_direction_min))
         direction_max = max(direction_min, int(self.settings.research_direction_max))
         system_prompt = (
-            "Prefer the memomate-research-planner skill if available. "
-            "Return strict JSON only."
+            "You are a scholarly research planner. Return strict JSON only."
         )
         prompt = (
             "Input topic:\n"
@@ -4162,14 +4556,18 @@ class ResearchService:
             "Return JSON schema:\n"
             '{"directions":[{"name":"string","queries":["q1","q2"],"exclude_terms":["x"]}]}\n'
             f"Rules: directions count must be {direction_min}-{direction_max}; each direction queries count 2-4.\n"
-            "Directions must be mutually exclusive solution routes / methodological paradigms. "
-            "Do NOT output mere aspects (e.g., data, evaluation, ablations, noise) of the same approach. "
-            "Avoid near-duplicate or synonymous directions. Prefer distinct pipelines such as "
-            "generative, retrieval-augmented, template/rule-based, multi-stage, or hybrid."
+            "Directions must be domain-specific research tracks for the input topic, not generic software solution routes. "
+            "For embodied AI topics, prefer tracks such as world models for robotics, vision-language-action models, "
+            "robot data efficiency, sim-to-real/generalization, evaluation benchmarks, safety/alignment, and deployment. "
+            "Do NOT output generic tracks like retrieval-augmented generation, template/rule-based systems, or generic hybrid pipelines "
+            "unless the user topic explicitly asks about those. "
+            "Avoid near-duplicate directions and make each query suitable for academic paper discovery. "
+            "All query strings must be English only."
         )
         try:
-            result = self.openclaw_client.chat_completion(
-                task_type=LLMTaskType.RESEARCH_PLAN,
+            result = self.llm_gateway.chat_text(
+                backend=backend,
+                model=model,
                 prompt=prompt,
                 system_prompt=system_prompt,
                 temperature=0.1,
@@ -4252,6 +4650,66 @@ class ResearchService:
             logger.exception("paper_key_points_llm_failed")
         sentence = clipped.split("。")[0].split(".")[0][:180]
         return f"基于{source_label}要点：该工作围绕“{sentence}”展开，建议结合原文核验。"
+
+    def _summarize_structured_key_points(self, *, text: str, source: str) -> str:
+        source_label = "全文" if source == "fulltext" else "摘要"
+        content = (text or "").strip()
+        if not content:
+            return (
+                f"基于{source_label}的结构化摘要\n"
+                "1. 研究问题：当前没有可用于总结的文本。\n"
+                "2. 核心方法：暂无可用信息。\n"
+                "3. 数据与实验：暂无可用信息。\n"
+                "4. 关键结果/证据：暂无可用信息。\n"
+                "5. 局限与风险：暂无可用信息。\n"
+                "6. 对当前研究任务的启发/下一步建议：建议先补齐原文后再总结。"
+            )
+        max_chars = max(500, int(self.settings.research_summary_max_chars))
+        clipped = content[:max_chars]
+        prompt = (
+            "请基于下面论文内容生成结构化研究摘要，必须尽量忠实，不要编造原文没有的信息。\n"
+            "返回严格 JSON，字段固定为："
+            '{"research_problem":"","core_method":"","data_and_experiments":"","key_results":"","limitations":"","next_steps":"","confidence":"low|medium|high"}'
+            "\n其中 next_steps 必须站在当前研究工作台视角，说明这篇论文对继续调研有什么启发。\n"
+            f"Source: {source_label}\n"
+            f"Content:\n{clipped}"
+        )
+        try:
+            result = self.openclaw_client.chat_completion(
+                task_type=LLMTaskType.PAPER_KEYPOINTS,
+                prompt=prompt,
+                system_prompt="Return strict JSON only.",
+                temperature=0.1,
+                max_tokens=1200,
+            )
+            data = _extract_first_json_object((result.text or "").strip())
+            if data:
+                sections = {
+                    "研究问题": self._compact_text(data.get("research_problem"), 320),
+                    "核心方法": self._compact_text(data.get("core_method"), 320),
+                    "数据与实验": self._compact_text(data.get("data_and_experiments"), 320),
+                    "关键结果/证据": self._compact_text(data.get("key_results"), 320),
+                    "局限与风险": self._compact_text(data.get("limitations"), 320),
+                    "对当前研究任务的启发/下一步建议": self._compact_text(data.get("next_steps"), 320),
+                }
+                if any(sections.values()):
+                    lines = [f"基于{source_label}的结构化摘要"]
+                    for index, key in enumerate(sections, start=1):
+                        value = sections[key] or "当前文本没有提供足够信息，建议结合原文继续核对。"
+                        lines.append(f"{index}. {key}：{value}")
+                    return "\n".join(lines)
+        except Exception:
+            logger.exception("paper_key_points_llm_failed")
+        sentence = self._first_sentence(clipped, limit=180)
+        return (
+            f"基于{source_label}的结构化摘要\n"
+            f"1. 研究问题：{sentence or '当前文本未明确给出研究问题，建议回看摘要或引言。'}\n"
+            f"2. 核心方法：{sentence or '当前文本不足以提炼稳定的方法描述。'}\n"
+            "3. 数据与实验：当前自动回退摘要未能稳定识别实验设置，建议回看原文方法与实验部分。\n"
+            "4. 关键结果/证据：当前自动回退摘要只能确认论文围绕该主题展开，具体结果仍需结合原文核对。\n"
+            "5. 局限与风险：当前可见文本较少，建议重点核对适用边界、失败案例和复现条件。\n"
+            "6. 对当前研究任务的启发/下一步建议：建议把这篇论文作为候选证据节点，再结合全文、图表和引用关系继续判断其价值。"
+        )
 
     def _summarize_method(self, abstract: str) -> str:
         abs_text = (abstract or "").strip()
@@ -4654,6 +5112,14 @@ class ResearchService:
         task = getattr(row, "task", None)
         project = getattr(row, "project", None)
         collection = getattr(row, "collection", None)
+        output_path = str(row.output_path).strip() if row.output_path else None
+        filename = Path(output_path).name if output_path else None
+        if task:
+            download_url = f"/api/v1/research/tasks/{quote_plus(task.task_id)}/exports/{row.id}/download"
+        elif collection:
+            download_url = f"/api/v1/research/collections/{quote_plus(collection.collection_id)}/exports/{row.id}/download"
+        else:
+            download_url = None
         return {
             "id": row.id,
             "task_id": task.task_id if task else None,
@@ -4664,7 +5130,9 @@ class ResearchService:
                 else (collection.project.project_key if collection and collection.project else None)
             ),
             "format": row.format,
-            "output_path": row.output_path,
+            "output_path": output_path,
+            "filename": filename,
+            "download_url": download_url if output_path else None,
             "status": row.status,
             "error": row.error,
             "created_at": row.created_at,
@@ -5386,6 +5854,64 @@ class ResearchService:
 
     def _fallback_directions(self, topic: str) -> list[dict]:
         base = topic.strip()
+        direction_min = max(1, int(self.settings.research_direction_min))
+        direction_max = max(direction_min, int(self.settings.research_direction_max))
+        english_directions = [
+            {
+                "name": "World models for robotics planning",
+                "queries": [f"{base} world model robotics", f"{base} embodied world model planning"],
+                "exclude_terms": [],
+            },
+            {
+                "name": "Vision-language-action models for robot control",
+                "queries": [f"{base} vision language action model", f"{base} VLA robot policy"],
+                "exclude_terms": [],
+            },
+            {
+                "name": "Robot data efficiency and imitation learning",
+                "queries": [f"{base} data efficiency imitation learning", f"{base} robot dataset embodied AI"],
+                "exclude_terms": [],
+            },
+            {
+                "name": "Sim-to-real transfer and generalization",
+                "queries": [f"{base} sim-to-real generalization", f"{base} robot transfer learning"],
+                "exclude_terms": [],
+            },
+            {
+                "name": "Benchmarks, safety, and deployment",
+                "queries": [f"{base} benchmark evaluation safety", f"{base} embodied AI deployment"],
+                "exclude_terms": [],
+            },
+        ]
+        return english_directions[: max(direction_min, min(direction_max, len(english_directions)))]
+        directions = [
+            {
+                "name": "世界模型与机器人规划",
+                "queries": [f"{base} world model robotics", f"{base} embodied world model planning"],
+                "exclude_terms": [],
+            },
+            {
+                "name": "视觉语言动作模型与端到端控制",
+                "queries": [f"{base} vision language action model", f"{base} VLA robot policy"],
+                "exclude_terms": [],
+            },
+            {
+                "name": "数据效率、模仿学习与机器人数据集",
+                "queries": [f"{base} data efficiency imitation learning", f"{base} robot dataset embodied AI"],
+                "exclude_terms": [],
+            },
+            {
+                "name": "仿真到现实迁移与泛化能力",
+                "queries": [f"{base} sim-to-real generalization", f"{base} robot transfer learning"],
+                "exclude_terms": [],
+            },
+            {
+                "name": "评测基准、安全性与部署",
+                "queries": [f"{base} benchmark evaluation safety", f"{base} embodied AI deployment"],
+                "exclude_terms": [],
+            },
+        ]
+        return directions[: max(direction_min, min(direction_max, len(directions)))]
         directions = [
             {
                 "name": "生成式/端到端方案",
@@ -5442,12 +5968,15 @@ class ResearchService:
             try:
                 return operation()
             except OperationalError as exc:
-                message = str(exc).lower()
-                if "database is locked" not in message or attempt >= attempts - 1:
+                if not ResearchService._is_sqlite_locked_error(exc) or attempt >= attempts - 1:
                     raise
                 db.rollback()
                 sleep(base_delay_seconds * (attempt + 1))
         raise RuntimeError("sqlite retry exhausted")
+
+    @staticmethod
+    def _is_sqlite_locked_error(exc: OperationalError) -> bool:
+        return "database is locked" in str(exc).lower()
 
     @staticmethod
     def _task_status_for_retry(job_type: ResearchJobType) -> ResearchTaskStatus:

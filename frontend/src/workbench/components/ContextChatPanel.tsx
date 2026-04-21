@@ -1,27 +1,69 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import type { ChatItem } from "../types";
 import { formatDateTime } from "../utils";
 import { SectionTitle, SmallButton } from "./shared";
 
 type Props = {
   disabled: boolean;
+  nodeId?: string;
+  nodeLabel?: string | null;
+  nodeType?: string | null;
   history: ChatItem[];
   onSend: (question: string, threadId?: string) => void;
   onSaveAnswer: (kind: "note" | "question" | "reference" | "report", item: ChatItem) => void;
 };
 
+const DEFAULT_QUESTIONS = ["请总结这个节点的核心价值。", "这个节点下一步应该补什么证据？", "它和当前研究主题有什么关系？"];
+
+function quickQuestionsForNodeType(nodeType?: string | null) {
+  if (nodeType === "paper") {
+    return [
+      "这篇论文解决什么问题？",
+      "核心方法是什么？",
+      "关键证据和实验结论是什么？",
+      "有哪些局限和风险？",
+      "它和当前任务的关系是什么？",
+    ];
+  }
+  if (nodeType === "direction") {
+    return ["这个方向的核心价值是什么？", "下一步最值得补哪些论文？", "这个方向和当前主题的关系是什么？"];
+  }
+  if (nodeType === "round") {
+    return ["这一轮探索的目标是什么？", "当前候选方向各自的利弊是什么？", "下一轮应该如何收敛？"];
+  }
+  if (nodeType === "checkpoint") {
+    return ["这个 checkpoint 已经确认了什么？", "系统建议的下一步是什么？", "我应该如何给出 guidance？"];
+  }
+  if (nodeType === "report") {
+    return ["这份阶段报告最重要的结论是什么？", "还有哪些空白没有补齐？", "下一步最值得继续扩展什么？"];
+  }
+  if (nodeType === "question") {
+    return ["请回答这个问题节点。", "这个问题应该连接到哪些论文或方向？", "这个问题的下一步验证方式是什么？"];
+  }
+  return DEFAULT_QUESTIONS;
+}
+
 export function ContextChatPanel(props: Props) {
   const [question, setQuestion] = useState("");
   const [forceNewThread, setForceNewThread] = useState(false);
   const threadId = forceNewThread ? undefined : props.history[0]?.thread_id;
-  const quickQuestions = useMemo(() => ["这个节点为什么重要？", "请总结这个节点", "下一步还需要补什么证据？"], []);
+  const quickQuestions = useMemo(() => quickQuestionsForNodeType(props.nodeType), [props.nodeType]);
+
+  useEffect(() => {
+    setQuestion("");
+    setForceNewThread(false);
+  }, [props.nodeId]);
 
   return (
     <div className="mt-4 rounded-3xl border border-slate-200 bg-white p-4 shadow-sm">
       <SectionTitle
         eyebrow="Context Chat"
-        title="上下文问答"
-        description="这里只围绕当前节点的上下文提问，不接管整条研究流程。回答可以直接保存成笔记、问题、参考或报告节点。"
+        title="节点问答"
+        description={
+          props.disabled
+            ? "选中一个节点后，这里会围绕该节点上下文提问。"
+            : `当前围绕「${props.nodeLabel || "所选节点"}」提问，回答会同步写回 question 节点卡片。`
+        }
       />
 
       <div className="mt-3 flex flex-wrap gap-2">
@@ -40,7 +82,7 @@ export function ContextChatPanel(props: Props) {
           disabled={props.disabled}
           onClick={() => setForceNewThread(true)}
         >
-          新建线程
+          新建 thread
         </button>
       </div>
 
@@ -62,7 +104,7 @@ export function ContextChatPanel(props: Props) {
             </div>
           </div>
         ))}
-        {!props.history.length ? <div className="rounded-2xl bg-slate-50 p-3 text-sm text-slate-500">选中一个节点后，就可以围绕它继续追问。</div> : null}
+        {!props.history.length ? <div className="rounded-2xl bg-slate-50 p-3 text-sm text-slate-500">这里会显示当前节点的问答历史。</div> : null}
       </div>
 
       <div className="mt-3 flex gap-2">
@@ -70,7 +112,7 @@ export function ContextChatPanel(props: Props) {
           className="flex-1 rounded-2xl border border-slate-200 bg-white px-3 py-2 text-sm outline-none"
           value={question}
           onChange={(event) => setQuestion(event.target.value)}
-          placeholder="围绕当前节点提出一个问题..."
+          placeholder="围绕当前节点输入一个更具体的问题..."
           disabled={props.disabled}
         />
         <SmallButton

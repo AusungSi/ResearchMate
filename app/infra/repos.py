@@ -596,6 +596,15 @@ class ResearchExportRecordRepo:
         )
         return list(self.db.execute(stmt).scalars().all())
 
+    def get_for_task(self, task_id: int, record_id: int) -> ResearchExportRecord | None:
+        stmt = select(ResearchExportRecord).where(
+            and_(
+                ResearchExportRecord.task_id == task_id,
+                ResearchExportRecord.id == record_id,
+            )
+        )
+        return self.db.execute(stmt).scalar_one_or_none()
+
 
 class ResearchCollectionExportRecordRepo:
     def __init__(self, db: Session):
@@ -630,6 +639,15 @@ class ResearchCollectionExportRecordRepo:
             .limit(max(1, min(200, int(limit))))
         )
         return list(self.db.execute(stmt).scalars().all())
+
+    def get_for_collection(self, collection_id: int, record_id: int) -> ResearchCollectionExportRecord | None:
+        stmt = select(ResearchCollectionExportRecord).where(
+            and_(
+                ResearchCollectionExportRecord.collection_id == collection_id,
+                ResearchCollectionExportRecord.id == record_id,
+            )
+        )
+        return self.db.execute(stmt).scalar_one_or_none()
 
 
 class ResearchCompareReportRepo:

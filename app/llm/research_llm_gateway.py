@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from time import perf_counter
+import json
+import re
 
 import httpx
 
@@ -156,7 +158,60 @@ class ResearchLLMGateway:
 
     @staticmethod
     def _fallback_response(prompt: str) -> str:
-        clipped = " ".join((prompt or "").split())[:360]
+        node_answer = ResearchLLMGateway._fallback_node_answer(prompt)
+        if node_answer:
+            return node_answer
+        clipped = " ".join((prompt or "").split())[:260]
         if not clipped:
-            return "当前上下文为空，建议先选择一个节点或补充问题。"
-        return f"基于当前节点上下文的保守回答：{clipped}"
+            return "当前上下文为空，建议先选择一个节点或补充更具体的问题。"
+        return f"当前模型服务暂时不可用，我先基于已有上下文给出保守回答：{clipped}"
+
+    @staticmethod
+    def _fallback_node_answer(prompt: str) -> str:
+        if "Node context JSON:" not in (prompt or ""):
+            return ""
+        context_text = _extract_between(prompt, "Node context JSON:", "\nExisting chat:")
+        question = _extract_between(prompt, "User question:", "\nTags:").strip() or "这个节点的核心价值是什么？"
+        try:
+            context = json.loads(context_text)
+        except Exception:
+            context = {}
+        node_type = str(context.get("type") or "unknown")
+        label = str(context.get("label") or context.get("title") or context.get("name") or context.get("id") or "当前节点")
+        summary = str(
+            context.get("card_summary")
+            or context.get("summary")
+            or context.get("method_summary")
+            or context.get("abstract")
+            or context.get("userNote")
+            or ""
+        )
+        summary = " ".join(summary.split())[:360]
+        if node_type == "paper":
+            return (
+                "这篇论文节点的核心价值在于为当前研究提供论文证据。\n\n"
+                f"- 论文：{label}\n"
+                f"- 可用信息：{summary or '目前只有基础元数据，建议先处理全文或打开 PDF 后再深入分析。'}\n"
+                f"- 针对你的问题：{question}\n\n"
+                "建议继续检查它的研究问题、核心方法、实验结论和局限，并和当前任务主题建立明确连接。"
+            )
+        if node_type in {"question", "note", "reference", "group", "report"}:
+            return (
+                f"这是一个手工{node_type}节点，适合沉淀你的问题、判断和阶段性结论。\n\n"
+                f"- 节点：{label}\n"
+                f"- 已记录内容：{summary or '暂无具体内容。'}\n"
+                f"- 针对你的问题：{question}\n\n"
+                "建议把答案继续写回这个节点，或把它连接到相关 paper/direction 节点，形成可展示的研究路径。"
+            )
+        return (
+            f"这个节点“{label}”的核心价值取决于它在当前图谱中的连接关系。\n\n"
+            f"- 节点类型：{node_type}\n"
+            f"- 可用信息：{summary or '当前上下文较少。'}\n"
+            f"- 针对你的问题：{question}\n\n"
+            "建议选择更具体的 paper/direction 节点，或先给这个节点补充备注后再提问。"
+        )
+
+
+def _extract_between(text: str, start: str, end: str) -> str:
+    match = re.search(re.escape(start) + r"(.*?)" + re.escape(end), text or "", flags=re.S)
+    return match.group(1).strip() if match else ""

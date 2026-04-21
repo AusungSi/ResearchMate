@@ -3,7 +3,7 @@ import { describe, expect, it, vi } from "vitest";
 import { ProjectSidebar } from "./ProjectSidebar";
 
 describe("ProjectSidebar", () => {
-  it("renders local zotero entry and export options", () => {
+  it("renders the local Zotero entry and creation actions", () => {
     const onCreateProject = vi.fn();
     const onCreateCollection = vi.fn();
     const onImportZoteroFile = vi.fn();
@@ -34,7 +34,7 @@ describe("ProjectSidebar", () => {
         dashboard={{
           project: {
             project_id: "project-default",
-            name: "默认项目",
+            name: "Default Project",
             description: "",
             is_default: true,
             task_count: 1,
@@ -52,7 +52,6 @@ describe("ProjectSidebar", () => {
           recent_exports: [],
           recent_collections: [],
         }}
-        currentExports={[]}
         zoteroConfig={{
           enabled: true,
           mode: "local_default",
@@ -65,7 +64,7 @@ describe("ProjectSidebar", () => {
         projects={[
           {
             project_id: "project-default",
-            name: "默认项目",
+            name: "Default Project",
             description: "",
             is_default: true,
             task_count: 1,
@@ -78,8 +77,8 @@ describe("ProjectSidebar", () => {
           {
             task_id: "R-1",
             project_id: "project-default",
-            project_name: "默认项目",
-            topic: "具身智能调研",
+            project_name: "Default Project",
+            topic: "Embodied AI",
             status: "done",
             mode: "gpt_step",
             llm_backend: "gpt",
@@ -94,7 +93,7 @@ describe("ProjectSidebar", () => {
           {
             collection_id: "collection-1",
             project_id: "project-default",
-            name: "核心论文集合",
+            name: "Core Papers",
             description: "",
             source_type: "manual",
             source_ref: null,
@@ -112,7 +111,6 @@ describe("ProjectSidebar", () => {
         activeTaskId="R-1"
         activeCollectionId="collection-1"
         activeTask={null}
-        actionStatus={null}
         onSelectProject={vi.fn()}
         onSelectTask={vi.fn()}
         onSelectCollection={vi.fn()}
@@ -121,24 +119,22 @@ describe("ProjectSidebar", () => {
         onCreateTask={vi.fn()}
         onQuickAction={vi.fn()}
         onImportZoteroFile={onImportZoteroFile}
-        onExport={vi.fn()}
       />,
     );
 
-    expect(screen.getByText("研究工作台")).toBeInTheDocument();
-    expect(screen.getByText("导入 Zotero 文件")).toBeInTheDocument();
-    expect(screen.getByText("本地导入导出可用")).toBeInTheDocument();
-    expect(screen.getByText("导出 CSL JSON")).toBeInTheDocument();
+    expect(screen.getByText("Research Workbench")).toBeInTheDocument();
+    expect(screen.getByTestId("import-zotero-button")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /BibTeX/i })).not.toBeInTheDocument();
 
-    fireEvent.click(screen.getByText("导入 Zotero 文件"));
+    fireEvent.click(screen.getByTestId("import-zotero-button"));
     expect(onImportZoteroFile).toHaveBeenCalled();
 
-    fireEvent.change(screen.getByPlaceholderText("输入新的项目名"), { target: { value: "新项目" } });
-    fireEvent.click(screen.getAllByText("创建")[0]);
+    fireEvent.change(screen.getByPlaceholderText("输入新的项目名"), { target: { value: "Project A" } });
+    fireEvent.click(screen.getByTestId("create-project-button"));
     expect(onCreateProject).toHaveBeenCalled();
 
     fireEvent.change(screen.getByPlaceholderText("输入 Collection 名称"), { target: { value: "Collection A" } });
-    fireEvent.click(screen.getAllByText("创建")[1]);
+    fireEvent.click(screen.getByTestId("create-collection-button"));
     expect(onCreateCollection).toHaveBeenCalled();
   });
 });

@@ -1,25 +1,12 @@
 import { useEffect, useMemo, useState } from "react";
-import type {
-  ActionStatus,
-  Backend,
-  CollectionSummary,
-  ExportRecord,
-  ProjectDashboard,
-  ProjectSummary,
-  TaskMode,
-  TaskSummary,
-  WorkbenchConfig,
-  ZoteroConfig,
-} from "../types";
-import { autoStatusLabel, backendLabel, formatDateTime, modeLabel } from "../utils";
+import { autoStatusLabel, backendLabel, modeLabel } from "../display";
+import type { Backend, CollectionSummary, ProjectDashboard, ProjectSummary, TaskMode, TaskSummary, WorkbenchConfig, ZoteroConfig } from "../types";
+import { formatDateTime } from "../utils";
 import { Badge, SmallButton } from "./shared";
-
-type ExportFormat = "md" | "bib" | "json" | "csljson";
 
 type Props = {
   config?: WorkbenchConfig | null;
   dashboard?: ProjectDashboard | null;
-  currentExports?: ExportRecord[];
   zoteroConfig?: ZoteroConfig | null;
   projects: ProjectSummary[];
   tasks: TaskSummary[];
@@ -28,7 +15,6 @@ type Props = {
   activeTaskId: string;
   activeCollectionId: string;
   activeTask: TaskSummary | null;
-  actionStatus: ActionStatus | null;
   onSelectProject: (projectId: string) => void;
   onSelectTask: (taskId: string) => void;
   onSelectCollection: (collectionId: string) => void;
@@ -37,7 +23,6 @@ type Props = {
   onCreateTask: (payload: { topic: string; mode: TaskMode; llm_backend: Backend; llm_model: string }) => void;
   onQuickAction: (action: "plan" | "search_first" | "build_graph" | "build_fulltext" | "auto_start") => void;
   onImportZoteroFile: () => void;
-  onExport: (format: ExportFormat) => void;
 };
 
 export function ProjectSidebar(props: Props) {
@@ -78,8 +63,7 @@ export function ProjectSidebar(props: Props) {
         <div className="text-xs font-semibold uppercase tracking-[0.18em] text-slate-400">Research Workbench</div>
         <div className="mt-2 text-2xl font-semibold tracking-tight text-slate-900">研究工作台</div>
         <p className="mt-2 text-sm leading-6 text-slate-500">
-          用项目、任务、Collection 来组织研究。`GPT Step` 适合半自动逐步推进，`OpenClaw Auto`
-          适合自治探索并在 checkpoint 接受你的引导。
+          用项目、任务和 Collection 管理长期调研。`GPT Step` 适合半自动逐步推进，`OpenClaw Auto` 适合自治探索并在 checkpoint 接受你的引导。
         </p>
       </div>
 
@@ -109,23 +93,9 @@ export function ProjectSidebar(props: Props) {
                 </div>
               </div>
             ) : null}
-
-            {props.dashboard.recent_exports.length ? (
-              <div className="rounded-2xl border border-slate-200 bg-slate-50 p-3">
-                <div className="text-xs font-semibold uppercase tracking-[0.16em] text-slate-400">Recent Exports</div>
-                <div className="mt-2 space-y-2">
-                  {props.dashboard.recent_exports.slice(0, 3).map((item) => (
-                    <div key={item.id} className="rounded-xl bg-white px-3 py-2 text-xs text-slate-600">
-                      <div className="font-medium text-slate-900">{item.format.toUpperCase()}</div>
-                      <div className="mt-1">{item.status}</div>
-                    </div>
-                  ))}
-                </div>
-              </div>
-            ) : null}
           </div>
         ) : (
-          <div className="mt-3 rounded-2xl bg-slate-50 p-3 text-sm text-slate-500">正在读取项目概览…</div>
+          <div className="mt-3 rounded-2xl bg-slate-50 p-3 text-sm text-slate-500">正在读取项目概览...</div>
         )}
       </section>
 
@@ -135,7 +105,7 @@ export function ProjectSidebar(props: Props) {
           className="mt-3 h-28 w-full rounded-2xl border border-slate-200 bg-slate-50 px-3 py-3 text-sm outline-none"
           value={topic}
           onChange={(event) => setTopic(event.target.value)}
-          placeholder="例如：围绕具身智能中的 world model、动作规划和多模态策略学习做一轮调研"
+          placeholder="例如：围绕具身智能中的 world model、视觉语言动作模型和数据效率做一轮调研"
         />
         <div className="mt-3 grid grid-cols-2 gap-2">
           <select className="rounded-2xl border border-slate-200 bg-white px-3 py-2 text-sm" value={mode} onChange={(event) => setMode(event.target.value as TaskMode)}>
@@ -168,7 +138,6 @@ export function ProjectSidebar(props: Props) {
         >
           创建研究任务
         </button>
-        {props.actionStatus ? <ActionMessage status={props.actionStatus} /> : null}
       </section>
 
       <section className="mt-4 rounded-3xl border border-slate-200 bg-white p-4">
@@ -187,6 +156,7 @@ export function ProjectSidebar(props: Props) {
               props.onCreateProject({ name: projectName, description: "" });
               setProjectName("");
             }}
+            data-testid="create-project-button"
           >
             创建
           </SmallButton>
@@ -231,19 +201,20 @@ export function ProjectSidebar(props: Props) {
               props.onCreateCollection({ name: collectionName, description: "" });
               setCollectionName("");
             }}
+            data-testid="create-collection-button"
           >
             创建
           </SmallButton>
         </div>
         <div className="mt-3 flex flex-wrap gap-2">
-          <SmallButton onClick={props.onImportZoteroFile}>导入 Zotero 文件</SmallButton>
+          <SmallButton data-testid="import-zotero-button" onClick={props.onImportZoteroFile}>导入 Zotero 文件</SmallButton>
           <Badge tone="green">本地导入导出可用</Badge>
           <Badge tone={props.zoteroConfig?.legacy_web_api_configured ? "blue" : "amber"}>
             {props.zoteroConfig?.legacy_web_api_configured ? "Zotero Web API 已配置（兼容模式）" : "Zotero Web API 未配置（兼容模式）"}
           </Badge>
         </div>
         <div className="mt-2 text-xs leading-5 text-slate-500">
-          支持导入 `{props.zoteroConfig?.import_formats?.join(" / ") || "CSL JSON / BibTeX"}`，默认导入当前项目；导入后会生成一个新的 collection。
+          支持导入 {props.zoteroConfig?.import_formats?.join(" / ") || "CSL JSON / BibTeX"}，默认导入当前项目；导入后会生成一个新的 collection。
         </div>
         <div className="mt-3 space-y-2">
           {props.collections.map((collection) => (
@@ -256,7 +227,7 @@ export function ProjectSidebar(props: Props) {
             >
               <div className="text-sm font-medium text-slate-900">{collection.name}</div>
               <div className="mt-1 text-xs text-slate-500">
-                {collection.item_count} 篇 · {collection.source_type}
+                {collection.item_count} 条 · {collection.source_type}
               </div>
             </button>
           ))}
@@ -273,8 +244,8 @@ export function ProjectSidebar(props: Props) {
           {props.tasks.map((task) => (
             <button
               key={task.task_id}
-              className={`w-full rounded-2xl border px-3 py-3 text-left ${
-                task.task_id === props.activeTaskId ? "border-slate-900 bg-slate-900 text-white" : "border-slate-200 bg-slate-50"
+              className={`w-full rounded-2xl border px-3 py-3 text-left transition ${
+                task.task_id === props.activeTaskId ? "border-slate-900 bg-slate-900 text-white shadow-sm" : "border-slate-200 bg-slate-50"
               }`}
               onClick={() => props.onSelectTask(task.task_id)}
             >
@@ -297,6 +268,7 @@ export function ProjectSidebar(props: Props) {
           <div className="text-sm font-medium text-slate-900">快捷动作</div>
           <div className="text-xs text-slate-400">{props.activeTask ? props.activeTask.task_id : "未选中任务"}</div>
         </div>
+        <div className="mt-2 text-xs leading-5 text-slate-500">动作结果会显示在画布顶部状态条里，便于判断是已提交、已在队列中，还是缺少前置条件。</div>
         <div className="mt-3 grid gap-2 text-sm">
           <SmallButton disabled={!props.activeTask} onClick={() => props.onQuickAction("plan")}>
             1. 规划方向
@@ -316,39 +288,6 @@ export function ProjectSidebar(props: Props) {
             </SmallButton>
           ) : null}
         </div>
-      </section>
-
-      <section className="mt-4 rounded-3xl border border-slate-200 bg-white p-4">
-        <div className="flex items-center justify-between">
-          <div className="text-sm font-medium text-slate-900">任务导出</div>
-          <div className="text-xs text-slate-400">{props.activeTask ? props.activeTask.task_id : "未选中任务"}</div>
-        </div>
-        <div className="mt-3 flex flex-wrap gap-2">
-          <SmallButton disabled={!props.activeTask} onClick={() => props.onExport("md")}>
-            导出 MD
-          </SmallButton>
-          <SmallButton disabled={!props.activeTask} onClick={() => props.onExport("bib")}>
-            导出 BibTeX
-          </SmallButton>
-          <SmallButton disabled={!props.activeTask} onClick={() => props.onExport("csljson")}>
-            导出 CSL JSON
-          </SmallButton>
-          <SmallButton disabled={!props.activeTask} onClick={() => props.onExport("json")}>
-            导出 JSON
-          </SmallButton>
-        </div>
-        {props.currentExports?.length ? (
-          <div className="mt-3 space-y-2">
-            {props.currentExports.slice(0, 3).map((item) => (
-              <div key={item.id} className="rounded-2xl border border-slate-200 bg-slate-50 p-3 text-xs text-slate-600">
-                <div className="font-medium text-slate-900">
-                  {item.format.toUpperCase()} · {item.status}
-                </div>
-                <div className="mt-1 break-all">{item.output_path || item.error || "暂无导出路径"}</div>
-              </div>
-            ))}
-          </div>
-        ) : null}
       </section>
 
       <section className="mt-4 rounded-3xl border border-slate-200 bg-white p-4">
@@ -380,17 +319,4 @@ function MetricCard(props: { label: string; value: string }) {
       <div className="mt-1 text-lg font-semibold text-slate-900">{props.value}</div>
     </div>
   );
-}
-
-function ActionMessage(props: { status: ActionStatus }) {
-  const className =
-    props.status.tone === "success"
-      ? "bg-emerald-50 text-emerald-700"
-      : props.status.tone === "warning"
-        ? "bg-amber-50 text-amber-700"
-        : props.status.tone === "danger"
-          ? "bg-rose-50 text-rose-700"
-          : "bg-slate-50 text-slate-600";
-
-  return <div className={`mt-3 rounded-2xl px-3 py-2 text-xs ${className}`}>{props.status.text}</div>;
 }

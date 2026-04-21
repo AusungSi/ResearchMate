@@ -112,7 +112,7 @@ class ResearchCommandService:
                 self._send("你还没有调研任务。先发：调研 主题：xxx", wecom_user_id, reply_sink)
                 return True
             try:
-                task, queued = self.research_service.enqueue_fulltext_build(
+                task, queued, _noop_reason = self.research_service.enqueue_fulltext_build(
                     db,
                     user_id=user_id,
                     task_id=task.task_id,
@@ -153,7 +153,7 @@ class ResearchCommandService:
                 return True
             direction_index = int(m_graph_build.group(1)) if m_graph_build.group(1) else None
             try:
-                task, queued = self.research_service.enqueue_graph_build(
+                task, queued, _noop_reason = self.research_service.enqueue_graph_build(
                     db,
                     user_id=user_id,
                     task_id=task.task_id,
@@ -222,7 +222,7 @@ class ResearchCommandService:
                     self._send(self._render_paper_page(page), wecom_user_id, reply_sink)
                     return True
             try:
-                task = self.research_service.enqueue_search(db, user_id=user_id, direction_index=idx)
+                task, queued, _noop_reason = self.research_service.enqueue_search(db, user_id=user_id, direction_index=idx)
                 label = "扩展检索" if action == "继续" else "检索"
                 self._send(
                     f"已提交任务 {task.task_id} 的方向 {idx} {label}请求，稍后会推送完成通知。",
@@ -241,7 +241,7 @@ class ResearchCommandService:
             session = session_repo.get_or_create(user_id, page_size=self.settings.research_page_size)
             session_repo.set_pagination(session, direction_index=idx, page=1)
             try:
-                task = self.research_service.enqueue_search(
+                task, queued, _noop_reason = self.research_service.enqueue_search(
                     db,
                     user_id=user_id,
                     direction_index=idx,
@@ -265,7 +265,7 @@ class ResearchCommandService:
             session = session_repo.get_or_create(user_id, page_size=self.settings.research_page_size)
             session_repo.set_pagination(session, direction_index=idx, page=1)
             try:
-                task = self.research_service.enqueue_search(
+                task, queued, _noop_reason = self.research_service.enqueue_search(
                     db,
                     user_id=user_id,
                     direction_index=idx,

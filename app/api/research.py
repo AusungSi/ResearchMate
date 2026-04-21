@@ -66,7 +66,7 @@ from app.domain.schemas import (
     ResearchZoteroImportResponse,
 )
 from app.infra.db import get_db
-from app.services.research_service import ResearchService
+from app.services.research_service import CanvasStateBusyError, NodeChatBusyError, ResearchService
 
 
 router = APIRouter(prefix="/api/v1/research")
@@ -74,6 +74,12 @@ router = APIRouter(prefix="/api/v1/research")
 
 def get_research_service(request: Request) -> ResearchService:
     return request.app.state.research_service
+
+
+def _queue_feedback(queued: bool, *, submitted: str, noop_reason: str | None, noop_messages: dict[str, str]) -> tuple[str | None, str]:
+    if queued:
+        return None, submitted
+    return noop_reason, noop_messages.get(noop_reason or "", "当前操作没有执行。")
 
 
 @router.post("/tasks", response_model=ResearchTaskResponse)
@@ -470,6 +476,8 @@ def put_canvas(
             task_id=task_id,
             state=payload.model_dump(),
         )
+    except CanvasStateBusyError as exc:
+        raise HTTPException(status_code=409, detail="画布正在和后台研究结果同步，系统会自动重试保存。") from exc
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     return ResearchCanvasResponse(**data)
@@ -486,7 +494,7 @@ def auto_start(
         data = research_service.start_auto_research(db, user_id=user_id, task_id=task_id)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
-    return ResearchAutoRunResponse(**data)
+    return ResearchAutoRunResponse(**data, message="已启动 OpenClaw Auto 运行。")
 
 
 @router.get("/tasks/{task_id}/runs/{run_id}/events", response_model=ResearchRunEventsResponse)
@@ -533,7 +541,7 @@ def submit_guidance(
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
-    return ResearchRunGuidanceResponse(**data)
+    return ResearchRunGuidanceResponse(**data, message="已提交新的 checkpoint 引导。")
 
 
 @router.post("/tasks/{task_id}/runs/{run_id}/continue", response_model=ResearchRunControlResponse)
@@ -548,7 +556,7 @@ def continue_auto_run(
         data = research_service.continue_auto_research(db, user_id=user_id, task_id=task_id, run_id=run_id)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
-    return ResearchRunControlResponse(**data)
+    return ResearchRunControlResponse(**data, message="自动研究已继续。")
 
 
 @router.post("/tasks/{task_id}/runs/{run_id}/cancel", response_model=ResearchRunControlResponse)
@@ -563,7 +571,7 @@ def cancel_auto_run(
         data = research_service.cancel_auto_research(db, user_id=user_id, task_id=task_id, run_id=run_id)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
-    return ResearchRunControlResponse(**data)
+    return ResearchRunControlResponse(**data, message="自动研究已停止。")
 
 
 @router.post("/tasks/{task_id}/plan", response_model=ResearchTaskPlanResponse)
@@ -574,10 +582,19 @@ def plan_task(
     research_service: ResearchService = Depends(get_research_service),
 ) -> ResearchTaskPlanResponse:
     try:
-        task, queued = research_service.enqueue_plan(db, user_id=user_id, task_id=task_id)
+        task, queued, noop_reason = research_service.enqueue_plan(db, user_id=user_id, task_id=task_id)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
-    return ResearchTaskPlanResponse(task_id=task.task_id, status=task.status.value, queued=queued)
+    noop_reason, message = _queue_feedback(
+        queued,
+        submitted="方向规划已提交。",
+        noop_reason=noop_reason,
+        noop_messages={
+            "directions_already_available": "当前任务已经有方向，可直接检索或继续探索。",
+            "plan_already_pending": "方向规划已经在队列中，请稍后刷新。",
+        },
+    )
+    return ResearchTaskPlanResponse(task_id=task.task_id, status=task.status.value, queued=queued, noop_reason=noop_reason, message=message)
 
 
 @router.post("/tasks/{task_id}/search", response_model=ResearchTaskSearchEnqueueResponse)
@@ -590,7 +607,7 @@ def search_direction(
 ) -> ResearchTaskSearchEnqueueResponse:
     try:
         research_service.switch_task(db, user_id=user_id, task_id=task_id)
-        task = research_service.enqueue_search(
+        task, queued, noop_reason = research_service.enqueue_search(
             db,
             user_id=user_id,
             direction_index=payload.direction_index,
@@ -599,11 +616,23 @@ def search_direction(
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    noop_reason, message = _queue_feedback(
+        queued,
+        submitted=f"已提交方向 {payload.direction_index} 的检索请求。",
+        noop_reason=noop_reason,
+        noop_messages={
+            "direction_missing": "当前任务还没有这个方向，请先规划方向后再检索。",
+            "search_already_pending": "当前已经有检索任务在队列中，请稍后刷新。",
+        },
+    )
     return ResearchTaskSearchEnqueueResponse(
         task_id=task.task_id,
         status=task.status.value,
         direction_index=payload.direction_index,
+        queued=queued,
         force_refresh=payload.force_refresh,
+        noop_reason=noop_reason,
+        message=message,
     )
 
 
@@ -634,6 +663,7 @@ def explore_start(
         round_id=round_row.id,
         status=task.status.value,
         queued=True,
+        message=f"已为方向 {payload.direction_index} 创建探索轮次。",
     )
 
 
@@ -682,7 +712,7 @@ def explore_round_select(
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
-    return ResearchRoundSelectResponse(**data)
+    return ResearchRoundSelectResponse(**data, message="已选择候选方向，准备进入下一轮。")
 
 
 @router.post("/tasks/{task_id}/explore/rounds/{round_id}/next", response_model=ResearchRoundNextResponse)
@@ -706,7 +736,7 @@ def explore_round_next(
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
-    return ResearchRoundNextResponse(**data)
+    return ResearchRoundNextResponse(**data, message="已根据新的意图继续下一轮探索。")
 
 
 @router.get("/tasks/{task_id}/explore/tree", response_model=ResearchExploreTreeResponse)
@@ -799,6 +829,7 @@ def get_paper_asset(
     task_id: str,
     paper_id: str,
     kind: str = Query(default="pdf"),
+    disposition: str = Query(default="attachment"),
     user_id: int = Depends(get_current_user_id),
     db: Session = Depends(get_db),
     research_service: ResearchService = Depends(get_research_service),
@@ -813,7 +844,8 @@ def get_paper_asset(
         )
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
-    return FileResponse(path=path, filename=Path(path).name)
+    content_disposition_type = "inline" if disposition == "inline" else "attachment"
+    return FileResponse(path=path, filename=Path(path).name, content_disposition_type=content_disposition_type)
 
 
 @router.get("/tasks/{task_id}/papers/{paper_id:path}/asset/meta", response_model=ResearchPaperAssetResponse)
@@ -895,6 +927,8 @@ def chat_with_node(
             thread_id=payload.thread_id,
             tags=payload.tags,
         )
+    except NodeChatBusyError as exc:
+        raise HTTPException(status_code=409, detail="节点问答正在和后台研究结果同步，系统会自动重试或请稍后再问一次。") from exc
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     return ResearchNodeChatResponse(**data)
@@ -953,9 +987,17 @@ def export_task(
     try:
         research_service.switch_task(db, user_id=user_id, task_id=task_id)
         path = research_service.export_task(db, user_id=user_id, fmt=format)
+        exports = research_service.list_exports(db, user_id=user_id, task_id=task_id)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
-    return ResearchExportResponse(task_id=task_id, format=format, path=path)
+    latest = next((item for item in exports["items"] if item.get("output_path") == path), None)
+    return ResearchExportResponse(
+        task_id=task_id,
+        format=format,
+        path=path,
+        filename=Path(path).name,
+        download_url=latest.get("download_url") if latest else None,
+    )
 
 
 @router.get("/collections/{collection_id}/export", response_model=ResearchExportResponse)
@@ -968,9 +1010,47 @@ def export_collection(
 ) -> ResearchExportResponse:
     try:
         path = research_service.export_collection(db, user_id=user_id, collection_id=collection_id, fmt=format)
+        exports = research_service.list_collection_exports(db, user_id=user_id, collection_id=collection_id)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
-    return ResearchExportResponse(collection_id=collection_id, format=format, path=path)
+    latest = next((item for item in exports["items"] if item.get("output_path") == path), None)
+    return ResearchExportResponse(
+        collection_id=collection_id,
+        format=format,
+        path=path,
+        filename=Path(path).name,
+        download_url=latest.get("download_url") if latest else None,
+    )
+
+
+@router.get("/tasks/{task_id}/exports/{record_id}/download")
+def download_task_export(
+    task_id: str,
+    record_id: int,
+    user_id: int = Depends(get_current_user_id),
+    db: Session = Depends(get_db),
+    research_service: ResearchService = Depends(get_research_service),
+):
+    try:
+        path = research_service.get_task_export_download_path(db, user_id=user_id, task_id=task_id, record_id=record_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    return FileResponse(path=path, filename=Path(path).name)
+
+
+@router.get("/collections/{collection_id}/exports/{record_id}/download")
+def download_collection_export(
+    collection_id: str,
+    record_id: int,
+    user_id: int = Depends(get_current_user_id),
+    db: Session = Depends(get_db),
+    research_service: ResearchService = Depends(get_research_service),
+):
+    try:
+        path = research_service.get_collection_export_download_path(db, user_id=user_id, collection_id=collection_id, record_id=record_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    return FileResponse(path=path, filename=Path(path).name)
 
 
 @router.get("/tasks/{task_id}/exports", response_model=ResearchExportListResponse)
@@ -1010,7 +1090,7 @@ def build_fulltext(
     research_service: ResearchService = Depends(get_research_service),
 ) -> ResearchFulltextBuildResponse:
     try:
-        task, queued = research_service.enqueue_fulltext_build(
+        task, queued, noop_reason = research_service.enqueue_fulltext_build(
             db,
             user_id=user_id,
             task_id=task_id,
@@ -1018,7 +1098,17 @@ def build_fulltext(
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
-    return ResearchFulltextBuildResponse(task_id=task.task_id, status=task.status.value, queued=queued)
+    noop_reason, message = _queue_feedback(
+        queued,
+        submitted="全文处理已提交。",
+        noop_reason=noop_reason,
+        noop_messages={
+            "fulltext_already_pending": "全文处理已经在队列中，请稍后刷新。",
+            "no_papers": "当前任务还没有论文，先完成检索后再处理全文。",
+            "paper_missing": "当前没有找到对应论文，无法重试全文处理。",
+        },
+    )
+    return ResearchFulltextBuildResponse(task_id=task.task_id, status=task.status.value, queued=queued, noop_reason=noop_reason, message=message)
 
 
 @router.post("/tasks/{task_id}/fulltext/retry", response_model=ResearchFulltextBuildResponse)
@@ -1030,7 +1120,7 @@ def retry_fulltext(
     research_service: ResearchService = Depends(get_research_service),
 ) -> ResearchFulltextBuildResponse:
     try:
-        task, queued = research_service.enqueue_fulltext_build(
+        task, queued, noop_reason = research_service.enqueue_fulltext_build(
             db,
             user_id=user_id,
             task_id=task_id,
@@ -1039,7 +1129,16 @@ def retry_fulltext(
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
-    return ResearchFulltextBuildResponse(task_id=task.task_id, status=task.status.value, queued=queued)
+    noop_reason, message = _queue_feedback(
+        queued,
+        submitted="已提交全文重试请求。",
+        noop_reason=noop_reason,
+        noop_messages={
+            "no_papers": "当前任务还没有论文，先完成检索后再处理全文。",
+            "paper_missing": "当前没有找到对应论文，无法重试全文处理。",
+        },
+    )
+    return ResearchFulltextBuildResponse(task_id=task.task_id, status=task.status.value, queued=queued, noop_reason=noop_reason, message=message)
 
 
 @router.get("/tasks/{task_id}/fulltext/status", response_model=ResearchFulltextStatusResponse)
@@ -1091,7 +1190,7 @@ def build_graph(
 ) -> ResearchGraphBuildResponse:
     force_refresh = bool(force or payload.force_refresh)
     try:
-        task, queued = research_service.enqueue_graph_build(
+        task, queued, noop_reason = research_service.enqueue_graph_build(
             db,
             user_id=user_id,
             task_id=task_id,
@@ -1106,6 +1205,15 @@ def build_graph(
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    noop_reason, message = _queue_feedback(
+        queued,
+        submitted="图谱构建已提交。",
+        noop_reason=noop_reason,
+        noop_messages={
+            "graph_already_pending": "图谱构建已经在队列中，请稍后刷新。",
+            "no_graph_seed": "当前任务还没有可用于构图的方向、轮次或论文。",
+        },
+    )
     return ResearchGraphBuildResponse(
         task_id=task.task_id,
         status=task.status.value,
@@ -1113,6 +1221,8 @@ def build_graph(
         direction_index=payload.direction_index,
         round_id=payload.round_id,
         view=payload.view,
+        noop_reason=noop_reason,
+        message=message,
     )
 
 
@@ -1145,6 +1255,7 @@ def build_round_citation_graph(
         direction_index=payload.direction_index,
         round_id=round_id,
         view="citation",
+        message="已提交当前轮次的引用图构建。",
     )
 
 

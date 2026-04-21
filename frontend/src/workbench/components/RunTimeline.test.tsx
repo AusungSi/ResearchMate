@@ -38,7 +38,7 @@ describe("RunTimeline", () => {
             event_type: "checkpoint",
             seq: 2,
             created_at: "2026-04-18T00:01:00Z",
-            payload: { title: "Initial research map", summary: "等待引导" },
+            payload: { title: "Initial research map", summary: "awaiting guidance" },
           },
         ]}
         onGuidance={onGuidance}
@@ -47,10 +47,10 @@ describe("RunTimeline", () => {
       />,
     );
 
-    expect(screen.getByText("自动研究时间线")).toBeInTheDocument();
+    expect(screen.getByText("Run Log")).toBeInTheDocument();
     expect(screen.getByText("Checkpoint")).toBeInTheDocument();
-    fireEvent.change(screen.getByPlaceholderText(/checkpoint 引导/i), { target: { value: "请更关注 citation graph" } });
-    fireEvent.click(screen.getByText("提交引导"));
-    expect(onGuidance).toHaveBeenCalledWith("请更关注 citation graph");
+    fireEvent.change(screen.getByPlaceholderText(/checkpoint guidance/i), { target: { value: "please focus on citation graph" } });
+    fireEvent.click(screen.getByRole("button", { name: /guidance/i }));
+    expect(onGuidance).toHaveBeenCalledWith("please focus on citation graph");
   });
 });
