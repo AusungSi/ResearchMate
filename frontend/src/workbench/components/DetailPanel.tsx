@@ -65,7 +65,7 @@ export function DetailPanel(props: Props) {
   const summarySource = props.paperDetail?.summary_source || nodeData?.summary_source || null;
   const summaryStatus = props.paperDetail?.summary_status || nodeData?.summary_status || null;
   const displaySummary = props.paperDetail?.card_summary || summarizeForNode(nodeData);
-  const canDeleteNode = Boolean(nodeData?.isManual);
+  const canDeleteNode = Boolean(node);
 
   useEffect(() => {
     setFeedback("");

@@ -172,6 +172,7 @@ export type GraphNode = {
   summary_source?: string | null;
   summary_status?: string | null;
   direction_index?: number | null;
+  papers_count?: number | null;
   status?: string | null;
   feedback_text?: string | null;
   summary?: string | null;

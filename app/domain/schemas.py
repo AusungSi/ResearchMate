@@ -650,6 +650,7 @@ class ResearchGraphNode(BaseModel):
     year: int | None = None
     source: str | None = None
     direction_index: int | None = None
+    papers_count: int | None = None
     score: float | None = None
     fulltext_status: str | None = None
     depth: int | None = None
@@ -661,6 +662,7 @@ class ResearchGraphNode(BaseModel):
     url: str | None = None
     abstract: str | None = None
     method_summary: str | None = None
+    summary: str | None = None
     card_summary: str | None = None
     summary_source: str | None = None
     summary_status: str | None = None

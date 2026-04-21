@@ -31,7 +31,7 @@ export function stepLabel(step?: string) {
     next_round_created: "继续下一轮",
     graph_queued: "图谱构建已排队",
     tree_graph_completed: "树状图谱完成",
-    citation_graph_completed: "引文图谱完成",
+    citation_graph_completed: "引用图谱完成",
     fulltext_queued: "全文处理已排队",
     fulltext_completed: "全文处理完成",
     paper_saved: "论文已保存",
@@ -84,8 +84,8 @@ export function summarySourceLabel(source?: string | null) {
   const labels: Record<string, string> = {
     fulltext: "基于全文",
     abstract: "基于摘要",
-    method_fallback: "基于方法摘要回退",
-    none: "暂无摘要来源",
+    method_fallback: "摘要回退",
+    none: "暂无来源",
   };
   return labels[source || ""] || source || "未知来源";
 }
@@ -95,7 +95,7 @@ export function summaryStatusLabel(status?: string | null) {
     done: "已生成",
     running: "生成中",
     queued: "已排队",
-    fallback: "使用回退摘要",
+    fallback: "回退摘要",
     none: "暂无摘要",
     failed: "生成失败",
   };
@@ -116,6 +116,13 @@ export function assetKindLabel(kind?: string | null) {
 
 export function summarizeForNode(data?: Partial<FlowNodeData> | null) {
   return firstText(data?.card_summary, data?.summary, data?.method_summary, data?.abstract, data?.feedback_text) || "这个节点暂时还没有可展示的摘要。";
+}
+
+export function directionSubtitle(data?: Partial<FlowNodeData> | null) {
+  const parts = [];
+  if (typeof data?.direction_index === "number") parts.push(`方向 ${data.direction_index}`);
+  if (typeof data?.papers_count === "number") parts.push(`${data.papers_count} 篇论文`);
+  return parts.join(" · ");
 }
 
 export function formatRunState(mode: TaskMode, runId: string, autoStatus: string, summary?: RunSummary | null) {

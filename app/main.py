@@ -2,7 +2,9 @@ from __future__ import annotations
 
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
+from fastapi.responses import JSONResponse
+from sqlalchemy.exc import OperationalError
 
 from app.api.health import router as health_router
 from app.api.research import router as research_router
@@ -123,6 +125,17 @@ def _build_app() -> FastAPI:
     profile = settings.app_profile.strip().lower()
     lifespan = legacy_full_lifespan if profile == "legacy_full" else research_local_lifespan
     app = FastAPI(title=settings.app_name, lifespan=lifespan)
+
+    @app.exception_handler(OperationalError)
+    async def sqlite_operational_error_handler(request: Request, exc: OperationalError):
+        if "database is locked" in str(exc).lower():
+            logger.warning("sqlite_database_locked path=%s", request.url.path)
+            return JSONResponse(
+                status_code=409,
+                content={"detail": "本地 SQLite 正在被后台任务写入，请稍后重试。"},
+            )
+        return JSONResponse(status_code=500, content={"detail": "Database operation failed."})
+
     app.include_router(health_router)
     app.include_router(research_router)
 

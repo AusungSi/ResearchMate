@@ -1,6 +1,6 @@
 ﻿import { useEffect, useMemo, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { useEdgesState, useNodesState, type Connection, type Edge, type Node, type ReactFlowInstance } from "@xyflow/react";
+import { useEdgesState, useNodesState, type Connection, type Edge, type Node, type NodeChange, type ReactFlowInstance } from "@xyflow/react";
 import { apiFetch } from "../lib/api";
 import { AppShell } from "./components/AppShell";
 import { CollectionDetailPanel } from "./components/CollectionDetailPanel";
@@ -49,7 +49,6 @@ import {
   defaultCanvasUi,
   inferRoundId,
   isPaperNode,
-  manualNodeDefaultLabel,
   mergeCanvasWithGraph,
   reconcileFlowState,
   runAutoLayout,
@@ -73,6 +72,14 @@ type WorkbenchAction =
   | { type: "guidance"; text: string }
   | { type: "auto_continue" }
   | { type: "auto_cancel" };
+
+const MANUAL_NODE_LABELS: Record<"note" | "question" | "reference" | "group" | "report", string> = {
+  note: "新的笔记",
+  question: "新的问题",
+  reference: "新的参考",
+  group: "新的分组",
+  report: "新的报告",
+};
 
 function isTransientCanvasSaveError(cause: unknown) {
   const message = cause instanceof Error ? cause.message.toLowerCase() : String(cause).toLowerCase();
@@ -256,7 +263,7 @@ export function Workbench() {
     () => mergeCanvasWithGraph(graphQuery.data, canvasQuery.data, eventsState.items, configQuery.data?.default_canvas_ui || defaultCanvasUi()),
     [graphQuery.data, canvasQuery.data, configQuery.data?.default_canvas_ui, eventsState.items],
   );
-  const [nodes, setNodes, onNodesChange] = useNodesState<Node<FlowNodeData>>([]);
+  const [nodes, setNodes, onNodesChangeBase] = useNodesState<Node<FlowNodeData>>([]);
   const [edges, setEdges, onEdgesChange] = useEdgesState<Edge>([]);
 
   useEffect(() => {
@@ -878,7 +885,7 @@ export function Workbench() {
         data: {
           id,
           type,
-          label: label || manualNodeDefaultLabel(type),
+          label: label || MANUAL_NODE_LABELS[type],
           summary: summary || "这是一个手工工作台节点，可用于整理思路、记录问题、沉淀阶段总结或挂接参考资料。",
           isManual: true,
         },
@@ -906,7 +913,11 @@ export function Workbench() {
     const target = nodesRef.current.find((node) => node.id === selectedNodeId);
     if (!target) return;
     if (!target.data?.isManual) {
-      setActionStatus({ tone: "warning", text: "系统节点当前不能直接删除，只能隐藏。" });
+      const nextNodes = nodesRef.current.map((node) => (node.id === selectedNodeId ? { ...node, hidden: true } : node));
+      setSelectedNodeId("");
+      setNodes(nextNodes);
+      queueSave(nextNodes, edgesRef.current);
+      setActionStatus({ tone: "success", text: "系统节点已从画布隐藏；研究数据仍然保留，可从画布状态中恢复。" });
       return;
     }
     const nextNodes = nodesRef.current.filter((node) => node.id !== selectedNodeId);
@@ -920,6 +931,38 @@ export function Workbench() {
     setEdges(nextEdges);
     queueSave(nextNodes, nextEdges);
     setActionStatus({ tone: "success", text: "已删除手工节点。" });
+  }
+
+  function handleNodesChange(changes: NodeChange<Node<FlowNodeData>>[]) {
+    const removedIds = changes.filter((change) => change.type === "remove").map((change) => change.id);
+    if (!removedIds.length) {
+      onNodesChangeBase(changes);
+      return;
+    }
+
+    const removed = new Set(removedIds);
+    const manualIds = new Set(nodesRef.current.filter((node) => removed.has(node.id) && node.data?.isManual).map((node) => node.id));
+    const systemIds = new Set(nodesRef.current.filter((node) => removed.has(node.id) && !node.data?.isManual).map((node) => node.id));
+    const nonRemoveChanges = changes.filter((change) => change.type !== "remove");
+    if (nonRemoveChanges.length) {
+      onNodesChangeBase(nonRemoveChanges);
+    }
+
+    const nextNodes = nodesRef.current
+      .filter((node) => !manualIds.has(node.id))
+      .map((node) => (systemIds.has(node.id) ? { ...node, hidden: true } : node));
+    const nextEdges = edgesRef.current.filter((edge) => !manualIds.has(edge.source) && !manualIds.has(edge.target));
+    setSelectedNodeId("");
+    setNodes(nextNodes);
+    setEdges(nextEdges);
+    queueSave(nextNodes, nextEdges);
+    if (systemIds.size && manualIds.size) {
+      setActionStatus({ tone: "success", text: "手工节点已删除，系统节点已隐藏。" });
+    } else if (systemIds.size) {
+      setActionStatus({ tone: "success", text: "系统节点已从画布隐藏；研究数据仍然保留。" });
+    } else {
+      setActionStatus({ tone: "success", text: "已删除手工节点。" });
+    }
   }
 
   function saveChatAnswerAsNode(kind: "note" | "question" | "reference" | "report", item: ChatItem) {
@@ -1148,7 +1191,7 @@ export function Workbench() {
               edges={edges}
               showMiniMap={uiState.show_minimap}
               flowRef={flowRef}
-              onNodesChange={onNodesChange}
+              onNodesChange={handleNodesChange}
               onEdgesChange={onEdgesChange}
               onConnect={(connection: Connection) => {
                 const nextEdges = buildManualConnection(connection, edgesRef.current);
@@ -1179,12 +1222,7 @@ export function Workbench() {
                 queueSave(nodesRef.current, edgesRef.current);
               }}
               onSelectionChange={() => undefined}
-              onNodesDelete={(deleted) => {
-                const manualIds = new Set(deleted.filter((node) => Boolean(node.data?.isManual)).map((node) => node.id));
-                const nextNodes = nodesRef.current.filter((node) => !manualIds.has(node.id));
-                setNodes(nextNodes);
-                queueSave(nextNodes, edgesRef.current);
-              }}
+              onNodesDelete={() => undefined}
               onEdgesDelete={(deleted) => {
                 const deletedIds = new Set(deleted.filter((edge) => !String(edge.id).startsWith("graph:")).map((edge) => edge.id));
                 const nextEdges = edgesRef.current.filter((edge) => !deletedIds.has(edge.id));

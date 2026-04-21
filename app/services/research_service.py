@@ -752,6 +752,10 @@ class ResearchService:
         if not worker_id:
             job_repo.mark_running(job)
 
+        # Release the SQLite write lock before running slow LLM/network work.
+        # The worker uses expire_on_commit=False, so the claimed job/task rows remain usable.
+        db.commit()
+
         last_beat = perf_counter()
 
         def touch_lease() -> None:
@@ -766,6 +770,7 @@ class ResearchService:
                 worker_id=worker_id,
                 lease_seconds=int(lease_seconds or self.settings.research_job_lease_seconds),
             )
+            db.commit()
             last_beat = perf_counter()
 
         job_error: str | None = None
@@ -4325,19 +4330,6 @@ class ResearchService:
         topic_id = f"topic:{task.task_id}"
         nodes[topic_id] = {"id": topic_id, "type": "topic", "label": task.topic}
 
-        for direction in direction_rows:
-            d_id = f"direction:{task.task_id}:{direction.direction_index}"
-            nodes[d_id] = {
-                "id": d_id,
-                "type": "direction",
-                "label": direction.name,
-                "direction_index": direction.direction_index,
-            }
-            key = (topic_id, d_id, "topic_direction")
-            if key not in seen:
-                edges.append({"source": topic_id, "target": d_id, "type": "topic_direction", "weight": 1.0})
-                seen.add(key)
-
         per_round_paper_limit = max(
             1,
             min(
@@ -4345,6 +4337,41 @@ class ResearchService:
                 int(paper_limit or self.settings.research_graph_paper_limit_default),
             ),
         )
+
+        for direction in direction_rows:
+            d_id = f"direction:{task.task_id}:{direction.direction_index}"
+            direction_queries = _load_json_list(direction.queries_json)
+            direction_papers_count = len(paper_repo.list_for_direction(direction.id))
+            nodes[d_id] = {
+                "id": d_id,
+                "type": "direction",
+                "label": direction.name,
+                "direction_index": direction.direction_index,
+                "papers_count": direction_papers_count,
+                "summary": (
+                    f"这个方向用于围绕“{direction.name}”检索和组织论文证据。\n"
+                    f"检索 query：{'; '.join(direction_queries[:3]) if direction_queries else direction.name}\n"
+                    f"当前已收录 {direction_papers_count} 篇论文；点击方向节点后可以继续检索、开始探索或构建图谱。"
+                ),
+            }
+            key = (topic_id, d_id, "topic_direction")
+            if key not in seen:
+                edges.append({"source": topic_id, "target": d_id, "type": "topic_direction", "weight": 1.0})
+                seen.add(key)
+            if include_papers:
+                for paper in paper_repo.list_for_direction(direction.id)[:per_round_paper_limit]:
+                    p_id = _paper_token(paper)
+                    if p_id not in nodes:
+                        nodes[p_id] = self._paper_graph_node(
+                            task=task,
+                            paper=paper,
+                            direction_index=direction.direction_index,
+                            fulltext=fulltext_map.get(p_id),
+                        )
+                    edge_key = (d_id, p_id, "direction_paper")
+                    if edge_key not in seen:
+                        edges.append({"source": d_id, "target": p_id, "type": "direction_paper", "weight": 1.0})
+                        seen.add(edge_key)
 
         for row in round_rows:
             r_id = f"round:{row.id}"

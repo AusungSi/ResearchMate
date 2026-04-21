@@ -3,7 +3,7 @@ import { describe, expect, it, vi } from "vitest";
 import { ProjectSidebar } from "./ProjectSidebar";
 
 describe("ProjectSidebar", () => {
-  it("renders the local Zotero entry and creation actions", () => {
+  it("renders collapsible sections, local Zotero entry and creation actions", () => {
     const onCreateProject = vi.fn();
     const onCreateCollection = vi.fn();
     const onImportZoteroFile = vi.fn();
@@ -123,6 +123,8 @@ describe("ProjectSidebar", () => {
     );
 
     expect(screen.getByText("Research Workbench")).toBeInTheDocument();
+    expect(screen.getByText("项目列表")).toBeInTheDocument();
+    expect(screen.getByText("任务列表")).toBeInTheDocument();
     expect(screen.getByTestId("import-zotero-button")).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: /BibTeX/i })).not.toBeInTheDocument();
 
@@ -136,5 +138,8 @@ describe("ProjectSidebar", () => {
     fireEvent.change(screen.getByPlaceholderText("输入 Collection 名称"), { target: { value: "Collection A" } });
     fireEvent.click(screen.getByTestId("create-collection-button"));
     expect(onCreateCollection).toHaveBeenCalled();
+
+    fireEvent.click(screen.getAllByText("折叠")[0]);
+    expect(screen.getAllByText("展开").length).toBeGreaterThan(0);
   });
 });

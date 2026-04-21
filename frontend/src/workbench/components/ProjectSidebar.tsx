@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
+import type { ReactNode } from "react";
 import { autoStatusLabel, backendLabel, modeLabel } from "../display";
 import type { Backend, CollectionSummary, ProjectDashboard, ProjectSummary, TaskMode, TaskSummary, WorkbenchConfig, ZoteroConfig } from "../types";
 import { formatDateTime } from "../utils";
@@ -25,6 +26,8 @@ type Props = {
   onImportZoteroFile: () => void;
 };
 
+type SectionKey = "overview" | "create" | "projects" | "collections" | "tasks" | "actions" | "providers";
+
 export function ProjectSidebar(props: Props) {
   const [topic, setTopic] = useState("");
   const [projectName, setProjectName] = useState("");
@@ -32,6 +35,15 @@ export function ProjectSidebar(props: Props) {
   const [mode, setMode] = useState<TaskMode>(props.config?.default_mode || "gpt_step");
   const [backend, setBackend] = useState<Backend>(props.config?.default_backend || "gpt");
   const [model, setModel] = useState(props.config?.default_gpt_model || "gpt-5.4");
+  const [collapsed, setCollapsed] = useState<Record<SectionKey, boolean>>({
+    overview: false,
+    create: false,
+    projects: false,
+    collections: false,
+    tasks: false,
+    actions: false,
+    providers: true,
+  });
 
   useEffect(() => {
     if (!props.config) return;
@@ -57,34 +69,41 @@ export function ProjectSidebar(props: Props) {
     [props.activeProjectId, props.projects],
   );
 
+  function toggleSection(key: SectionKey) {
+    setCollapsed((current) => ({ ...current, [key]: !current[key] }));
+  }
+
   return (
     <aside className="h-full overflow-auto bg-slate-50/80 p-5">
       <div className="mb-6">
         <div className="text-xs font-semibold uppercase tracking-[0.18em] text-slate-400">Research Workbench</div>
         <div className="mt-2 text-2xl font-semibold tracking-tight text-slate-900">研究工作台</div>
         <p className="mt-2 text-sm leading-6 text-slate-500">
-          用项目、任务和 Collection 管理长期调研。`GPT Step` 适合半自动逐步推进，`OpenClaw Auto` 适合自治探索并在 checkpoint 接受你的引导。
+          项目是长期研究空间，任务是一次具体调研，Collection 用来沉淀可复用论文集合。列表较多时可以折叠每个区块。
         </p>
       </div>
 
-      <section className="rounded-3xl border border-slate-200 bg-white p-4">
-        <div className="text-sm font-medium text-slate-900">项目概览</div>
+      <CollapsibleSection
+        title="项目概览"
+        subtitle={activeProject?.name}
+        collapsed={collapsed.overview}
+        onToggle={() => toggleSection("overview")}
+      >
         {props.dashboard ? (
-          <div className="mt-3 space-y-3">
+          <div className="space-y-3">
             <div className="grid grid-cols-2 gap-2">
               <MetricCard label="任务数" value={String(props.dashboard.task_count)} />
               <MetricCard label="Collections" value={String(props.dashboard.collection_count)} />
               <MetricCard label="论文数" value={String(props.dashboard.paper_count)} />
               <MetricCard label="已保存" value={String(props.dashboard.saved_paper_count)} />
             </div>
-
             {props.dashboard.recent_runs.length ? (
               <div className="rounded-2xl border border-slate-200 bg-slate-50 p-3">
-                <div className="text-xs font-semibold uppercase tracking-[0.16em] text-slate-400">Recent Runs</div>
+                <div className="text-xs font-semibold uppercase tracking-[0.16em] text-slate-400">最近运行</div>
                 <div className="mt-2 space-y-2">
                   {props.dashboard.recent_runs.slice(0, 3).map((item) => (
                     <div key={`${item.task_id}:${item.run_id}`} className="rounded-xl bg-white px-3 py-2">
-                      <div className="text-sm font-medium text-slate-900">{item.topic}</div>
+                      <div className="line-clamp-2 text-sm font-medium text-slate-900">{item.topic}</div>
                       <div className="mt-1 text-xs text-slate-500">
                         {modeLabel(item.mode)} · {autoStatusLabel(item.auto_status)} · {formatDateTime(item.updated_at)}
                       </div>
@@ -95,14 +114,13 @@ export function ProjectSidebar(props: Props) {
             ) : null}
           </div>
         ) : (
-          <div className="mt-3 rounded-2xl bg-slate-50 p-3 text-sm text-slate-500">正在读取项目概览...</div>
+          <div className="rounded-2xl bg-slate-50 p-3 text-sm text-slate-500">正在读取项目概览...</div>
         )}
-      </section>
+      </CollapsibleSection>
 
-      <section className="mt-4 rounded-3xl border border-slate-200 bg-white p-4">
-        <div className="text-sm font-medium text-slate-900">新建研究任务</div>
+      <CollapsibleSection title="新建研究任务" collapsed={collapsed.create} onToggle={() => toggleSection("create")}>
         <textarea
-          className="mt-3 h-28 w-full rounded-2xl border border-slate-200 bg-slate-50 px-3 py-3 text-sm outline-none"
+          className="h-28 w-full rounded-2xl border border-slate-200 bg-slate-50 px-3 py-3 text-sm outline-none"
           value={topic}
           onChange={(event) => setTopic(event.target.value)}
           placeholder="例如：围绕具身智能中的 world model、视觉语言动作模型和数据效率做一轮调研"
@@ -138,11 +156,10 @@ export function ProjectSidebar(props: Props) {
         >
           创建研究任务
         </button>
-      </section>
+      </CollapsibleSection>
 
-      <section className="mt-4 rounded-3xl border border-slate-200 bg-white p-4">
-        <div className="text-sm font-medium text-slate-900">项目列表</div>
-        <div className="mt-3 flex gap-2">
+      <CollapsibleSection title="项目列表" collapsed={collapsed.projects} onToggle={() => toggleSection("projects")}>
+        <div className="flex gap-2">
           <input
             className="flex-1 rounded-2xl border border-slate-200 bg-slate-50 px-3 py-2 text-sm outline-none"
             value={projectName}
@@ -165,13 +182,13 @@ export function ProjectSidebar(props: Props) {
           {props.projects.map((project) => (
             <button
               key={project.project_id}
-              className={`w-full rounded-2xl border px-3 py-3 text-left ${
-                project.project_id === props.activeProjectId ? "border-slate-900 bg-slate-900 text-white" : "border-slate-200 bg-slate-50"
+              className={`w-full rounded-2xl border px-3 py-3 text-left transition ${
+                project.project_id === props.activeProjectId ? "border-slate-900 bg-slate-900 text-white" : "border-slate-200 bg-slate-50 hover:border-slate-300"
               }`}
               onClick={() => props.onSelectProject(project.project_id)}
             >
               <div className="flex items-center justify-between gap-2">
-                <div className="text-sm font-medium">{project.name}</div>
+                <div className="line-clamp-1 text-sm font-medium">{project.name}</div>
                 {project.is_default ? <Badge tone="blue">默认</Badge> : null}
               </div>
               <div className={`mt-1 text-xs ${project.project_id === props.activeProjectId ? "text-slate-300" : "text-slate-500"}`}>
@@ -180,14 +197,15 @@ export function ProjectSidebar(props: Props) {
             </button>
           ))}
         </div>
-      </section>
+      </CollapsibleSection>
 
-      <section className="mt-4 rounded-3xl border border-slate-200 bg-white p-4">
-        <div className="flex items-center justify-between">
-          <div className="text-sm font-medium text-slate-900">Collections</div>
-          {activeProject ? <div className="text-xs text-slate-400">{activeProject.name}</div> : null}
-        </div>
-        <div className="mt-3 flex gap-2">
+      <CollapsibleSection
+        title="Collections"
+        subtitle={activeProject?.name}
+        collapsed={collapsed.collections}
+        onToggle={() => toggleSection("collections")}
+      >
+        <div className="flex gap-2">
           <input
             className="flex-1 rounded-2xl border border-slate-200 bg-slate-50 px-3 py-2 text-sm outline-none"
             value={collectionName}
@@ -207,25 +225,27 @@ export function ProjectSidebar(props: Props) {
           </SmallButton>
         </div>
         <div className="mt-3 flex flex-wrap gap-2">
-          <SmallButton data-testid="import-zotero-button" onClick={props.onImportZoteroFile}>导入 Zotero 文件</SmallButton>
+          <SmallButton data-testid="import-zotero-button" onClick={props.onImportZoteroFile}>
+            导入 Zotero 文件
+          </SmallButton>
           <Badge tone="green">本地导入导出可用</Badge>
           <Badge tone={props.zoteroConfig?.legacy_web_api_configured ? "blue" : "amber"}>
-            {props.zoteroConfig?.legacy_web_api_configured ? "Zotero Web API 已配置（兼容模式）" : "Zotero Web API 未配置（兼容模式）"}
+            {props.zoteroConfig?.legacy_web_api_configured ? "Web API 已配置" : "Web API 兼容模式未配置"}
           </Badge>
         </div>
         <div className="mt-2 text-xs leading-5 text-slate-500">
-          支持导入 {props.zoteroConfig?.import_formats?.join(" / ") || "CSL JSON / BibTeX"}，默认导入当前项目；导入后会生成一个新的 collection。
+          支持导入 {props.zoteroConfig?.import_formats?.join(" / ") || "CSL JSON / BibTeX"}，默认导入当前项目。
         </div>
         <div className="mt-3 space-y-2">
           {props.collections.map((collection) => (
             <button
               key={collection.collection_id}
-              className={`w-full rounded-2xl border px-3 py-3 text-left ${
-                collection.collection_id === props.activeCollectionId ? "border-blue-500 bg-blue-50" : "border-slate-200 bg-slate-50"
+              className={`w-full rounded-2xl border px-3 py-3 text-left transition ${
+                collection.collection_id === props.activeCollectionId ? "border-blue-500 bg-blue-50" : "border-slate-200 bg-slate-50 hover:border-slate-300"
               }`}
               onClick={() => props.onSelectCollection(collection.collection_id)}
             >
-              <div className="text-sm font-medium text-slate-900">{collection.name}</div>
+              <div className="line-clamp-1 text-sm font-medium text-slate-900">{collection.name}</div>
               <div className="mt-1 text-xs text-slate-500">
                 {collection.item_count} 条 · {collection.source_type}
               </div>
@@ -233,25 +253,21 @@ export function ProjectSidebar(props: Props) {
           ))}
           {!props.collections.length ? <div className="rounded-2xl bg-slate-50 p-3 text-sm text-slate-500">当前项目还没有 collection。</div> : null}
         </div>
-      </section>
+      </CollapsibleSection>
 
-      <section className="mt-4 rounded-3xl border border-slate-200 bg-white p-4">
-        <div className="flex items-center justify-between">
-          <div className="text-sm font-medium text-slate-900">任务列表</div>
-          <div className="text-xs text-slate-400">{props.activeTask ? modeLabel(props.activeTask.mode) : "未选中任务"}</div>
-        </div>
-        <div className="mt-3 space-y-2">
+      <CollapsibleSection title="任务列表" subtitle={props.activeTask ? modeLabel(props.activeTask.mode) : "未选中任务"} collapsed={collapsed.tasks} onToggle={() => toggleSection("tasks")}>
+        <div className="space-y-2">
           {props.tasks.map((task) => (
             <button
               key={task.task_id}
               className={`w-full rounded-2xl border px-3 py-3 text-left transition ${
-                task.task_id === props.activeTaskId ? "border-slate-900 bg-slate-900 text-white shadow-sm" : "border-slate-200 bg-slate-50"
+                task.task_id === props.activeTaskId ? "border-slate-900 bg-slate-900 text-white shadow-sm" : "border-slate-200 bg-slate-50 hover:border-slate-300"
               }`}
               onClick={() => props.onSelectTask(task.task_id)}
             >
-              <div className="text-sm font-medium">{task.topic}</div>
+              <div className="line-clamp-2 text-sm font-medium">{task.topic}</div>
               <div className={`mt-1 text-xs ${task.task_id === props.activeTaskId ? "text-slate-300" : "text-slate-500"}`}>
-                {modeLabel(task.mode)} · 状态 {task.status} · 自动流 {autoStatusLabel(task.auto_status)}
+                {modeLabel(task.mode)} · 状态 {task.status} · {autoStatusLabel(task.auto_status)}
               </div>
               <div className={`mt-1 text-[11px] ${task.task_id === props.activeTaskId ? "text-slate-400" : "text-slate-400"}`}>
                 {backendLabel(task.llm_backend)}
@@ -261,14 +277,10 @@ export function ProjectSidebar(props: Props) {
           ))}
           {!props.tasks.length ? <div className="rounded-2xl bg-slate-50 p-3 text-sm text-slate-500">当前项目还没有研究任务。</div> : null}
         </div>
-      </section>
+      </CollapsibleSection>
 
-      <section className="mt-4 rounded-3xl border border-slate-200 bg-white p-4">
-        <div className="flex items-center justify-between">
-          <div className="text-sm font-medium text-slate-900">快捷动作</div>
-          <div className="text-xs text-slate-400">{props.activeTask ? props.activeTask.task_id : "未选中任务"}</div>
-        </div>
-        <div className="mt-2 text-xs leading-5 text-slate-500">动作结果会显示在画布顶部状态条里，便于判断是已提交、已在队列中，还是缺少前置条件。</div>
+      <CollapsibleSection title="快捷动作" subtitle={props.activeTask ? props.activeTask.task_id : "未选中任务"} collapsed={collapsed.actions} onToggle={() => toggleSection("actions")}>
+        <div className="text-xs leading-5 text-slate-500">动作结果会显示在画布顶部状态条；检索类任务完成后画布会随轮询自动更新。</div>
         <div className="mt-3 grid gap-2 text-sm">
           <SmallButton disabled={!props.activeTask} onClick={() => props.onQuickAction("plan")}>
             1. 规划方向
@@ -288,11 +300,10 @@ export function ProjectSidebar(props: Props) {
             </SmallButton>
           ) : null}
         </div>
-      </section>
+      </CollapsibleSection>
 
-      <section className="mt-4 rounded-3xl border border-slate-200 bg-white p-4">
-        <div className="text-sm font-medium text-slate-900">Provider 状态</div>
-        <div className="mt-3 flex flex-wrap gap-2">
+      <CollapsibleSection title="Provider 状态" collapsed={collapsed.providers} onToggle={() => toggleSection("providers")}>
+        <div className="flex flex-wrap gap-2">
           {props.config?.provider_status.map((item) => (
             <span key={`${item.role}-${item.key}`} title={item.detail || undefined}>
               <Badge tone={item.configured ? "green" : item.enabled ? "amber" : "slate"}>
@@ -304,11 +315,31 @@ export function ProjectSidebar(props: Props) {
         <div className="mt-3 space-y-2 text-sm leading-6 text-slate-600">
           <p>Discovery: {props.config?.discovery_providers.join(" / ") || "-"}</p>
           <p>Citation: {props.config?.citation_providers.join(" / ") || "-"}</p>
-          <p>GPT API Key 请在 `.env` 中填写 `RESEARCH_GPT_API_KEY`。</p>
-          <p>OpenClaw 兼容模式请按现有 `.env` 中的 `OPENCLAW_*` 配置。</p>
+          <p>GPT API Key 在 `.env` 中配置 `RESEARCH_GPT_API_KEY`。</p>
         </div>
-      </section>
+      </CollapsibleSection>
     </aside>
+  );
+}
+
+function CollapsibleSection(props: {
+  title: string;
+  subtitle?: string | null;
+  collapsed: boolean;
+  onToggle: () => void;
+  children: ReactNode;
+}) {
+  return (
+    <section className="mt-4 rounded-3xl border border-slate-200 bg-white p-4 first:mt-0">
+      <button className="flex w-full items-center justify-between gap-3 text-left" onClick={props.onToggle}>
+        <div>
+          <div className="text-sm font-medium text-slate-900">{props.title}</div>
+          {props.subtitle ? <div className="mt-0.5 line-clamp-1 text-xs text-slate-400">{props.subtitle}</div> : null}
+        </div>
+        <span className="rounded-full border border-slate-200 px-2 py-1 text-xs text-slate-500">{props.collapsed ? "展开" : "折叠"}</span>
+      </button>
+      {props.collapsed ? null : <div className="mt-3">{props.children}</div>}
+    </section>
   );
 }
 
