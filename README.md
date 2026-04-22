@@ -1,7 +1,7 @@
 <div align="center">
-  <img src="docs/design/logo.png" alt="OpenClaw for Paper Research logo" width="220" />
+  <img src="docs/design/logo.png" alt="ResearchMate logo" width="220" />
 
-  # OpenClaw for Paper Research
+  # ResearchMate
 
   **A local research workbench for papers - built for continuous exploration, not one-shot reports.**
 
@@ -19,7 +19,7 @@
 
 ## Overview
 
-`OpenClaw for Paper Research` is a **local, single-user research system** for paper exploration and literature workflows.
+`ResearchMate` is a **local, single-user research system** for paper exploration and literature workflows.
 
 It is designed around one core idea:
 

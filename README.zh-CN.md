@@ -1,7 +1,7 @@
 <div align="center">
-  <img src="docs/design/logo.png" alt="OpenClaw for Paper Research logo" width="220" />
+  <img src="docs/design/logo.png" alt="ResearchMate logo" width="220" />
 
-  # OpenClaw for Paper Research
+  # ResearchMate
 
   **一个面向论文调研的本地研究工作台，强调持续推进，而不是一次性出结果。**
 
@@ -19,7 +19,7 @@
 
 ## 项目简介
 
-`OpenClaw for Paper Research` 是一个**本地运行、单用户使用**的论文研究系统，面向持续性的文献调研与研究工作流。
+`ResearchMate` 是一个**本地运行、单用户使用**的论文研究系统，面向持续性的文献调研与研究工作流。
 
 它围绕一个核心判断展开：
 
