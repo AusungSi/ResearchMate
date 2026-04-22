@@ -157,6 +157,34 @@ def _pdf_with_overall_image_bytes() -> bytes:
     return out
 
 
+def _pdf_with_vector_overall_figure_bytes() -> bytes:
+    doc = fitz.open()
+    page = doc.new_page(width=612, height=792)
+    page.insert_text((72, 52), "Vector Figure PDF", fontsize=18)
+    page.draw_rect(fitz.Rect(92, 90, 228, 170), color=(0.15, 0.34, 0.78), fill=(0.87, 0.92, 1.0), width=1.4)
+    page.draw_rect(fitz.Rect(252, 90, 388, 170), color=(0.15, 0.34, 0.78), fill=(0.87, 0.92, 1.0), width=1.4)
+    page.draw_rect(fitz.Rect(412, 90, 548, 170), color=(0.15, 0.34, 0.78), fill=(0.87, 0.92, 1.0), width=1.4)
+    page.draw_line(fitz.Point(228, 130), fitz.Point(252, 130), color=(0.15, 0.34, 0.78), width=2.0)
+    page.draw_line(fitz.Point(388, 130), fitz.Point(412, 130), color=(0.15, 0.34, 0.78), width=2.0)
+    page.insert_text((122, 132), "Stage A", fontsize=13)
+    page.insert_text((282, 132), "Stage B", fontsize=13)
+    page.insert_text((442, 132), "Stage C", fontsize=13)
+    page.draw_rect(fitz.Rect(120, 192, 520, 258), color=(0.06, 0.53, 0.43), fill=(0.86, 0.98, 0.94), width=1.2)
+    page.insert_textbox(
+        fitz.Rect(136, 208, 500, 248),
+        "Vector-rendered workflow region that should be captured by the caption clip fallback.",
+        fontsize=11,
+    )
+    page.insert_textbox(
+        fitz.Rect(84, 272, 540, 316),
+        "Fig. 1: Overall workflow of the proposed vector-only system.",
+        fontsize=11,
+    )
+    out = doc.tobytes()
+    doc.close()
+    return out
+
+
 def test_research_local_without_jwt_supports_canvas_and_node_chat():
     settings = get_settings()
     original_profile = settings.app_profile
@@ -1045,6 +1073,80 @@ def test_paper_visual_extracts_overall_figure_and_uses_it_for_preview(tmp_path):
         assert "kind=overall" in graph_node["preview_url"]
         assert "disposition=inline" in graph_node["preview_url"]
         assert graph_node["visual_status"] == "overall_ready"
+    finally:
+        client.close()
+        db_session.close()
+        settings.app_profile = original_profile
+        settings.research_artifact_dir = original_artifact_dir
+
+
+def test_paper_visual_extracts_vector_figure_via_caption_clip_fallback(tmp_path):
+    settings = get_settings()
+    original_profile = settings.app_profile
+    original_artifact_dir = settings.research_artifact_dir
+    settings.app_profile = "research_local"
+    settings.research_artifact_dir = str(tmp_path / "artifacts")
+    client, db_session, _service = build_client()
+    try:
+        create_resp = client.post(
+            "/api/v1/research/tasks",
+            json={"topic": "vector figure task", "mode": "gpt_step", "llm_backend": "gpt", "llm_model": "gpt-test"},
+        )
+        assert create_resp.status_code == 200
+        task_json = create_resp.json()
+        task_row = ResearchTaskRepo(db_session).get_by_task_id(task_json["task_id"], user_id=1)
+        assert task_row is not None
+
+        direction = ResearchDirectionRepo(db_session).replace_for_task(
+            task_row,
+            [{"name": "Direction A", "queries": ["vector"], "exclude_terms": []}],
+        )[0]
+        paper = ResearchPaperRepo(db_session).replace_direction_papers(
+            direction,
+            [
+                {
+                    "paper_id": "paper:vector-overall",
+                    "title": "Vector Overall Figure Paper",
+                    "title_norm": "vector overall figure paper",
+                    "authors": ["Alice"],
+                    "year": 2025,
+                    "venue": "ASE",
+                    "doi": "10.1000/vector-overall",
+                    "url": "https://example.com/vector-overall",
+                    "abstract": "paper with vector-only overall workflow",
+                    "method_summary": "method",
+                    "source": "semantic_scholar",
+                }
+            ],
+        )[0]
+        round_row = ResearchRoundRepo(db_session).create(
+            task_id=task_row.id,
+            direction_index=direction.direction_index,
+            parent_round_id=None,
+            depth=1,
+            action="expand",
+            feedback_text="build vector overall preview",
+            query_terms=["vector overall figure paper"],
+            status="done",
+        )
+        ResearchRoundPaperRepo(db_session).replace_for_round(round_id=round_row.id, rows=[paper], role="seed")
+
+        upload_resp = client.post(
+            f"/api/v1/research/tasks/{task_json['task_id']}/papers/{paper.paper_id}/pdf/upload",
+            files={"file": ("vector-overall.pdf", _pdf_with_vector_overall_figure_bytes(), "application/pdf")},
+        )
+        assert upload_resp.status_code == 200
+
+        asset_resp = client.get(f"/api/v1/research/tasks/{task_json['task_id']}/papers/{paper.paper_id}/asset/meta")
+        assert asset_resp.status_code == 200
+        by_kind = {item["kind"]: item for item in asset_resp.json()["items"]}
+        assert by_kind["overall"]["status"] == "available"
+        assert by_kind["figure"]["status"] == "available"
+
+        detail_resp = client.get(f"/api/v1/research/tasks/{task_json['task_id']}/papers/{paper.paper_id}")
+        assert detail_resp.status_code == 200
+        assert detail_resp.json()["preview_kind"] == "overall"
+        assert detail_resp.json()["visual_status"] == "overall_ready"
     finally:
         client.close()
         db_session.close()
