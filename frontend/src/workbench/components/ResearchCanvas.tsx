@@ -3,6 +3,7 @@ import {
   Controls,
   MiniMap,
   ReactFlow,
+  SelectionMode,
   addEdge,
   type Connection,
   type Edge,
@@ -57,7 +58,9 @@ export function ResearchCanvas(props: {
       connectionLineStyle={{ stroke: "#64748b", strokeWidth: 2.5 }}
       onlyRenderVisibleElements
       selectionOnDrag
-      panOnDrag
+      selectionMode={SelectionMode.Partial}
+      multiSelectionKeyCode={["Meta", "Control", "Shift"]}
+      panOnDrag={[1, 2]}
       zoomOnScroll
       fitView={false}
       deleteKeyCode={["Backspace", "Delete"]}

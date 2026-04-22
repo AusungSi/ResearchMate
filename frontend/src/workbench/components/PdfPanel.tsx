@@ -1,25 +1,42 @@
 import { useRef } from "react";
-import type { FulltextItem, PaperAssetResponse } from "../types";
+import type { FulltextItem, PaperAssetItem, PaperAssetResponse } from "../types";
 import { formatDateTime } from "../utils";
 import { Badge, SectionTitle, SmallButton } from "./shared";
 
 type Props = {
   taskId: string;
   paperId: string;
-  pdfUrl: string;
+  previewUrl: string;
   assets: PaperAssetResponse | null;
   fulltextItem: FulltextItem | null;
   fulltextSummary?: Record<string, number> | null;
   busy?: boolean;
   onClose: () => void;
+  onPreviewPdf: (url: string) => void;
+  onOpenAsset?: (url: string) => void;
+  onDownloadAsset?: (url: string, filename?: string | null) => void;
   onBuildFulltext: () => void;
   onRetryFulltext: () => void;
   onUploadPdf: (file: File) => void;
   onRebuildVisual: () => void;
 };
 
+const ASSET_KIND_LABELS: Record<string, string> = {
+  overall: "Overall 图",
+  figure: "主图",
+  visual: "展示图",
+  pdf: "PDF",
+  txt: "TXT",
+  md: "Markdown",
+  bib: "BibTeX",
+};
+
 function assetByKind(assets: PaperAssetResponse | null, kind: string) {
   return assets?.items.find((item) => item.kind === kind) || null;
+}
+
+function assetPreviewUrl(item: PaperAssetItem | null) {
+  return item?.open_url || item?.download_url || "";
 }
 
 export function PdfPanel(props: Props) {
@@ -41,20 +58,20 @@ export function PdfPanel(props: Props) {
           description={
             props.fulltextItem
               ? `当前状态：${props.fulltextItem.status}`
-              : "还没有全文记录。你可以先启动全文处理，或手动上传 PDF。"
+              : "这里用于查看 PDF、全文处理状态和论文可视化资产。选中论文节点本身不会自动下载 PDF。"
           }
         />
-        <SmallButton onClick={props.onClose}>关闭</SmallButton>
+        <SmallButton onClick={props.onClose}>{props.previewUrl ? "关闭预览" : "收起预览"}</SmallButton>
       </div>
 
       <div className="grid gap-4 p-4 xl:grid-cols-[1.2fr_1fr]">
         <div className="space-y-4">
-          {props.pdfUrl ? (
-            <iframe title="pdf-preview" src={props.pdfUrl} className="h-[420px] w-full rounded-2xl border border-slate-200 bg-slate-50" />
+          {props.previewUrl ? (
+            <iframe title="pdf-preview" src={props.previewUrl} className="h-[420px] w-full rounded-2xl border border-slate-200 bg-slate-50" />
           ) : (
             <div className="rounded-2xl border border-dashed border-slate-300 bg-slate-50 p-5 text-sm leading-6 text-slate-600">
               {pdfAsset?.status === "available"
-                ? "已经找到 PDF，可以点击右侧资产卡片中的“打开”直接查看。"
+                ? "已找到 PDF。点击右侧资产卡片中的“打开”会在新标签页查看；点击“预览”则会在当前面板内展示。"
                 : "当前没有可用 PDF。你可以先执行全文处理；如果仍然缺失，再手动上传 PDF。"}
             </div>
           )}
@@ -139,33 +156,40 @@ export function PdfPanel(props: Props) {
           <div className="rounded-2xl border border-slate-200 bg-white p-4">
             <div className="text-xs font-semibold uppercase tracking-[0.16em] text-slate-400">资产</div>
             <div className="mt-3 space-y-2">
-              {[
-                { label: "Overall Figure", item: overallAsset },
-                { label: "Main Figure", item: figureAsset },
-                { label: "Paper Visual", item: visualAsset },
-                { label: "PDF", item: pdfAsset },
-                { label: "TXT", item: txtAsset },
-                { label: "Markdown", item: mdAsset },
-                { label: "BibTeX", item: bibAsset },
-              ].map(({ label, item }) => (
-                <div key={label} className="rounded-2xl border border-slate-200 bg-slate-50 p-3">
-                  <div className="flex items-center justify-between gap-3">
+              {[overallAsset, figureAsset, visualAsset, pdfAsset, txtAsset, mdAsset, bibAsset].filter(Boolean).map((item) => (
+                <div key={item?.kind} className="rounded-2xl border border-slate-200 bg-slate-50 p-3">
+                  <div className="flex items-start justify-between gap-3">
                     <div>
-                      <div className="text-sm font-medium text-slate-900">{label}</div>
+                      <div className="text-sm font-medium text-slate-900">{ASSET_KIND_LABELS[item?.kind || ""] || item?.kind}</div>
                       <div className="mt-1 text-xs text-slate-500">{item?.status === "available" ? "可访问" : item?.status || "缺失"}</div>
+                      {item?.filename ? <div className="mt-1 break-all text-xs text-slate-500">{item.filename}</div> : null}
                     </div>
-                    {item?.download_url ? (
-                      <a className="rounded-xl border border-slate-200 bg-white px-3 py-2 text-xs font-medium text-slate-700" href={item.download_url} rel="noreferrer" target="_blank">
-                        打开
-                      </a>
-                    ) : null}
+                    <div className="flex flex-wrap gap-2">
+                      {item?.kind === "pdf" && item?.open_url ? (
+                        <SmallButton onClick={() => props.onPreviewPdf(item.open_url || "")}>预览</SmallButton>
+                      ) : null}
+                      {item?.open_url ? <SmallButton onClick={() => props.onOpenAsset?.(item.open_url || "")}>打开</SmallButton> : null}
+                      {item?.download_url ? <SmallButton onClick={() => props.onDownloadAsset?.(item.download_url || "", item.filename)}>下载</SmallButton> : null}
+                    </div>
                   </div>
                 </div>
               ))}
+              {!props.assets?.items?.length ? <div className="rounded-2xl bg-slate-50 p-3 text-sm text-slate-500">当前还没有可展示资产。</div> : null}
             </div>
           </div>
         </div>
       </div>
+    </div>
+  );
+}
+
+function PreviewCard(props: { title: string; item: PaperAssetItem | null }) {
+  const previewUrl = assetPreviewUrl(props.item);
+  return (
+    <div className="rounded-2xl border border-slate-200 bg-white p-3">
+      <div className="text-sm font-medium text-slate-900">{props.title}</div>
+      <div className="mt-1 text-xs text-slate-500">{props.item?.status === "available" ? "可用" : "暂无"}</div>
+      {previewUrl ? <img src={previewUrl} alt={props.title} className="mt-3 h-40 w-full rounded-xl border border-slate-200 bg-slate-50 object-contain" /> : null}
     </div>
   );
 }

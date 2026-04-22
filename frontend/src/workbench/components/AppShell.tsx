@@ -27,7 +27,7 @@ export function AppShell(props: Props) {
         props.onResizeLeft(Math.min(460, Math.max(260, event.clientX - 16)));
         return;
       }
-      props.onResizeRight(Math.min(520, Math.max(340, window.innerWidth - event.clientX - 16)));
+      props.onResizeRight(Math.min(540, Math.max(340, window.innerWidth - event.clientX - 16)));
     }
 
     function onMouseUp() {
@@ -36,7 +36,7 @@ export function AppShell(props: Props) {
       document.body.style.userSelect = "";
     }
 
-    function handleStartResize(target: ResizeTarget) {
+    function startResize(target: ResizeTarget) {
       resizeTarget = target;
       document.body.style.cursor = "col-resize";
       document.body.style.userSelect = "none";
@@ -44,9 +44,8 @@ export function AppShell(props: Props) {
 
     const left = document.getElementById("resize-left-handle");
     const right = document.getElementById("resize-right-handle");
-
-    const onLeftMouseDown = () => handleStartResize("left");
-    const onRightMouseDown = () => handleStartResize("right");
+    const onLeftMouseDown = () => startResize("left");
+    const onRightMouseDown = () => startResize("right");
 
     left?.addEventListener("mousedown", onLeftMouseDown);
     right?.addEventListener("mousedown", onRightMouseDown);

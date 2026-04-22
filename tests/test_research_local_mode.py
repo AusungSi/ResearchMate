@@ -382,6 +382,17 @@ def test_paper_asset_meta_reports_available_and_missing_assets(tmp_path):
                 }
             ],
         )[0]
+        round_row = ResearchRoundRepo(db_session).create(
+            task_id=task_row.id,
+            direction_index=direction.direction_index,
+            parent_round_id=None,
+            depth=1,
+            action="expand",
+            feedback_text="seed paper for graph",
+            query_terms=["demo paper"],
+            status="done",
+        )
+        ResearchRoundPaperRepo(db_session).replace_for_round(round_id=round_row.id, rows=[paper], role="seed")
 
         pdf_path = tmp_path / "demo.pdf"
         txt_path = tmp_path / "demo.txt"
@@ -407,7 +418,30 @@ def test_paper_asset_meta_reports_available_and_missing_assets(tmp_path):
         assert by_kind["txt"]["status"] == "available"
         assert by_kind["md"]["status"] == "available"
         assert by_kind["bib"]["status"] == "available"
-        assert by_kind["pdf"]["download_url"].endswith("kind=pdf")
+        assert "disposition=inline" in by_kind["pdf"]["open_url"]
+        assert "kind=pdf" in by_kind["pdf"]["download_url"]
+        assert "disposition=attachment" in by_kind["pdf"]["download_url"]
+
+        inline_resp = client.get(
+            f"/api/v1/research/tasks/{task_json['task_id']}/papers/{paper.paper_id}/asset?kind=pdf&disposition=inline"
+        )
+        assert inline_resp.status_code == 200
+        assert inline_resp.headers["content-type"].startswith("application/pdf")
+        assert inline_resp.headers["content-disposition"].startswith("inline;")
+
+        detail_resp = client.get(f"/api/v1/research/tasks/{task_json['task_id']}/papers/{paper.paper_id}")
+        assert detail_resp.status_code == 200
+        detail = detail_resp.json()
+        assert detail["card_summary"]
+        assert detail["summary_source"] == "abstract"
+        assert detail["summary_status"] in {"none", "fallback", "done"}
+
+        graph_resp = client.get(f"/api/v1/research/tasks/{task_json['task_id']}/graph?view=tree&include_papers=true")
+        assert graph_resp.status_code == 200
+        graph_node = next(node for node in graph_resp.json()["nodes"] if node["id"] == paper.paper_id)
+        assert graph_node["card_summary"]
+        assert graph_node["summary_source"] == "abstract"
+        assert graph_node["summary_status"] in {"none", "fallback", "done"}
     finally:
         client.close()
         db_session.close()
@@ -537,13 +571,16 @@ def test_embodied_demo_seed_static_workspace_is_readable():
         exports_resp = client.get("/api/v1/research/tasks/demo-gpt-embodied/exports")
         assert exports_resp.status_code == 200
         assert len(exports_resp.json()["items"]) >= 2
+        assert all(item.get("filename") for item in exports_resp.json()["items"])
+        assert any(item.get("download_url") for item in exports_resp.json()["items"])
 
         asset_resp = client.get("/api/v1/research/tasks/demo-gpt-embodied/papers/paper:gpt:wm-core/asset/meta")
         assert asset_resp.status_code == 200
         asset = asset_resp.json()
-        assert asset["primary_kind"] == "visual"
+        assert asset["primary_kind"] in {"figure", "visual"}
         assert any(item["kind"] == "visual" and item["status"] == "available" for item in asset["items"])
         assert any(item["kind"] == "txt" and item["status"] == "available" for item in asset["items"])
+        assert any(item["kind"] == "visual" and item.get("open_url") for item in asset["items"])
 
         events_resp = client.get("/api/v1/research/tasks/demo-auto-embodied/runs/run-demo-embodied-auto/events")
         assert events_resp.status_code == 200
@@ -724,15 +761,23 @@ def test_local_zotero_csljson_import_dedupes_and_exports_collection(tmp_path):
 
         export_bib = client.get(f"/api/v1/research/collections/{collection_id}/export?format=bib")
         assert export_bib.status_code == 200
+        assert export_bib.json()["filename"].endswith(".bib")
+        assert export_bib.json()["download_url"]
         bib_path = Path(export_bib.json()["path"])
         assert bib_path.exists()
         assert "World Models for Embodied Agents" in bib_path.read_text(encoding="utf-8")
+        download_bib = client.get(export_bib.json()["download_url"])
+        assert download_bib.status_code == 200
 
         export_csljson = client.get(f"/api/v1/research/collections/{collection_id}/export?format=csljson")
         assert export_csljson.status_code == 200
+        assert export_csljson.json()["filename"].endswith(".csljson")
+        assert export_csljson.json()["download_url"]
         csljson_path = Path(export_csljson.json()["path"])
         assert csljson_path.exists()
         assert '"title": "World Models for Embodied Agents"' in csljson_path.read_text(encoding="utf-8")
+        download_csljson = client.get(export_csljson.json()["download_url"])
+        assert download_csljson.status_code == 200
 
         export_history = client.get(f"/api/v1/research/collections/{collection_id}/exports")
         assert export_history.status_code == 200
@@ -741,7 +786,10 @@ def test_local_zotero_csljson_import_dedupes_and_exports_collection(tmp_path):
         assert len(history_body["items"]) == 2
         assert history_body["items"][0]["collection_id"] == collection_id
         assert history_body["items"][0]["format"] == "csljson"
+        assert history_body["items"][0]["filename"].endswith(".csljson")
+        assert history_body["items"][0]["download_url"]
         assert history_body["items"][1]["format"] == "bib"
+        assert history_body["items"][1]["filename"].endswith(".bib")
     finally:
         client.close()
         db_session.close()
@@ -813,11 +861,16 @@ def test_local_zotero_bibtex_import_and_task_csljson_export(tmp_path):
 
         export_resp = client.get(f"/api/v1/research/tasks/{task_resp.json()['task_id']}/export?format=csljson")
         assert export_resp.status_code == 200
+        assert export_resp.json()["filename"].endswith(".csljson")
+        assert export_resp.json()["download_url"]
         export_path = Path(export_resp.json()["path"])
         assert export_path.exists()
         export_text = export_path.read_text(encoding="utf-8")
         assert '"title": "Exported CSL JSON Paper"' in export_text
         assert '"DOI": "10.1000/export-csl"' in export_text
+
+        download_resp = client.get(export_resp.json()["download_url"])
+        assert download_resp.status_code == 200
     finally:
         client.close()
         db_session.close()
@@ -885,7 +938,8 @@ def test_paper_visual_extracts_primary_figure_and_exposes_graph_preview(tmp_path
         assert asset_resp.status_code == 200
         by_kind = {item["kind"]: item for item in asset_resp.json()["items"]}
         assert by_kind["figure"]["status"] == "available"
-        assert by_kind["figure"]["download_url"].endswith("kind=figure")
+        assert "kind=figure" in by_kind["figure"]["download_url"]
+        assert "disposition=attachment" in by_kind["figure"]["download_url"]
         assert by_kind["figure"]["mime_type"] == "image/png"
         assert by_kind["visual"]["status"] == "available"
 
@@ -897,7 +951,8 @@ def test_paper_visual_extracts_primary_figure_and_exposes_graph_preview(tmp_path
         assert graph_resp.status_code == 200
         graph_node = next(node for node in graph_resp.json()["nodes"] if node["id"] == paper.paper_id)
         assert graph_node["preview_kind"] == "figure"
-        assert graph_node["preview_url"].endswith("kind=figure")
+        assert "kind=figure" in graph_node["preview_url"]
+        assert "disposition=inline" in graph_node["preview_url"]
         assert graph_node["visual_status"] == "figure_ready"
     finally:
         client.close()
@@ -967,7 +1022,8 @@ def test_paper_visual_extracts_overall_figure_and_uses_it_for_preview(tmp_path):
         assert asset_resp.status_code == 200
         by_kind = {item["kind"]: item for item in asset_resp.json()["items"]}
         assert by_kind["overall"]["status"] == "available"
-        assert by_kind["overall"]["download_url"].endswith("kind=overall")
+        assert "kind=overall" in by_kind["overall"]["download_url"]
+        assert "disposition=attachment" in by_kind["overall"]["download_url"]
         assert by_kind["figure"]["status"] == "available"
 
         overall_resp = client.get(f"/api/v1/research/tasks/{task_json['task_id']}/papers/{paper.paper_id}/asset?kind=overall")
@@ -977,14 +1033,16 @@ def test_paper_visual_extracts_overall_figure_and_uses_it_for_preview(tmp_path):
         detail_resp = client.get(f"/api/v1/research/tasks/{task_json['task_id']}/papers/{paper.paper_id}")
         assert detail_resp.status_code == 200
         assert detail_resp.json()["preview_kind"] == "overall"
-        assert detail_resp.json()["preview_url"].endswith("kind=overall")
+        assert "kind=overall" in detail_resp.json()["preview_url"]
+        assert "disposition=inline" in detail_resp.json()["preview_url"]
         assert detail_resp.json()["visual_status"] == "overall_ready"
 
         graph_resp = client.get(f"/api/v1/research/tasks/{task_json['task_id']}/graph?view=tree&include_papers=true")
         assert graph_resp.status_code == 200
         graph_node = next(node for node in graph_resp.json()["nodes"] if node["id"] == paper.paper_id)
         assert graph_node["preview_kind"] == "overall"
-        assert graph_node["preview_url"].endswith("kind=overall")
+        assert "kind=overall" in graph_node["preview_url"]
+        assert "disposition=inline" in graph_node["preview_url"]
         assert graph_node["visual_status"] == "overall_ready"
     finally:
         client.close()
@@ -1067,7 +1125,8 @@ def test_paper_visual_falls_back_to_template_and_manual_rebuild_is_idempotent(tm
         assert graph_resp.status_code == 200
         graph_node = next(node for node in graph_resp.json()["nodes"] if node["id"] == paper.paper_id)
         assert graph_node["preview_kind"] == "visual"
-        assert graph_node["preview_url"].endswith("kind=visual")
+        assert "kind=visual" in graph_node["preview_url"]
+        assert "disposition=inline" in graph_node["preview_url"]
         assert graph_node["visual_status"] == "visual_ready"
     finally:
         client.close()

@@ -3,7 +3,7 @@ import { buildCanvasPayload, defaultCanvasUi, mergeCanvasWithGraph } from "./uti
 import type { CanvasResponse, GraphResponse, RunEvent } from "./types";
 
 describe("mergeCanvasWithGraph", () => {
-  it("keeps manual canvas nodes and adds OpenClaw checkpoint/report nodes from events", () => {
+  it("keeps manual canvas nodes and ignores transient event-only nodes when canonical graph already exists", () => {
     const graph: GraphResponse = {
       task_id: "R-1",
       status: "done",
@@ -56,9 +56,9 @@ describe("mergeCanvasWithGraph", () => {
 
     expect(merged.nodes.some((node) => node.id === "topic:R-1")).toBe(true);
     expect(merged.nodes.some((node) => node.id === "note:test" && node.data?.isManual)).toBe(true);
-    expect(merged.nodes.some((node) => node.id === "checkpoint:ckpt-1")).toBe(true);
-    expect(merged.nodes.some((node) => node.id === "report:run-1")).toBe(true);
-    expect(merged.edges.some((edge) => edge.source === "topic:R-1" && edge.target === "checkpoint:ckpt-1")).toBe(true);
+    expect(merged.nodes.some((node) => node.id === "checkpoint:ckpt-1")).toBe(false);
+    expect(merged.nodes.some((node) => node.id === "report:run-1")).toBe(false);
+    expect(merged.edges.some((edge) => edge.source === "topic:R-1" && edge.target === "checkpoint:ckpt-1")).toBe(false);
     expect(merged.viewport.zoom).toBe(1.2);
     expect(merged.ui.layout_mode).toBe("elk_layered");
   });

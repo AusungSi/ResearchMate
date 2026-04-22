@@ -1,7 +1,8 @@
 import { useMemo, useState } from "react";
+import { autoStatusLabel, eventTypeLabel, formatRunState, stepLabel } from "../display";
 import type { RunEvent, RunSummary, TaskMode } from "../types";
-import { autoStatusLabel, eventTypeLabel, formatDateTime, formatRunState, stepLabel } from "../utils";
-import { Badge, SectionTitle, SmallButton } from "./shared";
+import { formatDateTime } from "../utils";
+import { Badge, MarkdownText, SectionTitle, SmallButton } from "./shared";
 
 type Props = {
   mode: TaskMode;
@@ -33,7 +34,7 @@ export function RunTimeline(props: Props) {
               继续自动研究
             </SmallButton>
           ) : null}
-          {props.mode === "openclaw_auto" && props.runId ? <SmallButton onClick={props.onCancel}>停在这里</SmallButton> : null}
+          {props.mode === "openclaw_auto" && props.runId ? <SmallButton onClick={props.onCancel}>停止本次运行</SmallButton> : null}
         </div>
       </div>
 
@@ -46,7 +47,7 @@ export function RunTimeline(props: Props) {
       </div>
 
       {props.mode === "openclaw_auto" && props.autoStatus === "awaiting_guidance" ? (
-        <div className="mt-3 rounded-2xl border border-blue-200 bg-blue-50 p-3 text-sm text-blue-700">系统已经到达 checkpoint，正在等待你的引导再继续。</div>
+        <div className="mt-3 rounded-2xl border border-blue-200 bg-blue-50 p-3 text-sm text-blue-700">系统已经到达 checkpoint，正在等待你的 guidance 后继续。</div>
       ) : null}
       {props.error ? <div className="mt-3 rounded-2xl border border-rose-200 bg-rose-50 p-3 text-sm text-rose-700">{props.error}</div> : null}
 
@@ -54,7 +55,7 @@ export function RunTimeline(props: Props) {
         <div className="mt-3 rounded-2xl border border-slate-200 bg-slate-50 p-3">
           <textarea
             className="h-20 w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm outline-none"
-            placeholder="在这里输入 checkpoint 引导，例如：优先扩展 citation graph，并补充高质量全文证据。"
+            placeholder="在这里输入 checkpoint guidance，例如：优先扩展 citation graph，并补充高质量全文证据。"
             value={guidance}
             onChange={(event) => setGuidance(event.target.value)}
           />
@@ -68,7 +69,7 @@ export function RunTimeline(props: Props) {
                 setGuidance("");
               }}
             >
-              提交引导
+              提交 guidance
             </SmallButton>
           </div>
         </div>
@@ -87,7 +88,7 @@ export function RunTimeline(props: Props) {
           {props.summary?.latest_report_excerpt ? (
             <div className="rounded-2xl border border-violet-200 bg-violet-50 p-4">
               <div className="text-xs font-semibold uppercase tracking-[0.16em] text-violet-500">阶段报告</div>
-              <div className="mt-2 whitespace-pre-wrap text-sm leading-6 text-slate-700">{props.summary.latest_report_excerpt}</div>
+              <MarkdownText className="prose prose-sm mt-2 max-w-none text-sm leading-6 text-slate-700 prose-p:my-2 prose-li:my-1" text={props.summary.latest_report_excerpt} />
             </div>
           ) : null}
 
@@ -152,7 +153,7 @@ export function RunTimeline(props: Props) {
                     <span>{eventTypeLabel(event.event_type, event.payload)}</span>
                     <span>{formatDateTime(event.created_at)}</span>
                   </div>
-                  <div className="mt-2 whitespace-pre-wrap text-sm leading-6 text-slate-700">{describeEvent(event)}</div>
+                  <MarkdownText className="prose prose-sm mt-2 max-w-none text-sm leading-6 text-slate-700 prose-p:my-2 prose-li:my-1" text={describeEvent(event)} />
                 </div>
               ))}
             </div>
@@ -160,7 +161,7 @@ export function RunTimeline(props: Props) {
         ))}
         {!groups.length ? (
           <div className="rounded-2xl bg-slate-50 p-3 text-sm text-slate-500">
-            {props.mode === "openclaw_auto" ? "启动自动研究后，这里会看到阶段进度、checkpoint 和阶段报告。" : "执行 GPT Step 动作后，这里会持续沉淀步骤记录。"}
+            {props.mode === "openclaw_auto" ? "启动自动研究后，这里会按阶段展示进度、checkpoint 和报告。" : "执行 GPT Step 动作后，这里会持续沉淀步骤记录。"}
           </div>
         ) : null}
       </div>
@@ -171,7 +172,7 @@ export function RunTimeline(props: Props) {
 function formatPhaseLabel(key: string, label: string) {
   const phaseLabels: Record<string, string> = {
     report: "阶段报告",
-    artifact: "产出物",
+    artifact: "产物",
     graph_sync: "图谱同步",
     checkpoint: "Checkpoint",
   };

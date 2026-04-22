@@ -3,12 +3,20 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
+
+os.environ.setdefault("APP_PROFILE", "research_local")
+os.environ.setdefault("RESEARCH_ENABLED", "true")
+os.environ.setdefault("RESEARCH_QUEUE_MODE", "worker")
+os.environ.setdefault("DB_URL", "sqlite:///./data/memomate.db")
+os.environ.setdefault("RESEARCH_ARTIFACT_DIR", "./artifacts/research")
+os.environ.setdefault("RESEARCH_SAVE_BASE_DIR", "./artifacts/research/saved")
 
 from app.core.config import get_settings
 from app.demo.embodied_ai_seed import seed_embodied_ai_demo
@@ -20,6 +28,7 @@ from app.services.research_service import ResearchService
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Seed a static Embodied AI demo workspace into the local research database.")
     parser.add_argument("--json-out", default="", help="Optional path to write the JSON summary.")
+    parser.add_argument("--refresh", action="store_true", help="Rebuild the demo workspace even if it already exists.")
     return parser.parse_args()
 
 
@@ -35,7 +44,13 @@ def main() -> int:
             locale=settings.research_local_user_locale,
         )
         service = ResearchService()
-        summary = seed_embodied_ai_demo(db, user_id=int(user.id), service=service, root_dir=ROOT)
+        summary = seed_embodied_ai_demo(
+            db,
+            user_id=int(user.id),
+            service=service,
+            root_dir=ROOT,
+            refresh=args.refresh,
+        )
 
     payload = {
         **summary,

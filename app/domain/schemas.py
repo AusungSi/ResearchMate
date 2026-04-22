@@ -399,6 +399,8 @@ class ResearchExportRecordResponse(BaseModel):
     project_id: str | None = None
     format: str
     output_path: str | None = None
+    filename: str | None = None
+    download_url: str | None = None
     status: str
     error: str | None = None
     created_at: datetime
@@ -577,19 +579,26 @@ class ResearchTaskPlanResponse(BaseModel):
     task_id: str
     status: str
     queued: bool = True
+    noop_reason: str | None = None
+    message: str | None = None
 
 
 class ResearchTaskSearchEnqueueResponse(BaseModel):
     task_id: str
     status: str
     direction_index: int
+    queued: bool = True
     force_refresh: bool = False
+    noop_reason: str | None = None
+    message: str | None = None
 
 
 class ResearchFulltextBuildResponse(BaseModel):
     task_id: str
     status: str
     queued: bool = True
+    noop_reason: str | None = None
+    message: str | None = None
 
 
 class ResearchFulltextItem(BaseModel):
@@ -630,6 +639,8 @@ class ResearchGraphBuildResponse(BaseModel):
     direction_index: int | None = None
     round_id: int | None = None
     view: str = "citation"
+    noop_reason: str | None = None
+    message: str | None = None
 
 
 class ResearchGraphNode(BaseModel):
@@ -639,6 +650,7 @@ class ResearchGraphNode(BaseModel):
     year: int | None = None
     source: str | None = None
     direction_index: int | None = None
+    papers_count: int | None = None
     score: float | None = None
     fulltext_status: str | None = None
     depth: int | None = None
@@ -650,6 +662,10 @@ class ResearchGraphNode(BaseModel):
     url: str | None = None
     abstract: str | None = None
     method_summary: str | None = None
+    summary: str | None = None
+    card_summary: str | None = None
+    summary_source: str | None = None
+    summary_status: str | None = None
     authors: list[str] = Field(default_factory=list)
     feedback_text: str | None = None
     preview_kind: str | None = None
@@ -706,6 +722,8 @@ class ResearchExploreStartResponse(BaseModel):
     round_id: int
     status: str
     queued: bool = True
+    noop_reason: str | None = None
+    message: str | None = None
 
 
 class ResearchRoundCandidateItem(BaseModel):
@@ -741,6 +759,8 @@ class ResearchRoundSelectResponse(BaseModel):
     child_round_id: int
     status: str
     queued: bool = True
+    noop_reason: str | None = None
+    message: str | None = None
 
 
 class ResearchRoundNextRequest(BaseModel):
@@ -755,6 +775,8 @@ class ResearchRoundNextResponse(BaseModel):
     child_round_id: int
     status: str
     queued: bool = True
+    noop_reason: str | None = None
+    message: str | None = None
 
 
 class ResearchExploreTreeResponse(BaseModel):
@@ -945,6 +967,7 @@ class ResearchPaperAssetItem(BaseModel):
     status: str
     filename: str | None = None
     path: str | None = None
+    open_url: str | None = None
     download_url: str | None = None
     mime_type: str | None = None
     width: int | None = None
@@ -980,8 +1003,8 @@ class ResearchNodeChatItem(BaseModel):
 class ResearchNodeChatResponse(BaseModel):
     task_id: str
     node_id: str
-    thread_id: str
-    item: ResearchNodeChatItem
+    thread_id: str | None = None
+    item: ResearchNodeChatItem | None = None
     history: list[ResearchNodeChatItem] = Field(default_factory=list)
 
 
@@ -990,6 +1013,8 @@ class ResearchAutoRunResponse(BaseModel):
     run_id: str
     auto_status: str
     queued: bool = True
+    noop_reason: str | None = None
+    message: str | None = None
 
 
 class ResearchRunGuidanceRequest(BaseModel):
@@ -1002,6 +1027,7 @@ class ResearchRunGuidanceResponse(BaseModel):
     run_id: str
     auto_status: str
     accepted: bool = True
+    message: str | None = None
 
 
 class ResearchRunControlResponse(BaseModel):
@@ -1009,6 +1035,7 @@ class ResearchRunControlResponse(BaseModel):
     run_id: str
     auto_status: str
     queued: bool = False
+    message: str | None = None
 
 
 class ResearchSearchResponse(BaseModel):
@@ -1025,6 +1052,8 @@ class ResearchExportResponse(BaseModel):
     collection_id: str | None = None
     format: str
     path: str
+    filename: str | None = None
+    download_url: str | None = None
 
 
 class ResearchPaperSaveRequest(BaseModel):
@@ -1073,6 +1102,9 @@ class ResearchPaperDetailResponse(BaseModel):
     url: str | None = None
     abstract: str | None = None
     method_summary: str = ""
+    card_summary: str | None = None
+    summary_source: str | None = None
+    summary_status: str | None = None
     source: str
     fulltext_status: str | None = None
     saved: bool = False

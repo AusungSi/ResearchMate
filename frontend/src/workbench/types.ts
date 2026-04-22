@@ -19,6 +19,8 @@ export type ExportRecord = {
   project_id?: string | null;
   format: string;
   output_path?: string | null;
+  filename?: string | null;
+  download_url?: string | null;
   status: string;
   error?: string | null;
   created_at: string;
@@ -28,6 +30,12 @@ export type ExportListResponse = {
   task_id?: string | null;
   collection_id?: string | null;
   items: ExportRecord[];
+};
+
+export type ExportResponse = {
+  path?: string | null;
+  filename?: string | null;
+  download_url?: string | null;
 };
 
 export type ProjectRecentRun = {
@@ -160,7 +168,11 @@ export type GraphNode = {
   venue?: string | null;
   abstract?: string | null;
   method_summary?: string | null;
+  card_summary?: string | null;
+  summary_source?: string | null;
+  summary_status?: string | null;
   direction_index?: number | null;
+  papers_count?: number | null;
   status?: string | null;
   feedback_text?: string | null;
   summary?: string | null;
@@ -284,8 +296,8 @@ export type ChatItem = {
 export type ChatResponse = {
   task_id: string;
   node_id: string;
-  thread_id: string;
-  item: ChatItem;
+  thread_id?: string | null;
+  item?: ChatItem | null;
   history: ChatItem[];
 };
 
@@ -308,6 +320,9 @@ export type PaperDetail = {
   url?: string | null;
   abstract?: string | null;
   method_summary: string;
+  card_summary?: string | null;
+  summary_source?: string | null;
+  summary_status?: string | null;
   source: string;
   fulltext_status?: string | null;
   saved: boolean;
@@ -329,6 +344,7 @@ export type PaperAssetItem = {
   status: string;
   filename?: string | null;
   path?: string | null;
+  open_url?: string | null;
   download_url?: string | null;
   mime_type?: string | null;
   width?: number | null;
@@ -341,6 +357,13 @@ export type PaperAssetResponse = {
   paper_id: string;
   primary_kind?: string | null;
   items: PaperAssetItem[];
+};
+
+export type ActionResponse = {
+  queued?: boolean;
+  noop_reason?: string | null;
+  message?: string | null;
+  run_id?: string | null;
 };
 
 export type FulltextItem = {

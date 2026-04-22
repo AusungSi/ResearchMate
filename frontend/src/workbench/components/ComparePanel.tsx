@@ -1,6 +1,6 @@
 import type { CompareReport } from "../types";
 import { formatDateTime } from "../utils";
-import { SectionTitle, SmallButton } from "./shared";
+import { MarkdownText, SectionTitle, SmallButton } from "./shared";
 
 type Props = {
   report: CompareReport | null;
@@ -23,7 +23,10 @@ export function ComparePanel(props: Props) {
         </div>
       </div>
 
-      <div className="mt-3 rounded-2xl border border-slate-200 bg-slate-50 p-3 text-sm leading-6 text-slate-700">{props.report.overview}</div>
+      <MarkdownText
+        className="prose prose-sm mt-3 max-w-none rounded-2xl border border-slate-200 bg-slate-50 p-3 text-sm leading-6 text-slate-700 prose-p:my-2 prose-li:my-1"
+        text={props.report.overview}
+      />
 
       <CompareList title="共同点" items={props.report.common_points} />
       <CompareList title="差异点" items={props.report.differences} />

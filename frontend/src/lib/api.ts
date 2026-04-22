@@ -9,7 +9,14 @@ export async function apiFetch<T>(path: string, init?: RequestInit): Promise<T> 
   });
   if (!response.ok) {
     const message = await response.text();
-    throw new Error(message || `request failed: ${response.status}`);
+    let displayMessage = message;
+    try {
+      const parsed = JSON.parse(message) as { detail?: string; message?: string };
+      displayMessage = parsed.detail || parsed.message || message;
+    } catch {
+      displayMessage = message;
+    }
+    throw new Error(displayMessage || `request failed: ${response.status}`);
   }
   if (response.status === 204) {
     return undefined as T;
