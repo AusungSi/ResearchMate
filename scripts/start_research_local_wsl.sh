@@ -61,7 +61,7 @@ start_process() {
   fi
 
   : >"$log_file"
-  nohup "$@" >"$log_file" 2>&1 &
+  setsid "$@" >"$log_file" 2>&1 < /dev/null &
   local pid="$!"
   sleep 2
   if pid_matches_pattern "$pid" "$pattern"; then

@@ -6,7 +6,7 @@
     "allowSyntheticDefaultImports": true,
     "skipLibCheck": true,
     "lib": ["ES2020"],
-    "types": ["node"]
+    "types": ["node", "vitest/config"]
   },
   "include": ["vite.config.ts", "tailwind.config.ts"]
 }

@@ -1509,6 +1509,8 @@ class ResearchService:
             candidates = [fulltext.pdf_path if fulltext else None]
         elif kind_norm in {"txt", "fulltext"}:
             candidates = [fulltext.text_path if fulltext else None]
+        elif kind_norm == "overall":
+            candidates = [self._paper_visual_assets(task=task, paper=paper, fulltext=fulltext).get("overall", {}).get("path")]
         elif kind_norm == "figure":
             candidates = [self._paper_visual_assets(task=task, paper=paper, fulltext=fulltext).get("figure", {}).get("path")]
         elif kind_norm == "visual":
@@ -1519,6 +1521,7 @@ class ResearchService:
             candidates = [paper.saved_bib_path]
         else:
             candidates = [
+                self._paper_visual_assets(task=task, paper=paper, fulltext=fulltext).get("overall", {}).get("path"),
                 self._paper_visual_assets(task=task, paper=paper, fulltext=fulltext).get("figure", {}).get("path"),
                 self._paper_visual_assets(task=task, paper=paper, fulltext=fulltext).get("visual", {}).get("path"),
                 fulltext.pdf_path if fulltext else None,
@@ -1547,6 +1550,7 @@ class ResearchService:
         items = []
         visual_assets = self._paper_visual_assets(task=task, paper=paper, fulltext=fulltext)
         static_assets = {
+            "overall": visual_assets.get("overall"),
             "figure": visual_assets.get("figure"),
             "visual": visual_assets.get("visual"),
             "pdf": self._basic_asset_metadata(kind="pdf", path_value=fulltext.pdf_path if fulltext else None),
@@ -1554,7 +1558,7 @@ class ResearchService:
             "md": self._basic_asset_metadata(kind="md", path_value=paper.saved_path),
             "bib": self._basic_asset_metadata(kind="bib", path_value=paper.saved_bib_path),
         }
-        for kind in ("figure", "visual", "pdf", "txt", "md", "bib"):
+        for kind in ("overall", "figure", "visual", "pdf", "txt", "md", "bib"):
             item = static_assets.get(kind) or {"kind": kind, "status": "missing"}
             exists = item.get("status") == "available"
             items.append(
@@ -1910,14 +1914,19 @@ class ResearchService:
         preview_kind = None
         preview_url = None
         visual_status = "missing"
-        for kind in ("figure", "visual"):
+        for kind in ("overall", "figure", "visual"):
             item = assets.get(kind)
             if item and item.get("status") == "available":
                 preview_kind = kind
                 preview_url = (
                     f"/api/v1/research/tasks/{quote_plus(task.task_id)}/papers/{quote_plus(_paper_token(paper))}/asset?kind={kind}"
                 )
-                visual_status = "figure_ready" if kind == "figure" else "visual_ready"
+                if kind == "overall":
+                    visual_status = "overall_ready"
+                elif kind == "figure":
+                    visual_status = "figure_ready"
+                else:
+                    visual_status = "visual_ready"
                 break
         if preview_kind is None and fulltext and fulltext.pdf_path and Path(fulltext.pdf_path).exists():
             visual_status = "needs_build"

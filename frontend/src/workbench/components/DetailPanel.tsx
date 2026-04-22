@@ -36,6 +36,12 @@ function assetByKind(assets: PaperAssetResponse | null, kind: string) {
   return assets?.items.find((item) => item.kind === kind && item.status === "available") || null;
 }
 
+function previewKindLabel(kind?: string | null) {
+  if (kind === "overall") return "Overall 图预览";
+  if (kind === "figure") return "主图预览";
+  return "展示图预览";
+}
+
 function PreviewBox(props: { title: string; url?: string | null; emptyText: string }) {
   if (!props.url) {
     return <div className="rounded-2xl border border-dashed border-slate-200 bg-slate-50 p-4 text-sm text-slate-500">{props.emptyText}</div>;
@@ -55,11 +61,12 @@ export function DetailPanel(props: Props) {
   const nodeData = node?.data || null;
   const directionIndex = typeof nodeData?.direction_index === "number" ? nodeData.direction_index : null;
   const roundId = inferRoundId(node?.id || "", nodeData || undefined);
-  const isPaper = isPaperNode(node?.id);
+  const isPaper = isPaperNode(node?.id, nodeData || undefined);
   const pdfAsset = useMemo(() => assetByKind(props.paperAssets, "pdf"), [props.paperAssets]);
+  const overallAsset = useMemo(() => assetByKind(props.paperAssets, "overall"), [props.paperAssets]);
   const figureAsset = useMemo(() => assetByKind(props.paperAssets, "figure"), [props.paperAssets]);
   const visualAsset = useMemo(() => assetByKind(props.paperAssets, "visual"), [props.paperAssets]);
-  const preferredPreviewUrl = figureAsset?.download_url || visualAsset?.download_url || props.paperDetail?.preview_url || null;
+  const preferredPreviewUrl = overallAsset?.download_url || figureAsset?.download_url || visualAsset?.download_url || props.paperDetail?.preview_url || null;
 
   useEffect(() => {
     setFeedback("");
@@ -87,7 +94,7 @@ export function DetailPanel(props: Props) {
           {isPaper && props.paperDetail?.year ? <Badge tone="amber">{String(props.paperDetail.year)}</Badge> : null}
           {props.paperDetail?.venue ? <Badge tone="blue">{props.paperDetail.venue}</Badge> : null}
           {props.paperDetail?.preview_kind ? (
-            <Badge tone="violet">{props.paperDetail.preview_kind === "figure" ? "主图预览" : "展示图预览"}</Badge>
+            <Badge tone="violet">{previewKindLabel(props.paperDetail.preview_kind)}</Badge>
           ) : null}
         </div>
       ) : null}
@@ -204,10 +211,14 @@ export function DetailPanel(props: Props) {
             <div className="text-xs font-semibold uppercase tracking-[0.16em] text-slate-400">Paper Visual</div>
             <div className="mt-3 space-y-3">
               <div>
-                <div className="mb-2 text-sm font-medium text-slate-900">主图 / 展示图预览</div>
+                <div className="mb-2 text-sm font-medium text-slate-900">Overall / 主图 / 展示图预览</div>
                 <PreviewBox title={props.paperDetail?.title || "paper preview"} url={preferredPreviewUrl} emptyText="当前还没有可展示图片。若论文已有 PDF，可以点击“重建展示图”尝试生成。" />
               </div>
-              <div className="grid gap-3 md:grid-cols-2">
+              <div className="grid gap-3 md:grid-cols-3">
+                <div className="rounded-2xl border border-slate-200 bg-slate-50 p-3">
+                  <div className="text-sm font-medium text-slate-900">Overall Figure</div>
+                  <div className="mt-1 text-xs text-slate-500">{overallAsset ? "已提取 overall 图" : "未识别到 overall 图"}</div>
+                </div>
                 <div className="rounded-2xl border border-slate-200 bg-slate-50 p-3">
                   <div className="text-sm font-medium text-slate-900">Main Figure</div>
                   <div className="mt-1 text-xs text-slate-500">{figureAsset ? "已提取主图" : "未提取到主图"}</div>

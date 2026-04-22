@@ -135,6 +135,27 @@ def _pdf_without_image_bytes() -> bytes:
     return out
 
 
+def _pdf_with_overall_image_bytes() -> bytes:
+    doc = fitz.open()
+    page = doc.new_page(width=612, height=792)
+    page.insert_text((72, 52), "Overall Figure PDF", fontsize=18)
+    page.insert_image(fitz.Rect(72, 96, 500, 260), stream=_png_bytes(width=260, height=140, color=(46, 109, 246)))
+    page.insert_textbox(
+        fitz.Rect(72, 270, 520, 315),
+        "Figure 1. Overall framework of the proposed system.",
+        fontsize=11,
+    )
+    page.insert_image(fitz.Rect(72, 360, 552, 660), stream=_png_bytes(width=340, height=220, color=(16, 185, 129)))
+    page.insert_textbox(
+        fitz.Rect(72, 670, 560, 725),
+        "Figure 2. Quantitative results across evaluation splits.",
+        fontsize=11,
+    )
+    out = doc.tobytes()
+    doc.close()
+    return out
+
+
 def test_research_local_without_jwt_supports_canvas_and_node_chat():
     settings = get_settings()
     original_profile = settings.app_profile
@@ -878,6 +899,93 @@ def test_paper_visual_extracts_primary_figure_and_exposes_graph_preview(tmp_path
         assert graph_node["preview_kind"] == "figure"
         assert graph_node["preview_url"].endswith("kind=figure")
         assert graph_node["visual_status"] == "figure_ready"
+    finally:
+        client.close()
+        db_session.close()
+        settings.app_profile = original_profile
+        settings.research_artifact_dir = original_artifact_dir
+
+
+def test_paper_visual_extracts_overall_figure_and_uses_it_for_preview(tmp_path):
+    settings = get_settings()
+    original_profile = settings.app_profile
+    original_artifact_dir = settings.research_artifact_dir
+    settings.app_profile = "research_local"
+    settings.research_artifact_dir = str(tmp_path / "artifacts")
+    client, db_session, _service = build_client()
+    try:
+        create_resp = client.post(
+            "/api/v1/research/tasks",
+            json={"topic": "visual overall task", "mode": "gpt_step", "llm_backend": "gpt", "llm_model": "gpt-test"},
+        )
+        assert create_resp.status_code == 200
+        task_json = create_resp.json()
+        task_row = ResearchTaskRepo(db_session).get_by_task_id(task_json["task_id"], user_id=1)
+        assert task_row is not None
+
+        direction = ResearchDirectionRepo(db_session).replace_for_task(
+            task_row,
+            [{"name": "Direction A", "queries": ["overall"], "exclude_terms": []}],
+        )[0]
+        paper = ResearchPaperRepo(db_session).replace_direction_papers(
+            direction,
+            [
+                {
+                    "paper_id": "paper:visual-overall",
+                    "title": "Overall Figure Paper",
+                    "title_norm": "overall figure paper",
+                    "authors": ["Alice"],
+                    "year": 2025,
+                    "venue": "NeurIPS",
+                    "doi": "10.1000/overall-figure",
+                    "url": "https://example.com/overall-figure",
+                    "abstract": "paper with overview and detail figures",
+                    "method_summary": "method",
+                    "source": "semantic_scholar",
+                }
+            ],
+        )[0]
+        round_row = ResearchRoundRepo(db_session).create(
+            task_id=task_row.id,
+            direction_index=direction.direction_index,
+            parent_round_id=None,
+            depth=1,
+            action="expand",
+            feedback_text="build overall preview",
+            query_terms=["overall figure paper"],
+            status="done",
+        )
+        ResearchRoundPaperRepo(db_session).replace_for_round(round_id=round_row.id, rows=[paper], role="seed")
+
+        upload_resp = client.post(
+            f"/api/v1/research/tasks/{task_json['task_id']}/papers/{paper.paper_id}/pdf/upload",
+            files={"file": ("overall-figure.pdf", _pdf_with_overall_image_bytes(), "application/pdf")},
+        )
+        assert upload_resp.status_code == 200
+
+        asset_resp = client.get(f"/api/v1/research/tasks/{task_json['task_id']}/papers/{paper.paper_id}/asset/meta")
+        assert asset_resp.status_code == 200
+        by_kind = {item["kind"]: item for item in asset_resp.json()["items"]}
+        assert by_kind["overall"]["status"] == "available"
+        assert by_kind["overall"]["download_url"].endswith("kind=overall")
+        assert by_kind["figure"]["status"] == "available"
+
+        overall_resp = client.get(f"/api/v1/research/tasks/{task_json['task_id']}/papers/{paper.paper_id}/asset?kind=overall")
+        assert overall_resp.status_code == 200
+        assert overall_resp.headers["content-type"].startswith("image/png")
+
+        detail_resp = client.get(f"/api/v1/research/tasks/{task_json['task_id']}/papers/{paper.paper_id}")
+        assert detail_resp.status_code == 200
+        assert detail_resp.json()["preview_kind"] == "overall"
+        assert detail_resp.json()["preview_url"].endswith("kind=overall")
+        assert detail_resp.json()["visual_status"] == "overall_ready"
+
+        graph_resp = client.get(f"/api/v1/research/tasks/{task_json['task_id']}/graph?view=tree&include_papers=true")
+        assert graph_resp.status_code == 200
+        graph_node = next(node for node in graph_resp.json()["nodes"] if node["id"] == paper.paper_id)
+        assert graph_node["preview_kind"] == "overall"
+        assert graph_node["preview_url"].endswith("kind=overall")
+        assert graph_node["visual_status"] == "overall_ready"
     finally:
         client.close()
         db_session.close()

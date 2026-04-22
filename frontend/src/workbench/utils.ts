@@ -470,8 +470,8 @@ export function inferRoundId(nodeId: string, data?: Partial<FlowNodeData> | null
   return null;
 }
 
-export function isPaperNode(nodeId?: string) {
-  return Boolean(nodeId && nodeId.startsWith("paper:"));
+export function isPaperNode(nodeId?: string, data?: Partial<FlowNodeData> | null) {
+  return Boolean(data?.type === "paper" || (nodeId && nodeId.startsWith("paper:")));
 }
 
 export function isManualNode(node: Node<FlowNodeData>) {
@@ -479,7 +479,7 @@ export function isManualNode(node: Node<FlowNodeData>) {
 }
 
 export function selectedPaperNodes(nodes: Array<Node<FlowNodeData>>) {
-  return nodes.filter((node) => Boolean(node.selected) && isPaperNode(node.id));
+  return nodes.filter((node) => Boolean(node.selected) && isPaperNode(node.id, node.data));
 }
 
 export function formatDateTime(value?: string | null) {

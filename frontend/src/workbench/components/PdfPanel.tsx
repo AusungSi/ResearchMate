@@ -28,6 +28,7 @@ export function PdfPanel(props: Props) {
   const txtAsset = assetByKind(props.assets, "txt");
   const mdAsset = assetByKind(props.assets, "md");
   const bibAsset = assetByKind(props.assets, "bib");
+  const overallAsset = assetByKind(props.assets, "overall");
   const figureAsset = assetByKind(props.assets, "figure");
   const visualAsset = assetByKind(props.assets, "visual");
 
@@ -79,7 +80,14 @@ export function PdfPanel(props: Props) {
 
           <div className="rounded-2xl border border-slate-200 bg-slate-50 p-4">
             <div className="text-xs font-semibold uppercase tracking-[0.16em] text-slate-400">Paper Visual</div>
-            <div className="mt-3 grid gap-3 md:grid-cols-2">
+            <div className="mt-3 grid gap-3 md:grid-cols-3">
+              <div className="rounded-2xl border border-slate-200 bg-white p-3">
+                <div className="text-sm font-medium text-slate-900">Overall Figure</div>
+                <div className="mt-1 text-xs text-slate-500">{overallAsset?.status === "available" ? "已提取" : "未识别到 overall 图"}</div>
+                {overallAsset?.download_url ? (
+                  <img src={overallAsset.download_url} alt="overall figure" className="mt-3 h-40 w-full rounded-xl border border-slate-200 bg-slate-50 object-contain" />
+                ) : null}
+              </div>
               <div className="rounded-2xl border border-slate-200 bg-white p-3">
                 <div className="text-sm font-medium text-slate-900">Main Figure</div>
                 <div className="mt-1 text-xs text-slate-500">{figureAsset?.status === "available" ? "已提取" : "未提取到主图"}</div>
@@ -132,6 +140,7 @@ export function PdfPanel(props: Props) {
             <div className="text-xs font-semibold uppercase tracking-[0.16em] text-slate-400">资产</div>
             <div className="mt-3 space-y-2">
               {[
+                { label: "Overall Figure", item: overallAsset },
                 { label: "Main Figure", item: figureAsset },
                 { label: "Paper Visual", item: visualAsset },
                 { label: "PDF", item: pdfAsset },

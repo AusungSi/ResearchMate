@@ -308,7 +308,7 @@ export function Workbench() {
   }, []);
 
   const selectedNode = nodes.find((node) => node.id === selectedNodeId) || null;
-  const selectedPaperId = selectedNode?.id && isPaperNode(selectedNode.id) ? selectedNode.id : "";
+  const selectedPaperId = selectedNode?.id && isPaperNode(selectedNode.id, selectedNode.data) ? selectedNode.id : "";
   const selectedPaperCount = useMemo(() => selectedPaperNodes(nodes).length, [nodes]);
   const selectedFulltextItem = useMemo(
     () => fulltextStatusQuery.data?.items.find((item) => item.paper_id === selectedPaperId) || null,
@@ -1163,7 +1163,7 @@ export function Workbench() {
             onCancel={() => workbenchAction.mutate({ type: "auto_cancel" })}
           />
 
-          {selectedNode && isPaperNode(selectedNode.id) ? (
+          {selectedNode && isPaperNode(selectedNode.id, selectedNode.data) ? (
             <PdfPanel
               taskId={activeTaskId}
               paperId={selectedPaperId}
@@ -1238,4 +1238,3 @@ function isSameViewport(
 ) {
   return Math.abs(left.x - right.x) < 0.5 && Math.abs(left.y - right.y) < 0.5 && Math.abs(left.zoom - right.zoom) < 0.01;
 }
-
