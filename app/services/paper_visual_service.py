@@ -25,7 +25,7 @@ class PaperVisualAsset:
 
 @dataclass
 class _FigureCandidate:
-    xref: int
+    xref: int | None
     page_index: int
     width: int
     height: int
@@ -35,6 +35,7 @@ class _FigureCandidate:
     nearby_text: str
     figure_number: int | None
     overall_keyword_hits: int
+    render_mode: str = "image"
 
 
 OVERALL_FIGURE_KEYWORDS = (
@@ -231,8 +232,88 @@ class PaperVisualService:
                         nearby_text=nearby_text,
                         figure_number=_extract_figure_number(nearby_text),
                         overall_keyword_hits=_count_overall_keyword_hits(nearby_text),
+                        render_mode="image",
                     )
                 )
+            candidates.extend(
+                self._caption_clip_candidates(
+                    page=page,
+                    page_index=page_index,
+                    text_blocks=text_blocks,
+                    min_width=min_width,
+                    min_height=min_height,
+                    min_page_area_ratio=min_page_area_ratio,
+                    page_area=page_area,
+                )
+            )
+        return candidates
+
+    def _caption_clip_candidates(
+        self,
+        *,
+        page,
+        page_index: int,
+        text_blocks: list[tuple[object, str]],
+        min_width: int,
+        min_height: int,
+        min_page_area_ratio: float,
+        page_area: float,
+    ) -> list[_FigureCandidate]:
+        candidates: list[_FigureCandidate] = []
+        page_rect = page.rect
+        page_mid_x = float(page_rect.x0 + page_rect.width / 2.0)
+        page_margin_x = max(18.0, float(page_rect.width) * 0.03)
+        for block_rect, text in text_blocks:
+            figure_number = _extract_figure_number(text)
+            if figure_number is None:
+                continue
+            caption_rect = fitz.Rect(block_rect)
+            caption_center_x = float(caption_rect.x0 + caption_rect.width / 2.0)
+            full_width_caption = abs(caption_center_x - page_mid_x) <= float(page_rect.width) * 0.14 or float(caption_rect.width) >= float(page_rect.width) * 0.42
+            if full_width_caption:
+                x0 = float(page_rect.x0) + page_margin_x
+                x1 = float(page_rect.x1) - page_margin_x
+            elif caption_center_x < page_mid_x:
+                x0 = float(page_rect.x0) + page_margin_x
+                x1 = float(page_mid_x) + page_margin_x * 0.5
+            else:
+                x0 = float(page_mid_x) - page_margin_x * 0.5
+                x1 = float(page_rect.x1) - page_margin_x
+
+            y1 = max(float(page_rect.y0) + 24.0, float(caption_rect.y0) - 6.0)
+            y0 = max(float(page_rect.y0) + 24.0, y1 - max(float(min_height), float(page_rect.height) * 0.42))
+            upper_text_blocks = [
+                rect
+                for rect, block_text in text_blocks
+                if float(rect.y1) <= float(caption_rect.y0)
+                and len(block_text.strip()) >= 80
+                and float(rect.width) >= float(page_rect.width) * 0.28
+            ]
+            if upper_text_blocks:
+                lower_bound = max(float(rect.y1) for rect in upper_text_blocks)
+                y0 = max(y0, min(lower_bound + 8.0, y1 - float(min_height)))
+
+            clip_rect = fitz.Rect(x0, y0, x1, y1) & page_rect
+            if clip_rect.width < min_width or clip_rect.height < min_height:
+                continue
+            placed_area = float(clip_rect.width * clip_rect.height)
+            if placed_area / max(page_area, 1.0) < min_page_area_ratio:
+                continue
+            candidates.append(
+                _FigureCandidate(
+                    xref=None,
+                    page_index=page_index,
+                    width=int(round(clip_rect.width * 2.0)),
+                    height=int(round(clip_rect.height * 2.0)),
+                    pixel_area=int(round(clip_rect.width * clip_rect.height * 4.0)),
+                    placed_area=placed_area,
+                    rect=(float(clip_rect.x0), float(clip_rect.y0), float(clip_rect.x1), float(clip_rect.y1)),
+                    nearby_text=text,
+                    figure_number=figure_number,
+                    overall_keyword_hits=_count_overall_keyword_hits(text),
+                    render_mode="clip",
+                )
+            )
         return candidates
 
     def _page_text_blocks(self, page) -> list[tuple[object, str]]:
@@ -289,7 +370,7 @@ class PaperVisualService:
                 item.placed_area,
                 -item.page_index,
                 item.pixel_area,
-                item.xref,
+                item.xref or -1,
             ),
         )
 
@@ -309,7 +390,7 @@ class PaperVisualService:
                 -item.page_index,
                 item.placed_area,
                 item.pixel_area,
-                item.xref,
+                item.xref or -1,
             ),
         )
 
@@ -326,9 +407,14 @@ class PaperVisualService:
             if output_path.exists():
                 output_path.unlink()
             return None
-        pix = fitz.Pixmap(doc, candidate.xref)
-        if pix.alpha or pix.n > 4:
-            pix = fitz.Pixmap(fitz.csRGB, pix)
+        if candidate.render_mode == "clip":
+            page = doc[candidate.page_index]
+            clip_rect = fitz.Rect(candidate.rect)
+            pix = page.get_pixmap(matrix=fitz.Matrix(2, 2), clip=clip_rect, alpha=False)
+        else:
+            pix = fitz.Pixmap(doc, candidate.xref)
+            if pix.alpha or pix.n > 4:
+                pix = fitz.Pixmap(fitz.csRGB, pix)
         output_path.parent.mkdir(parents=True, exist_ok=True)
         pix.save(output_path)
         return PaperVisualAsset(

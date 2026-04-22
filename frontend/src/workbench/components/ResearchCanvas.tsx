@@ -57,10 +57,11 @@ export function ResearchCanvas(props: {
       defaultEdgeOptions={edgeVisual}
       connectionLineStyle={{ stroke: "#64748b", strokeWidth: 2.5 }}
       onlyRenderVisibleElements
-      selectionOnDrag
+      selectionOnDrag={false}
+      selectionKeyCode={["Shift"]}
       selectionMode={SelectionMode.Partial}
       multiSelectionKeyCode={["Meta", "Control", "Shift"]}
-      panOnDrag={[1, 2]}
+      panOnDrag
       zoomOnScroll
       fitView={false}
       deleteKeyCode={["Backspace", "Delete"]}

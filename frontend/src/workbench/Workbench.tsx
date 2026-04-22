@@ -12,9 +12,11 @@ import { ProjectSidebar } from "./components/ProjectSidebar";
 import { QuickActionBar } from "./components/QuickActionBar";
 import { ResearchCanvas, buildManualConnection } from "./components/ResearchCanvas";
 import { RunTimeline } from "./components/RunTimeline";
+import { TaskProgress } from "./components/TaskProgress";
 import { SectionTitle, SmallButton } from "./components/shared";
 import { edgeCountLabel } from "./display";
 import { useRunEvents } from "./hooks/useRunEvents";
+import { deriveTaskProgress } from "./progress";
 import type {
   ActionResponse,
   ActionStatus,
@@ -38,6 +40,8 @@ import type {
   RoundCandidate,
   TaskMode,
   TaskSummary,
+  TaskVenueMetricItem,
+  TaskVenueMetricsResponse,
   WorkbenchConfig,
   ZoteroConfig,
   ZoteroImportResponse,
@@ -255,6 +259,13 @@ export function Workbench() {
     refetchInterval: 5000,
   });
 
+  const venueMetricsQuery = useQuery({
+    queryKey: ["venue-metrics", activeTaskId],
+    queryFn: () => apiFetch<TaskVenueMetricsResponse>(`/api/v1/research/tasks/${activeTaskId}/venues/metrics`),
+    enabled: Boolean(activeTaskId),
+    refetchInterval: 30000,
+  });
+
   const activeTask = taskQuery.data || null;
   const eventsState = useRunEvents({
     taskId: activeTaskId,
@@ -262,6 +273,7 @@ export function Workbench() {
     enabled: Boolean(activeTaskId && runId),
     intervalMs: activeTask?.mode === "openclaw_auto" ? 3000 : 4000,
   });
+  const taskProgress = useMemo(() => deriveTaskProgress(activeTask, eventsState.summary, eventsState.items), [activeTask, eventsState.items, eventsState.summary]);
 
   const merged = useMemo(
     () => mergeCanvasWithGraph(graphQuery.data, canvasQuery.data, eventsState.items, configQuery.data?.default_canvas_ui || defaultCanvasUi()),
@@ -1246,8 +1258,8 @@ export function Workbench() {
         />
       }
       canvas={
-        <main className="relative h-full overflow-hidden bg-[radial-gradient(circle_at_20%_20%,rgba(59,130,246,0.06),transparent_26%),radial-gradient(circle_at_80%_20%,rgba(16,185,129,0.05),transparent_20%),linear-gradient(to_bottom,white,white)]">
-          <div className="border-b border-slate-200 px-6 py-4">
+        <main className="relative flex h-full flex-col overflow-hidden bg-[radial-gradient(circle_at_20%_20%,rgba(59,130,246,0.06),transparent_26%),radial-gradient(circle_at_80%_20%,rgba(16,185,129,0.05),transparent_20%),linear-gradient(to_bottom,white,white)]">
+          <div className="shrink-0 border-b border-slate-200 px-6 py-4">
             <div className="flex items-start justify-between gap-4">
               <div>
                 <div className="text-xs font-semibold uppercase tracking-[0.18em] text-slate-400">Research Canvas</div>
@@ -1259,6 +1271,7 @@ export function Workbench() {
                   系统节点来自 canonical graph，手工节点与手工连线只写入 canvas state。多选论文卡片后可以直接加入 Collection 或做 Compare。
                 </div>
                 {actionStatus ? <ActionBanner status={actionStatus} /> : null}
+                {taskProgress ? <TaskProgress progress={taskProgress} /> : null}
               </div>
               <div className="flex items-center gap-2">
                 <button
@@ -1299,7 +1312,7 @@ export function Workbench() {
             </div>
           </div>
 
-          <div className="h-[calc(100%-86px)]">
+          <div className="min-h-0 flex-1">
             <ResearchCanvas
               nodes={nodes}
               edges={edges}
@@ -1452,6 +1465,26 @@ export function Workbench() {
                           </div>
                         </div>
                       ))}
+                    </div>
+                  ) : null}
+                  {venueMetricsQuery.data?.items?.length ? (
+                    <div className="mt-4 rounded-2xl border border-slate-200 bg-slate-50 p-3">
+                      <div className="text-xs font-semibold uppercase tracking-[0.16em] text-slate-400">Venue Metrics</div>
+                      <div className="mt-3 space-y-2">
+                        {venueMetricsQuery.data.items.slice(0, 8).map((item) => (
+                          <div key={item.venue_key} className="rounded-2xl border border-slate-200 bg-white p-3 text-sm">
+                            <div className="flex items-start justify-between gap-3">
+                              <div>
+                                <div className="font-medium text-slate-900">{item.venue}</div>
+                                <div className="mt-1 text-xs text-slate-500">
+                                  {item.source_type || "类型未知"} · {item.paper_count} 篇论文
+                                </div>
+                              </div>
+                              <div className="text-right text-xs text-slate-500">{formatVenueMetricSummary(item) || "暂无分级数据"}</div>
+                            </div>
+                          </div>
+                        ))}
+                      </div>
                     </div>
                   ) : null}
                 </div>
@@ -1685,6 +1718,18 @@ function ActionBanner(props: { status: ActionStatus }) {
           : "border-slate-200 bg-slate-50 text-slate-600";
 
   return <div className={`mt-3 rounded-2xl border px-3 py-2 text-sm ${className}`}>{props.status.text}</div>;
+}
+
+function formatVenueMetricSummary(item: TaskVenueMetricItem) {
+  const metrics = item.metrics;
+  const parts = [];
+  if (metrics.ccf?.rank) parts.push(`CCF ${metrics.ccf.rank}`);
+  if (metrics.jcr?.quartile) parts.push(`JCR ${metrics.jcr.quartile}`);
+  if (metrics.cas?.quartile) parts.push(`中科院 ${metrics.cas.quartile}`);
+  if (metrics.ei?.indexed === true) parts.push("EI");
+  if (typeof metrics.impact_factor?.value === "number") parts.push(`IF ${metrics.impact_factor.value}`);
+  if (typeof metrics.venue_citation_count === "number") parts.push(`引用 ${metrics.venue_citation_count.toLocaleString("zh-CN")}`);
+  return parts.join(" · ");
 }
 
 function isSameViewport(

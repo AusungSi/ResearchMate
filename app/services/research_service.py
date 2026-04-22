@@ -73,6 +73,7 @@ from app.infra.wecom_client import WeComClient
 from app.llm.openclaw_client import LLMCallResult, LLMTaskType, OpenClawClient
 from app.llm.research_llm_gateway import ResearchLLMGateway
 from app.services.paper_visual_service import PaperVisualService
+from app.services.venue_metrics_service import VenueMetricsService
 
 
 logger = get_logger("research")
@@ -119,6 +120,7 @@ class ResearchService:
         self.openclaw_client = openclaw_client or OpenClawClient(settings=self.settings)
         self.llm_gateway = ResearchLLMGateway(settings=self.settings, openclaw_client=self.openclaw_client)
         self.paper_visual_service = PaperVisualService(settings=self.settings)
+        self.venue_metrics_service = VenueMetricsService(settings=self.settings)
         self.wecom_client = wecom_client
         self.research_jobs_total = 0
         self.research_job_latency_ms = 0
@@ -1698,6 +1700,9 @@ class ResearchService:
         if not paper:
             raise ValueError("paper not found")
         fulltext = ResearchPaperFulltextRepo(db).get(task.id, _paper_token(paper))
+        self._ensure_rendered_paper_assets(task=task, paper=paper, fulltext=fulltext)
+        derived_md_path = self._paper_text_asset_path(task=task, paper=paper, kind="md")
+        derived_bib_path = self._paper_text_asset_path(task=task, paper=paper, kind="bib")
         kind_norm = (kind or "pdf").strip().lower()
         candidates: list[str | None]
         if kind_norm == "pdf":
@@ -1711,9 +1716,9 @@ class ResearchService:
         elif kind_norm == "visual":
             candidates = [self._paper_visual_assets(task=task, paper=paper, fulltext=fulltext).get("visual", {}).get("path")]
         elif kind_norm in {"md", "markdown"}:
-            candidates = [paper.saved_path]
+            candidates = [derived_md_path]
         elif kind_norm == "bib":
-            candidates = [paper.saved_bib_path]
+            candidates = [derived_bib_path]
         else:
             candidates = [
                 self._paper_visual_assets(task=task, paper=paper, fulltext=fulltext).get("overall", {}).get("path"),
@@ -1721,8 +1726,8 @@ class ResearchService:
                 self._paper_visual_assets(task=task, paper=paper, fulltext=fulltext).get("visual", {}).get("path"),
                 fulltext.pdf_path if fulltext else None,
                 fulltext.text_path if fulltext else None,
-                paper.saved_path,
-                paper.saved_bib_path,
+                derived_md_path,
+                derived_bib_path,
             ]
         for candidate in candidates:
             if candidate and Path(candidate).exists():
@@ -1742,34 +1747,38 @@ class ResearchService:
         if not paper:
             raise ValueError("paper not found")
         fulltext = ResearchPaperFulltextRepo(db).get(task.id, _paper_token(paper))
+        self._ensure_rendered_paper_assets(task=task, paper=paper, fulltext=fulltext)
         items = []
         visual_assets = self._paper_visual_assets(task=task, paper=paper, fulltext=fulltext)
+        md_path = self._paper_text_asset_path(task=task, paper=paper, kind="md")
+        bib_path = self._paper_text_asset_path(task=task, paper=paper, kind="bib")
         static_assets = {
             "overall": visual_assets.get("overall"),
             "figure": visual_assets.get("figure"),
             "visual": visual_assets.get("visual"),
             "pdf": self._basic_asset_metadata(kind="pdf", path_value=fulltext.pdf_path if fulltext else None),
             "txt": self._basic_asset_metadata(kind="txt", path_value=fulltext.text_path if fulltext else None),
-            "md": self._basic_asset_metadata(kind="md", path_value=paper.saved_path),
-            "bib": self._basic_asset_metadata(kind="bib", path_value=paper.saved_bib_path),
+            "md": self._basic_asset_metadata(kind="md", path_value=md_path),
+            "bib": self._basic_asset_metadata(kind="bib", path_value=bib_path),
         }
         for kind in ("overall", "figure", "visual", "pdf", "txt", "md", "bib"):
             item = static_assets.get(kind) or {"kind": kind, "status": "missing"}
             exists = item.get("status") == "available"
+            status = self._resolve_paper_asset_status(kind=kind, exists=exists, fulltext=fulltext)
             items.append(
                 {
                     "kind": kind,
-                    "status": "available" if exists else "missing",
+                    "status": status,
                     "filename": item.get("filename"),
                     "path": item.get("path"),
                     "open_url": (
                         self._paper_asset_url(task_id=task.task_id, paper_token=paper_token, kind=kind, disposition="inline")
-                        if exists
+                        if status == "available"
                         else None
                     ),
                     "download_url": (
                         self._paper_asset_url(task_id=task.task_id, paper_token=paper_token, kind=kind, disposition="attachment")
-                        if exists
+                        if status == "available"
                         else None
                     ),
                     "mime_type": item.get("mime_type"),
@@ -2020,8 +2029,15 @@ class ResearchService:
             raise ValueError("paper not found")
         paper_id = _paper_token(paper)
         fulltext = ResearchPaperFulltextRepo(db).get(task.id, paper_id)
+        self._ensure_rendered_paper_assets(task=task, paper=paper, fulltext=fulltext)
         preview = self._paper_visual_preview(task=task, paper=paper, fulltext=fulltext)
         summary = self._paper_summary_view(paper=paper, fulltext=fulltext)
+        venue_metrics = self.venue_metrics_service.lookup_for_paper(
+            venue=paper.venue,
+            doi=paper.doi,
+            title=paper.title,
+            year=paper.year,
+        )
         return {
             "task_id": task.task_id,
             "paper_id": paper_id,
@@ -2050,6 +2066,7 @@ class ResearchService:
             "preview_kind": preview.get("preview_kind"),
             "preview_url": preview.get("preview_url"),
             "visual_status": preview.get("visual_status"),
+            "venue_metrics": venue_metrics,
         }
 
     def _paper_summary_view(self, *, paper, fulltext) -> dict[str, str]:
@@ -2234,6 +2251,72 @@ class ResearchService:
             "source": None,
         }
 
+    def _ensure_rendered_paper_assets(self, *, task: ResearchTask, paper, fulltext) -> None:
+        self._paper_text_asset_path(task=task, paper=paper, kind="md")
+        self._paper_text_asset_path(task=task, paper=paper, kind="bib")
+        assets = self.paper_visual_service.inspect_assets(
+            artifact_root=Path(self.settings.research_artifact_dir),
+            task_id=task.task_id,
+            paper_token=_paper_token(paper),
+        )
+        if "visual" not in assets:
+            self._safe_build_paper_visual_assets(task=task, paper=paper, fulltext=fulltext)
+
+    def _paper_text_asset_path(self, *, task: ResearchTask, paper, kind: str) -> str:
+        kind_norm = (kind or "").strip().lower()
+        if kind_norm not in {"md", "bib"}:
+            raise ValueError("unsupported paper text asset kind")
+        configured_path = paper.saved_path if kind_norm == "md" else paper.saved_bib_path
+        target = Path(configured_path).expanduser().resolve() if configured_path else self._paper_derived_asset_path(
+            task=task,
+            paper=paper,
+            suffix=kind_norm,
+        )
+        target.parent.mkdir(parents=True, exist_ok=True)
+        if not target.exists():
+            if kind_norm == "md":
+                target.write_text(self._render_saved_paper_markdown(task, paper), encoding="utf-8")
+            else:
+                target.write_text(self._render_bib([paper]), encoding="utf-8")
+        return str(target)
+
+    def _paper_derived_asset_path(self, *, task: ResearchTask, paper, suffix: str) -> Path:
+        base_dir = Path(self.settings.research_artifact_dir).expanduser().resolve() / task.task_id / "derived" / "papers"
+        base_dir.mkdir(parents=True, exist_ok=True)
+        file_stem = re.sub(r"[^a-zA-Z0-9._-]+", "_", _paper_token(paper))[:120] or f"paper_{paper.id}"
+        return base_dir / f"{file_stem}.{suffix}"
+
+    def _resolve_paper_asset_status(self, *, kind: str, exists: bool, fulltext) -> str:
+        if exists:
+            return "available"
+        fulltext_status = self._fulltext_status_value(fulltext)
+        if kind == "pdf":
+            return fulltext_status or ResearchPaperFulltextStatus.NOT_STARTED.value
+        if kind == "txt":
+            if fulltext_status == ResearchPaperFulltextStatus.FETCHED.value:
+                return "parsing"
+            return fulltext_status or ResearchPaperFulltextStatus.NOT_STARTED.value
+        if kind in {"overall", "figure"}:
+            if fulltext and fulltext.pdf_path and Path(fulltext.pdf_path).exists():
+                return "not_extracted"
+            return fulltext_status if fulltext_status in {
+                ResearchPaperFulltextStatus.FETCHING.value,
+                ResearchPaperFulltextStatus.FETCHED.value,
+                ResearchPaperFulltextStatus.NEED_UPLOAD.value,
+                ResearchPaperFulltextStatus.FAILED.value,
+            } else "needs_pdf"
+        if kind == "visual":
+            return "not_built"
+        return "missing"
+
+    @staticmethod
+    def _fulltext_status_value(fulltext) -> str | None:
+        if not fulltext or fulltext.status is None:
+            return None
+        raw = getattr(fulltext.status, "value", fulltext.status)
+        text = str(raw or "").strip().lower()
+        return text or None
+
     def _paper_asset_url(self, *, task_id: str, paper_token: str, kind: str, disposition: str) -> str:
         return (
             f"/api/v1/research/tasks/{quote_plus(task_id)}/papers/{quote_plus(paper_token)}/asset"
@@ -2332,6 +2415,58 @@ class ResearchService:
             "preview_kind": preview.get("preview_kind"),
             "preview_url": preview.get("preview_url"),
             "visual_status": preview.get("visual_status"),
+        }
+
+    def get_task_venue_metrics(
+        self,
+        db: Session,
+        *,
+        user_id: int,
+        task_id: str,
+    ) -> dict:
+        task = self.switch_task(db, user_id=user_id, task_id=task_id)
+        papers = ResearchPaperRepo(db).list_for_task(task.id)
+        grouped: dict[str, dict] = {}
+        for paper in papers:
+            venue = str(paper.venue or "").strip()
+            if not venue:
+                continue
+            venue_key = re.sub(r"\s+", " ", re.sub(r"[^a-z0-9\u4e00-\u9fff]+", " ", venue.lower().replace("&", " and "))).strip()
+            if not venue_key:
+                continue
+            item = grouped.setdefault(
+                venue_key,
+                {
+                    "venue": venue,
+                    "paper_count": 0,
+                    "paper_ids": [],
+                    "sample_paper": paper,
+                },
+            )
+            item["paper_count"] += 1
+            item["paper_ids"].append(_paper_token(paper))
+        items = []
+        for venue_key, item in sorted(grouped.items(), key=lambda pair: (-pair[1]["paper_count"], pair[1]["venue"].lower())):
+            sample_paper = item["sample_paper"]
+            metrics = self.venue_metrics_service.lookup_for_paper(
+                venue=sample_paper.venue,
+                doi=sample_paper.doi,
+                title=sample_paper.title,
+                year=sample_paper.year,
+            )
+            items.append(
+                {
+                    "venue": item["venue"],
+                    "venue_key": venue_key,
+                    "source_type": metrics.get("source_type"),
+                    "paper_count": item["paper_count"],
+                    "paper_ids": item["paper_ids"],
+                    "metrics": metrics,
+                }
+            )
+        return {
+            "task_id": task.task_id,
+            "items": items,
         }
 
     def list_saved_papers(
@@ -4004,6 +4139,7 @@ class ResearchService:
                 out.append(f"{url}.pdf")
         if doi:
             out.append(f"https://doi.org/{doi}")
+        out.extend(self._live_pdf_candidate_urls(paper))
         unique: list[str] = []
         seen = set()
         for item in out:
@@ -4012,6 +4148,145 @@ class ResearchService:
             unique.append(item)
             seen.add(item)
         return unique
+
+    def _live_pdf_candidate_urls(self, paper) -> list[str]:
+        candidates: list[str] = []
+        for loader in (self._semantic_scholar_pdf_candidates, self._arxiv_pdf_candidates, self._openalex_pdf_candidates):
+            try:
+                candidates.extend(loader(paper))
+            except Exception:
+                logger.exception("paper_pdf_candidate_loader_failed loader=%s paper=%s", loader.__name__, _paper_token(paper))
+        unique: list[str] = []
+        seen = set()
+        for item in candidates:
+            url = str(item or "").strip()
+            if not url or url in seen:
+                continue
+            seen.add(url)
+            unique.append(url)
+        return unique
+
+    def _semantic_scholar_pdf_candidates(self, paper) -> list[str]:
+        paper_id = str(getattr(paper, "paper_id", "") or "").strip()
+        doi = str(getattr(paper, "doi", "") or "").strip()
+        source = str(getattr(paper, "source", "") or "").strip().lower()
+        url = str(getattr(paper, "url", "") or "").strip().lower()
+        identifier = f"DOI:{doi}" if doi else (paper_id if source == "semantic_scholar" or "semanticscholar.org" in url else "")
+        if not identifier:
+            return []
+        params = {"fields": "openAccessPdf,externalIds,url"}
+        headers = {"User-Agent": "MemoMate/0.1 (research)"}
+        api_key = self.settings.semantic_scholar_api_key.strip()
+        if api_key:
+            headers["x-api-key"] = api_key
+        with httpx.Client(timeout=20, follow_redirects=True, trust_env=False) as client:
+            resp = client.get(
+                f"https://api.semanticscholar.org/graph/v1/paper/{quote_plus(identifier)}",
+                params=params,
+                headers=headers,
+            )
+        if resp.status_code >= 400:
+            return []
+        payload = resp.json() if resp.content else {}
+        urls: list[str] = []
+        open_access_pdf = payload.get("openAccessPdf") if isinstance(payload, dict) else None
+        if isinstance(open_access_pdf, dict):
+            pdf_url = str(open_access_pdf.get("url") or "").strip()
+            if pdf_url:
+                urls.append(pdf_url)
+        paper_url = str(payload.get("url") or "").strip() if isinstance(payload, dict) else ""
+        if paper_url:
+            urls.append(paper_url)
+        external_ids = payload.get("externalIds") if isinstance(payload, dict) and isinstance(payload.get("externalIds"), dict) else {}
+        arxiv_id = str(external_ids.get("ArXiv") or external_ids.get("Arxiv") or "").strip()
+        if arxiv_id:
+            normalized = arxiv_id.replace("arXiv:", "").strip()
+            urls.append(f"https://arxiv.org/pdf/{normalized}.pdf")
+            urls.append(f"https://arxiv.org/abs/{normalized}")
+        return urls
+
+    def _openalex_pdf_candidates(self, paper) -> list[str]:
+        doi = str(getattr(paper, "doi", "") or "").strip().lower()
+        if not doi:
+            return []
+        with httpx.Client(timeout=20, follow_redirects=True, trust_env=False) as client:
+            resp = client.get(
+                "https://api.openalex.org/works",
+                params={"filter": f"doi:https://doi.org/{doi}", "per-page": "1"},
+            )
+        if resp.status_code >= 400:
+            return []
+        payload = resp.json() if resp.content else {}
+        results = payload.get("results") if isinstance(payload, dict) else None
+        if not isinstance(results, list) or not results:
+            return []
+        item = results[0] if isinstance(results[0], dict) else {}
+        urls: list[str] = []
+        location_candidates: list[object] = [
+            item.get("best_oa_location"),
+            item.get("primary_location"),
+        ]
+        locations = item.get("locations")
+        if isinstance(locations, list):
+            location_candidates.extend(locations)
+        open_access = item.get("open_access")
+        if isinstance(open_access, dict):
+            location_candidates.append({"pdf_url": open_access.get("oa_url"), "landing_page_url": open_access.get("oa_url")})
+        for raw in location_candidates:
+            if not isinstance(raw, dict):
+                continue
+            pdf_url = str(raw.get("pdf_url") or "").strip()
+            landing_page_url = str(raw.get("landing_page_url") or "").strip()
+            if pdf_url:
+                urls.append(pdf_url)
+            if landing_page_url:
+                urls.append(landing_page_url)
+                if "arxiv.org/abs/" in landing_page_url:
+                    urls.append(landing_page_url.replace("/abs/", "/pdf/") + ".pdf")
+        return urls
+
+    def _arxiv_pdf_candidates(self, paper) -> list[str]:
+        title = str(getattr(paper, "title", "") or "").strip()
+        if not title:
+            return []
+        with httpx.Client(timeout=20, follow_redirects=True, trust_env=False) as client:
+            resp = client.get(
+                "https://export.arxiv.org/api/query",
+                params={"search_query": f'ti:"{title}"', "start": "0", "max_results": "3"},
+            )
+        if resp.status_code >= 400 or not resp.text.strip():
+            return []
+        try:
+            root = ET.fromstring(resp.text)
+        except ET.ParseError:
+            return []
+        ns = {"atom": "http://www.w3.org/2005/Atom"}
+        target_norm = _normalize_title(title)
+        best_score = 0.0
+        best_urls: list[str] = []
+        for entry in root.findall("atom:entry", ns):
+            entry_title = "".join(entry.findtext("atom:title", default="", namespaces=ns).split())
+            candidate_norm = _normalize_title(entry_title)
+            if not candidate_norm:
+                continue
+            score = SequenceMatcher(a=target_norm, b=candidate_norm).ratio()
+            if score < 0.9 or score < best_score:
+                continue
+            urls: list[str] = []
+            entry_id = entry.findtext("atom:id", default="", namespaces=ns).strip()
+            if entry_id:
+                abs_url = entry_id.replace("http://", "https://", 1)
+                urls.append(abs_url)
+                if "/abs/" in abs_url:
+                    urls.append(abs_url.replace("/abs/", "/pdf/") + ".pdf")
+            for link in entry.findall("atom:link", ns):
+                href = str(link.attrib.get("href") or "").strip()
+                link_type = str(link.attrib.get("type") or "").strip().lower()
+                if href and (link_type == "application/pdf" or "/pdf/" in href):
+                    urls.append(href.replace("http://", "https://", 1))
+            best_score = score
+            best_urls = urls
+        return best_urls
 
     def _parse_pdf_bytes(self, content: bytes) -> tuple[str, dict]:
         if fitz is not None:

@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import type { ReactNode } from "react";
 import { autoStatusLabel, backendLabel, modeLabel } from "../display";
+import { deriveTaskProgress } from "../progress";
 import type { Backend, CollectionSummary, ProjectDashboard, ProjectSummary, TaskMode, TaskSummary, WorkbenchConfig, ZoteroConfig } from "../types";
 import { formatDateTime } from "../utils";
 import { Badge, SmallButton } from "./shared";
@@ -67,6 +68,10 @@ export function ProjectSidebar(props: Props) {
   const activeProject = useMemo(
     () => props.projects.find((project) => project.project_id === props.activeProjectId) || null,
     [props.activeProjectId, props.projects],
+  );
+  const taskProgressById = useMemo(
+    () => new Map(props.tasks.map((task) => [task.task_id, deriveTaskProgress(task)])),
+    [props.tasks],
   );
 
   function toggleSection(key: SectionKey) {
@@ -258,22 +263,13 @@ export function ProjectSidebar(props: Props) {
       <CollapsibleSection title="任务列表" subtitle={props.activeTask ? modeLabel(props.activeTask.mode) : "未选中任务"} collapsed={collapsed.tasks} onToggle={() => toggleSection("tasks")}>
         <div className="space-y-2">
           {props.tasks.map((task) => (
-            <button
+            <TaskListCard
               key={task.task_id}
-              className={`w-full rounded-2xl border px-3 py-3 text-left transition ${
-                task.task_id === props.activeTaskId ? "border-slate-900 bg-slate-900 text-white shadow-sm" : "border-slate-200 bg-slate-50 hover:border-slate-300"
-              }`}
+              task={task}
+              progress={taskProgressById.get(task.task_id) || null}
+              active={task.task_id === props.activeTaskId}
               onClick={() => props.onSelectTask(task.task_id)}
-            >
-              <div className="line-clamp-2 text-sm font-medium">{task.topic}</div>
-              <div className={`mt-1 text-xs ${task.task_id === props.activeTaskId ? "text-slate-300" : "text-slate-500"}`}>
-                {modeLabel(task.mode)} · 状态 {task.status} · {autoStatusLabel(task.auto_status)}
-              </div>
-              <div className={`mt-1 text-[11px] ${task.task_id === props.activeTaskId ? "text-slate-400" : "text-slate-400"}`}>
-                {backendLabel(task.llm_backend)}
-                {task.llm_model ? ` / ${task.llm_model}` : ""}
-              </div>
-            </button>
+            />
           ))}
           {!props.tasks.length ? <div className="rounded-2xl bg-slate-50 p-3 text-sm text-slate-500">当前项目还没有研究任务。</div> : null}
         </div>
@@ -349,5 +345,33 @@ function MetricCard(props: { label: string; value: string }) {
       <div className="text-xs text-slate-500">{props.label}</div>
       <div className="mt-1 text-lg font-semibold text-slate-900">{props.value}</div>
     </div>
+  );
+}
+
+function TaskListCard(props: { task: TaskSummary; progress: ReturnType<typeof deriveTaskProgress>; active: boolean; onClick: () => void }) {
+  return (
+    <button
+      className={`w-full rounded-2xl border px-3 py-3 text-left transition ${
+        props.active ? "border-slate-900 bg-slate-900 text-white shadow-sm" : "border-slate-200 bg-slate-50 hover:border-slate-300"
+      }`}
+      onClick={props.onClick}
+    >
+      <div className="line-clamp-2 text-sm font-medium">{props.task.topic}</div>
+      <div className={`mt-1 text-xs ${props.active ? "text-slate-300" : "text-slate-500"}`}>
+        {modeLabel(props.task.mode)} · 状态 {props.task.status} · {autoStatusLabel(props.task.auto_status)}
+      </div>
+      <div className={`mt-1 text-[11px] ${props.active ? "text-slate-400" : "text-slate-400"}`}>
+        {backendLabel(props.task.llm_backend)}
+        {props.task.llm_model ? ` / ${props.task.llm_model}` : ""}
+      </div>
+      {props.progress ? (
+        <div className={`mt-2 flex items-center gap-2 text-[11px] ${props.active ? "text-slate-200" : "text-slate-500"}`}>
+          <span className={`rounded-full border px-2 py-0.5 font-medium ${props.active ? "border-slate-700 bg-slate-800 text-white" : "border-slate-200 bg-white text-slate-600"}`}>
+            {props.progress.percent}%
+          </span>
+          <span className="line-clamp-1">{props.progress.currentLabel}</span>
+        </div>
+      ) : null}
+    </button>
   );
 }

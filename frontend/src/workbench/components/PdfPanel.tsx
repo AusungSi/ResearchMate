@@ -31,12 +31,31 @@ const ASSET_KIND_LABELS: Record<string, string> = {
   bib: "BibTeX",
 };
 
+const ASSET_STATUS_LABELS: Record<string, string> = {
+  available: "可访问",
+  not_started: "未处理",
+  fetching: "抓取中",
+  fetched: "已下载",
+  parsing: "解析中",
+  parsed: "已解析",
+  need_upload: "需上传 PDF",
+  failed: "处理失败",
+  needs_pdf: "需先获取 PDF",
+  not_extracted: "未提取到",
+  not_built: "未生成",
+  missing: "缺失",
+};
+
 function assetByKind(assets: PaperAssetResponse | null, kind: string) {
   return assets?.items.find((item) => item.kind === kind) || null;
 }
 
 function assetPreviewUrl(item: PaperAssetItem | null) {
   return item?.open_url || item?.download_url || "";
+}
+
+function assetStatusLabel(status?: string | null) {
+  return ASSET_STATUS_LABELS[String(status || "")] || String(status || "缺失");
 }
 
 export function PdfPanel(props: Props) {
@@ -100,21 +119,21 @@ export function PdfPanel(props: Props) {
             <div className="mt-3 grid gap-3 md:grid-cols-3">
               <div className="rounded-2xl border border-slate-200 bg-white p-3">
                 <div className="text-sm font-medium text-slate-900">Overall Figure</div>
-                <div className="mt-1 text-xs text-slate-500">{overallAsset?.status === "available" ? "已提取" : "未识别到 overall 图"}</div>
+                <div className="mt-1 text-xs text-slate-500">{assetStatusLabel(overallAsset?.status || "missing")}</div>
                 {overallAsset?.download_url ? (
                   <img src={overallAsset.download_url} alt="overall figure" className="mt-3 h-40 w-full rounded-xl border border-slate-200 bg-slate-50 object-contain" />
                 ) : null}
               </div>
               <div className="rounded-2xl border border-slate-200 bg-white p-3">
                 <div className="text-sm font-medium text-slate-900">Main Figure</div>
-                <div className="mt-1 text-xs text-slate-500">{figureAsset?.status === "available" ? "已提取" : "未提取到主图"}</div>
+                <div className="mt-1 text-xs text-slate-500">{assetStatusLabel(figureAsset?.status || "missing")}</div>
                 {figureAsset?.download_url ? (
                   <img src={figureAsset.download_url} alt="main figure" className="mt-3 h-40 w-full rounded-xl border border-slate-200 bg-slate-50 object-contain" />
                 ) : null}
               </div>
               <div className="rounded-2xl border border-slate-200 bg-white p-3">
                 <div className="text-sm font-medium text-slate-900">Paper Visual</div>
-                <div className="mt-1 text-xs text-slate-500">{visualAsset?.status === "available" ? "已生成模板展示图" : "尚未生成"}</div>
+                <div className="mt-1 text-xs text-slate-500">{assetStatusLabel(visualAsset?.status || "missing")}</div>
                 {visualAsset?.download_url ? (
                   <img src={visualAsset.download_url} alt="paper visual" className="mt-3 h-40 w-full rounded-xl border border-slate-200 bg-slate-50 object-contain" />
                 ) : null}
@@ -161,7 +180,7 @@ export function PdfPanel(props: Props) {
                   <div className="flex items-start justify-between gap-3">
                     <div>
                       <div className="text-sm font-medium text-slate-900">{ASSET_KIND_LABELS[item?.kind || ""] || item?.kind}</div>
-                      <div className="mt-1 text-xs text-slate-500">{item?.status === "available" ? "可访问" : item?.status || "缺失"}</div>
+                      <div className="mt-1 text-xs text-slate-500">{assetStatusLabel(item?.status)}</div>
                       {item?.filename ? <div className="mt-1 break-all text-xs text-slate-500">{item.filename}</div> : null}
                     </div>
                     <div className="flex flex-wrap gap-2">
@@ -188,7 +207,7 @@ function PreviewCard(props: { title: string; item: PaperAssetItem | null }) {
   return (
     <div className="rounded-2xl border border-slate-200 bg-white p-3">
       <div className="text-sm font-medium text-slate-900">{props.title}</div>
-      <div className="mt-1 text-xs text-slate-500">{props.item?.status === "available" ? "可用" : "暂无"}</div>
+      <div className="mt-1 text-xs text-slate-500">{assetStatusLabel(props.item?.status)}</div>
       {previewUrl ? <img src={previewUrl} alt={props.title} className="mt-3 h-40 w-full rounded-xl border border-slate-200 bg-slate-50 object-contain" /> : null}
     </div>
   );

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 import struct
+from types import SimpleNamespace
 import zlib
 
 import fitz
@@ -1051,6 +1052,106 @@ def test_paper_visual_extracts_overall_figure_and_uses_it_for_preview(tmp_path):
         settings.research_artifact_dir = original_artifact_dir
 
 
+def test_paper_assets_auto_materialize_visual_markdown_and_bib(tmp_path):
+    settings = get_settings()
+    original_profile = settings.app_profile
+    original_artifact_dir = settings.research_artifact_dir
+    settings.app_profile = "research_local"
+    settings.research_artifact_dir = str(tmp_path / "artifacts")
+    client, db_session, _service = build_client()
+    try:
+        create_resp = client.post(
+            "/api/v1/research/tasks",
+            json={"topic": "auto materialize task", "mode": "gpt_step", "llm_backend": "gpt", "llm_model": "gpt-test"},
+        )
+        assert create_resp.status_code == 200
+        task_json = create_resp.json()
+        task_row = ResearchTaskRepo(db_session).get_by_task_id(task_json["task_id"], user_id=1)
+        assert task_row is not None
+
+        direction = ResearchDirectionRepo(db_session).replace_for_task(
+            task_row,
+            [{"name": "Direction A", "queries": ["gamma"], "exclude_terms": []}],
+        )[0]
+        paper = ResearchPaperRepo(db_session).replace_direction_papers(
+            direction,
+            [
+                {
+                    "paper_id": "paper:auto-assets",
+                    "title": "Auto Materialized Assets Paper",
+                    "title_norm": "auto materialized assets paper",
+                    "authors": ["Alice", "Bob"],
+                    "year": 2024,
+                    "venue": "ASE",
+                    "doi": "10.1000/auto-assets",
+                    "url": "https://example.com/auto-assets",
+                    "abstract": "This paper explains why generated paper assets should not appear as missing before hydration.",
+                    "method_summary": "method",
+                    "source": "semantic_scholar",
+                }
+            ],
+        )[0]
+        round_row = ResearchRoundRepo(db_session).create(
+            task_id=task_row.id,
+            direction_index=direction.direction_index,
+            parent_round_id=None,
+            depth=1,
+            action="expand",
+            feedback_text="auto materialize preview",
+            query_terms=["auto assets paper"],
+            status="done",
+        )
+        ResearchRoundPaperRepo(db_session).replace_for_round(round_id=round_row.id, rows=[paper], role="seed")
+
+        asset_resp = client.get(f"/api/v1/research/tasks/{task_json['task_id']}/papers/{paper.paper_id}/asset/meta")
+        assert asset_resp.status_code == 200
+        by_kind = {item["kind"]: item for item in asset_resp.json()["items"]}
+        assert by_kind["visual"]["status"] == "available"
+        assert by_kind["md"]["status"] == "available"
+        assert by_kind["bib"]["status"] == "available"
+        assert by_kind["pdf"]["status"] == "not_started"
+        assert by_kind["overall"]["status"] == "needs_pdf"
+
+        detail_resp = client.get(f"/api/v1/research/tasks/{task_json['task_id']}/papers/{paper.paper_id}")
+        assert detail_resp.status_code == 200
+        detail = detail_resp.json()
+        assert detail["preview_kind"] == "visual"
+        assert "kind=visual" in detail["preview_url"]
+        assert detail["visual_status"] == "visual_ready"
+    finally:
+        client.close()
+        db_session.close()
+        settings.app_profile = original_profile
+        settings.research_artifact_dir = original_artifact_dir
+
+
+def test_candidate_pdf_urls_include_live_metadata_open_access_links(monkeypatch):
+    service = ResearchService(openclaw_client=FakeOpenClawClient(), wecom_client=None)
+    paper = SimpleNamespace(
+        paper_id="abc44cc20885d32046b67aecac1cea0a3e8c4603",
+        doi="10.1109/ASE56229.2023.00063",
+        url="https://www.semanticscholar.org/paper/abc44cc20885d32046b67aecac1cea0a3e8c4603",
+        source="semantic_scholar",
+    )
+    monkeypatch.setattr(
+        service,
+        "_semantic_scholar_pdf_candidates",
+        lambda _paper: ["https://arxiv.org/pdf/2309.09308.pdf", "https://arxiv.org/abs/2309.09308"],
+    )
+    monkeypatch.setattr(
+        service,
+        "_openalex_pdf_candidates",
+        lambda _paper: ["https://doi.org/10.1109/ASE56229.2023.00063"],
+    )
+
+    candidates = service._candidate_pdf_urls(paper)
+
+    assert "https://www.semanticscholar.org/paper/abc44cc20885d32046b67aecac1cea0a3e8c4603" in candidates
+    assert "https://doi.org/10.1109/ASE56229.2023.00063" in candidates
+    assert "https://arxiv.org/pdf/2309.09308.pdf" in candidates
+    assert "https://arxiv.org/abs/2309.09308" in candidates
+
+
 def test_paper_visual_falls_back_to_template_and_manual_rebuild_is_idempotent(tmp_path):
     settings = get_settings()
     original_profile = settings.app_profile
@@ -1111,7 +1212,7 @@ def test_paper_visual_falls_back_to_template_and_manual_rebuild_is_idempotent(tm
         asset_resp = client.get(f"/api/v1/research/tasks/{task_json['task_id']}/papers/{paper.paper_id}/asset/meta")
         assert asset_resp.status_code == 200
         by_kind = {item["kind"]: item for item in asset_resp.json()["items"]}
-        assert by_kind["figure"]["status"] == "missing"
+        assert by_kind["figure"]["status"] == "not_extracted"
         assert by_kind["visual"]["status"] == "available"
         assert by_kind["visual"]["mime_type"] == "image/svg+xml"
 
@@ -1128,6 +1229,80 @@ def test_paper_visual_falls_back_to_template_and_manual_rebuild_is_idempotent(tm
         assert "kind=visual" in graph_node["preview_url"]
         assert "disposition=inline" in graph_node["preview_url"]
         assert graph_node["visual_status"] == "visual_ready"
+    finally:
+        client.close()
+        db_session.close()
+        settings.app_profile = original_profile
+        settings.research_artifact_dir = original_artifact_dir
+
+
+def test_paper_detail_includes_venue_metrics(tmp_path):
+    settings = get_settings()
+    original_profile = settings.app_profile
+    original_artifact_dir = settings.research_artifact_dir
+    settings.app_profile = "research_local"
+    settings.research_artifact_dir = str(tmp_path / "artifacts")
+    client, db_session, service = build_client()
+    try:
+        create_resp = client.post(
+            "/api/v1/research/tasks",
+            json={"topic": "venue metrics task", "mode": "gpt_step", "llm_backend": "gpt", "llm_model": "gpt-test"},
+        )
+        assert create_resp.status_code == 200
+        task_json = create_resp.json()
+        task_row = ResearchTaskRepo(db_session).get_by_task_id(task_json["task_id"], user_id=1)
+        assert task_row is not None
+
+        direction = ResearchDirectionRepo(db_session).replace_for_task(
+            task_row,
+            [{"name": "Direction A", "queries": ["venue metrics"], "exclude_terms": []}],
+        )[0]
+        paper = ResearchPaperRepo(db_session).replace_direction_papers(
+            direction,
+            [
+                {
+                    "paper_id": "paper:venue-metrics",
+                    "title": "Venue Metrics Paper",
+                    "title_norm": "venue metrics paper",
+                    "authors": ["Alice"],
+                    "year": 2025,
+                    "venue": "ACL",
+                    "doi": "10.1000/venue-metrics",
+                    "url": "https://example.com/venue-metrics",
+                    "abstract": "paper with venue metrics",
+                    "method_summary": "method",
+                    "source": "semantic_scholar",
+                }
+            ],
+        )[0]
+        service.venue_metrics_service.lookup_for_paper = lambda **_: {  # type: ignore[method-assign]
+            "venue": "ACL",
+            "venue_key": "acl",
+            "source_type": "conference",
+            "ccf": {"rank": "A", "category": "NLP", "source": "test"},
+            "jcr": {"quartile": None, "year": None, "source": None},
+            "cas": {"quartile": None, "top": None, "source": None},
+            "sci": {"indexed": False, "source": "test"},
+            "ei": {"indexed": True, "source": "test"},
+            "impact_factor": {"value": None, "year": None, "source": None},
+            "venue_citation_count": 1234,
+            "paper_citation_count": 56,
+            "data_sources": ["test"],
+        }
+
+        detail_resp = client.get(f"/api/v1/research/tasks/{task_json['task_id']}/papers/{paper.paper_id}")
+        assert detail_resp.status_code == 200
+        body = detail_resp.json()
+        assert body["venue_metrics"]["ccf"]["rank"] == "A"
+        assert body["venue_metrics"]["ei"]["indexed"] is True
+        assert body["venue_metrics"]["paper_citation_count"] == 56
+
+        venue_resp = client.get(f"/api/v1/research/tasks/{task_json['task_id']}/venues/metrics")
+        assert venue_resp.status_code == 200
+        venue_items = venue_resp.json()["items"]
+        assert len(venue_items) == 1
+        assert venue_items[0]["venue"] == "ACL"
+        assert venue_items[0]["metrics"]["venue_citation_count"] == 1234
     finally:
         client.close()
         db_session.close()
