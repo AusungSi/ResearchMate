@@ -1,58 +1,243 @@
-# OpenClaw for Paper Research
+<div align="center">
+  <img src="docs/design/logo.png" alt="OpenClaw for Paper Research logo" width="220" />
 
-一个面向本地 `WSL / Linux VM` 的单用户研究工作台。
+  # OpenClaw for Paper Research
 
-当前默认主线已经切到 `research_local`，目标不再是提醒助手，而是把论文调研流程收敛成一个可本地部署、可持续使用、可扩展的 research workbench。
+  **A local research workbench for papers - built for continuous exploration, not one-shot reports.**
 
-系统当前支持两种研究模式：
+  <p>
+    <img alt="Local-first" src="https://img.shields.io/badge/local--first-WSL%20%2F%20Linux-0f766e?style=flat-square" />
+    <img alt="Frontend" src="https://img.shields.io/badge/frontend-React%20%2B%20TypeScript-2563eb?style=flat-square" />
+    <img alt="Backend" src="https://img.shields.io/badge/backend-FastAPI%20%2B%20Worker-1d4ed8?style=flat-square" />
+    <img alt="Modes" src="https://img.shields.io/badge/modes-GPT%20Step%20%2B%20OpenClaw%20Auto-0891b2?style=flat-square" />
+  </p>
+</div>
 
-- `GPT Step`
-  - 半自动、一步一步推进，用户显式决定下一步操作。
-- `OpenClaw Auto`
-  - 原生自治调研，在 `checkpoint` 暂停，等待用户补充 `guidance` 后继续。
+## What This Project Is
 
-## 当前状态
+`OpenClaw for Paper Research` is a **local, single-user research system** for paper exploration and literature workflows.
 
-截至 `2026-04-19`，当前仓库已经验证通过：
+It is designed around one idea:
 
-- `backend + worker + frontend` 可在 WSL 中启动。
-- 本地 OpenClaw gateway 可在 WSL 中启动并接入 workbench。
-- `GPT Step` 主链路可跑通：
-  - 任务创建
-  - 方向规划
-  - `explore/start`
-  - `propose/select`
-  - `graph/tree`
-  - `canvas`
-  - `node chat`
-- `OpenClaw Auto` 主链路可跑通：
-  - `start -> checkpoint -> guidance -> continue -> report/artifact`
-- workbench 已支持：
-  - `project`
-  - 可复用 `collection`
-  - 从 `collection` 创建派生 `study task`
-  - 全屏三栏工作台
-  - 左右栏折叠与宽度持久化
-  - Zotero 本地文件导入导出 v1
-- 已交付两套 demo 入口：
-  - 静态展示 Demo：一键初始化“具身智能 / Embodied AI”完整工作区
-  - 动态运行 Demo：顺序跑 `gpt_basic -> gpt_explore -> openclaw_auto`
+> most AI research tools are good at generating a single result, but weak at **carrying research progress forward**.
 
-## 默认访问地址
+Instead of treating literature review as one prompt and one report, this project turns it into a **stateful workbench** with:
 
-- 前端工作台：`http://127.0.0.1:5173`
-- 后端 API：`http://127.0.0.1:8000`
-- OpenClaw gateway：`http://127.0.0.1:18789`
+- `project` for long-running research themes
+- `task` for concrete study flows
+- `collection` for reusable paper sets
+- `canvas` for the user's working view
+- `run events` for process visibility
+- `artifacts / exports / assets` for structured outputs
 
-## 快速开始
+Current default runtime is `research_local` on `WSL / Linux VM`, with a dedicated React workbench, FastAPI backend, background worker, and optional OpenClaw gateway.
 
-### 1. 复制配置
+## Why It Exists
+
+AI literature changes fast:
+
+- new papers appear every day
+- conference and journal submissions keep rising
+- the same topic quickly branches into multiple lines
+- traditional literature review burns time on repeated search, filtering, note taking, and re-organization
+
+Existing tools already help, but most of them are still centered on:
+
+- one request
+- one run
+- one result
+
+If the user wants to continue later, change direction, branch into a subset of papers, or inherit previous progress, the workflow often resets.
+
+This project focuses on the missing layer:
+
+**continuous research progression**
+
+## What Makes It Different
+
+### 1. Continuous Research, Not Just One-Shot Reports
+
+This system is built for **multi-step, long-running research**, not only "generate a report once".
+
+You can:
+
+- plan directions
+- search one direction at a time
+- continue an exploration branch
+- compare selected papers
+- build graph snapshots
+- come back later and keep going
+
+### 2. Two Research Modes in One System
+
+#### `GPT Step`
+
+Half-automatic, user-guided research.
+
+- explicit step-by-step actions
+- user decides what to do next
+- suitable for careful, controlled exploration
+
+#### `OpenClaw Auto`
+
+Autonomous staged research.
+
+- agent explores by itself
+- syncs intermediate results back to the workbench
+- pauses at `checkpoint`
+- continues after user `guidance`
+
+This gives the project both:
+
+- high user control
+- high agent autonomy
+
+### 3. A Real Workbench, Not Just a Chat Box
+
+The current frontend is a three-pane research workspace:
+
+- **left**: projects, tasks, collections, controls
+- **center**: card-based research canvas
+- **right**: detail panel, chat, run timeline, PDF / fulltext / assets
+
+That makes it much closer to how real research work happens:
+
+- inspect structure
+- organize nodes
+- compare papers
+- view assets
+- continue a branch
+
+### 4. Canonical Graph and User Canvas Are Separated
+
+This is one of the key architecture choices:
+
+- `canonical graph` stores research structure
+- `canvas state` stores user layout and working annotations
+
+So the user can:
+
+- drag nodes
+- hide nodes
+- add notes
+- add manual edges
+- reorganize the workspace
+
+without overwriting the system's research graph.
+
+### 5. Works With Existing Research Ecosystems
+
+The goal is not to replace every research tool.
+
+The goal is to connect the missing workflow between **paper collection** and **research execution**.
+
+Current integrations and sources include:
+
+- Zotero local import / export
+- Semantic Scholar
+- arXiv
+- OpenAlex
+- Crossref
+
+## Current Feature Set
+
+### Research Organization
+
+- top-level `project`
+- research `task`
+- reusable paper `collection`
+- `collection -> study task` workflow
+
+### GPT Step Flow
+
+- create task
+- plan directions
+- search a direction
+- start explore round
+- generate candidates
+- select candidates
+- continue next round
+- build graph
+- process fulltext
+- summarize paper
+- export results
+
+### OpenClaw Auto Flow
+
+- start autonomous run
+- sync progress / nodes / edges / papers
+- pause at `checkpoint`
+- submit `guidance`
+- continue staged exploration
+- view report chunks and artifacts
+
+### Workbench UX
+
+- full-screen React workbench
+- collapsible left / right panels
+- card-based node canvas
+- node detail view
+- markdown chat
+- PDF / fulltext / asset panel
+- run timeline
+- canvas persistence
+
+### Paper / Asset Layer
+
+- PDF assets
+- fulltext status
+- export history
+- `figure` asset for extracted main figure
+- `visual` asset for fallback paper visual
+
+### Demo Delivery
+
+- static demo workspace
+- live demo flow
+- embodied AI showcase data
+
+## Demo
+
+This repository already supports two demo modes:
+
+### Static Demo
+
+A fully prepared **Embodied AI** workspace for direct presentation.
+
+It includes:
+
+- one demo project
+- one completed `GPT Step` task
+- one completed `OpenClaw Auto` task
+- one reusable collection
+- compare / checkpoint / artifact / export examples
+- real paper nodes and cached assets
+
+### Live Demo
+
+A sequential smoke showcase for real execution:
+
+- `gpt_basic`
+- `gpt_explore`
+- `openclaw_auto`
+
+### Demo Commands
+
+```bash
+bash scripts/run_demo_showcase_wsl.sh --mode static --json-out artifacts/demo/showcase-static.json
+bash scripts/run_demo_showcase_wsl.sh --mode live --json-out artifacts/demo/showcase-live.json
+bash scripts/run_demo_showcase_wsl.sh --mode all --json-out artifacts/demo/showcase-all.json
+```
+
+## Quick Start
+
+### 1. Copy Environment File
 
 ```bash
 cp .env.example .env
 ```
 
-至少建议确认这些变量：
+At minimum, check these values:
 
 ```env
 APP_PROFILE=research_local
@@ -65,7 +250,7 @@ RESEARCH_GPT_API_KEY=...
 RESEARCH_GPT_MODEL=gpt-5.4
 ```
 
-如需启用 OpenClaw Auto：
+If you want `OpenClaw Auto`, also configure:
 
 ```env
 OPENCLAW_ENABLED=true
@@ -74,126 +259,86 @@ OPENCLAW_GATEWAY_TOKEN=...
 OPENCLAW_AGENT_ID=main
 ```
 
-Zotero 默认走本地文件导入导出，不需要 API Key：
-
-1. 在 Zotero Desktop 中导出 `CSL JSON` 或 `BibTeX`
-2. 在工作台左侧点击“导入 Zotero 文件”
-3. 导入后会在当前项目下生成一个新的 collection
-4. 可以继续 `compare / summarize / build graph / create study task`
-5. task 和 collection 都支持导出为 `BibTeX / CSL JSON`
-
-如需保留旧的 Zotero Web API 兼容模式，再配置：
-
-```env
-ZOTERO_BASE_URL=https://api.zotero.org
-ZOTERO_LIBRARY_TYPE=users
-ZOTERO_LIBRARY_ID=...
-ZOTERO_API_KEY=...
-```
-
-### 2. 安装 research-local 依赖
+### 2. Install Research Runtime
 
 ```bash
 python3 -m venv .venv-wsl
 .venv-wsl/bin/python -m pip install -r requirements-research-local.txt
 ```
 
-### 3. 启动后端与 worker
+### 3. Start Backend and Worker
 
 ```bash
 bash scripts/start_research_local_wsl.sh
 ```
 
-停止：
+Stop:
 
 ```bash
 bash scripts/stop_research_local_wsl.sh
 ```
 
-### 4. 启动前端
+### 4. Start Frontend
 
 ```bash
 bash scripts/install_frontend_node_wsl.sh
 bash scripts/start_frontend_wsl.sh
 ```
 
-停止：
+Stop:
 
 ```bash
 bash scripts/stop_frontend_wsl.sh
 ```
 
-### 5. 启动 OpenClaw gateway
+### 5. Start OpenClaw Gateway
 
 ```bash
 bash scripts/start_openclaw_wsl.sh
 ```
 
-停止：
+Stop:
 
 ```bash
 bash scripts/stop_openclaw_wsl.sh
 ```
 
-## 命令行自检
+### 6. Default Local URLs
 
-这里有两套命令，解决的是两类不同问题。
+- Frontend workbench: `http://127.0.0.1:5173`
+- Backend API: `http://127.0.0.1:8000`
+- OpenClaw gateway: `http://127.0.0.1:18789`
 
-### 1. API 连通性检查
+## Validation and Smoke
 
-用于判断主要 HTTP 接口是否能直接打通，不依赖浏览器操作。
-
-在 WSL 中运行：
+### API Connectivity Check
 
 ```bash
 bash scripts/run_api_connectivity_check_wsl.sh --iterations 10 --json-out artifacts/research-api-check/current.json
 ```
 
-如果你是在 Windows PowerShell 里直接发起：
+This is useful for verifying:
 
-```powershell
-wsl.exe bash -lc 'cd /mnt/d/project/OpenClaw-for-paper-research && bash scripts/run_api_connectivity_check_wsl.sh --iterations 10 --json-out artifacts/research-api-check/current.json'
-```
+- workbench config
+- project / collection APIs
+- task APIs
+- canvas read / write
+- run events API
+- Zotero config API
 
-这份检查会直接打这些接口：
-
-- `GET /api/v1/health`
-- `GET /api/v1/research/workbench/config`
-- `GET /api/v1/research/projects`
-- `POST /api/v1/research/projects`
-- `GET /api/v1/research/projects/{project_id}`
-- `GET /api/v1/research/projects/{project_id}/collections`
-- `POST /api/v1/research/projects/{project_id}/collections`
-- `GET /api/v1/research/collections/{collection_id}`
-- `GET /api/v1/research/tasks`
-- `POST /api/v1/research/tasks`
-- `GET /api/v1/research/tasks/{task_id}`
-- `GET /api/v1/research/tasks/{task_id}/canvas`
-- `PUT /api/v1/research/tasks/{task_id}/canvas`
-- `GET /api/v1/research/tasks/{task_id}/runs/{run_id}/events`
-- `GET /api/v1/research/integrations/zotero/config`
-
-说明：
-
-- 这份检查是“接口级”检查。
-- 它会顺手创建临时 project、collection、task，用于确认写接口和读接口都正常。
-- 当 worker 正在持续消费任务、而底层仍是 SQLite 时，连续压测可能出现个别超时，这更像“当前本地并发环境下的可用性”而不是“接口完全不可用”。
-
-### 2. 全链路 smoke
-
-用于判断 research 主流程是否能完整跑通。
+### Research Live Smoke
 
 ```bash
 bash scripts/run_research_live_smoke_wsl.sh --scenario all
 ```
 
-连续两轮稳定性检查：
+Run two rounds for stability:
 
 ```bash
 bash scripts/run_research_live_smoke_wsl.sh --scenario all --iterations 2
 ```
 
-也可以单独跑某一条链路：
+Run single scenarios:
 
 ```bash
 bash scripts/run_research_live_smoke_wsl.sh --scenario gpt_basic
@@ -201,101 +346,112 @@ bash scripts/run_research_live_smoke_wsl.sh --scenario gpt_explore
 bash scripts/run_research_live_smoke_wsl.sh --scenario openclaw_auto
 ```
 
-### 3. 静态展示 Demo + 动态 Showcase
+## Typical Research Workflow
 
-如果你要直接演示现成结果，先初始化静态 Demo：
+### GPT Step
 
-```bash
-bash scripts/run_demo_showcase_wsl.sh --mode static --json-out artifacts/demo/showcase-static.json
-```
+1. Create a project
+2. Create a `GPT Step` task
+3. Plan directions
+4. Search one direction
+5. Start explore round
+6. Generate and select candidates
+7. Build graph
+8. Process fulltext
+9. Summarize selected papers
+10. Export results
 
-如果你要现场跑一遍动态流程：
+### OpenClaw Auto
 
-```bash
-bash scripts/run_demo_showcase_wsl.sh --mode live --json-out artifacts/demo/showcase-live.json
-```
+1. Create a task in `OpenClaw Auto` mode
+2. Start autonomous research
+3. Wait for `checkpoint`
+4. Submit `guidance`
+5. Continue exploration
+6. Inspect report chunks and artifacts
 
-如果你想把两者一起准备好：
+### Collection-Driven Workflow
 
-```bash
-bash scripts/run_demo_showcase_wsl.sh --mode all --json-out artifacts/demo/showcase-all.json
-```
+1. Import papers into a collection
+2. Review collection details
+3. Compare or summarize the collection
+4. Create a new `study task` from the collection
+5. Continue exploration from the seed corpus
 
-这套脚本默认主题固定为“具身智能 / Embodied AI”，并会：
-
-- 为静态展示写入可直接打开的 demo project / task / collection / compare / artifact 数据
-- 为动态展示顺序调用现有 live smoke 场景
-- 在 `artifacts/demo/` 下输出 JSON 结果，方便复盘和现场说明
-
-## 日常使用入口
-
-推荐阅读顺序：
-
-- [docs/RESEARCH_LOCAL_QUICKSTART.md](docs/RESEARCH_LOCAL_QUICKSTART.md)
-  - WSL 启动、OpenClaw 启停、API 自检、smoke 命令
-- [docs/RESEARCH_USAGE_ZH.md](docs/RESEARCH_USAGE_ZH.md)
-  - 用户使用说明书，包含 `project / task / collection / GPT Step / OpenClaw Auto / Zotero`
-- [docs/DEMO_STEPS.md](docs/DEMO_STEPS.md)
-  - 静态展示 Demo 与动态 Showcase 的演示顺序
-- [docs/PROJECT_OVERVIEW_ZH.md](docs/PROJECT_OVERVIEW_ZH.md)
-  - 当前架构、数据结构、接口与改造进度
-- [docs/ROADMAP_ZH.md](docs/ROADMAP_ZH.md)
-  - 下一步优化方向
-- [docs/README.md](docs/README.md)
-  - `docs/` 文档索引
-
-## 当前工作台能力
-
-### 研究组织
-
-- 顶层 `project`
-- 研究任务 `task`
-- 可复用命名论文集合 `collection`
-- 从 `collection` 创建派生 `study task`
-
-### 研究模式
-
-- `GPT Step`
-  - 明确动作链，逐步推进
-- `OpenClaw Auto`
-  - 原生自治研究 + checkpoint 引导
-
-### 工作台
-
-- 独立前端工程 `frontend/`
-- 全屏卡片式画布
-- 左右栏折叠与宽度持久化
-- 节点详情、Context Chat、Run Timeline、PDF / Fulltext
-- collection 侧栏和 collection detail
-
-### 外部源
-
-- discovery：
-  - `Semantic Scholar`
-  - `arXiv`
-  - `OpenAlex`
-- citation：
-  - `Semantic Scholar`
-  - `OpenAlex`
-  - `Crossref`
-- integration：
-  - Zotero v1 默认走本地文件导入导出
-  - 旧的 Web API 导入仅保留为兼容模式
-
-## 仓库结构
+## Repository Structure
 
 ```text
-app/                  FastAPI 后端与 research 服务
-frontend/             React 工作台
-docs/                 中文文档与设计说明
-scripts/              WSL 启停、构建、打包、API 自检、smoke 脚本
-tests/                后端测试
-artifacts/            研究报告、导出文件、前端打包产物、检查结果
-data/                 本地 SQLite 数据
+app/                  FastAPI backend, domain logic, services, workers
+frontend/             React + TypeScript workbench
+docs/                 project docs, architecture, usage, roadmap, showcase material
+scripts/              WSL startup, smoke, demo, packaging helpers
+tests/                backend tests
+artifacts/            research outputs, saved files, demo outputs
+data/                 local SQLite database
+output/               generated docs and deliverables
 ```
 
-## 说明
+## Current Status
 
-- 旧的企业微信、提醒、移动端认证、Admin、ASR、自建通知链路仍保留在代码中，但默认不进入 `research_local` 启动链路。
-- `research_local` 下 research API 默认绑定单例本地用户，无需 JWT。
-- 当前环境仍以 SQLite 为主；如果后续需要更高的并发稳定性，优先考虑迁移到 PostgreSQL。
+As of the current `research_local` mainline:
+
+- backend + worker + frontend run in WSL
+- local OpenClaw gateway can be started and used
+- `GPT Step` main flow is connected
+- `OpenClaw Auto` staged flow is connected
+- project / collection / study task flow is available
+- Zotero local import / export v1 is available
+- static and live demo entry points are available
+
+## Documentation
+
+### Start Here
+
+- [docs/RESEARCH_LOCAL_QUICKSTART.md](docs/RESEARCH_LOCAL_QUICKSTART.md)
+  - setup, start / stop, smoke, demo commands
+- [docs/RESEARCH_USAGE_ZH.md](docs/RESEARCH_USAGE_ZH.md)
+  - user guide for project / task / collection / GPT Step / OpenClaw Auto / Zotero
+- [docs/PROJECT_OVERVIEW_ZH.md](docs/PROJECT_OVERVIEW_ZH.md)
+  - current project overview, architecture state, API and data model summary
+
+### More Docs
+
+- [docs/RESEARCH_ARCH.md](docs/RESEARCH_ARCH.md)
+- [docs/DEMO_STEPS.md](docs/DEMO_STEPS.md)
+- [docs/ROADMAP_ZH.md](docs/ROADMAP_ZH.md)
+- [docs/PPT_SHOWCASE_ADVANTAGES_ZH.md](docs/PPT_SHOWCASE_ADVANTAGES_ZH.md)
+- [docs/SHOWCASE_REPORT_DRAFT_ZH.md](docs/SHOWCASE_REPORT_DRAFT_ZH.md)
+- [docs/README.md](docs/README.md)
+
+## Design Notes
+
+This README structure intentionally follows the common pattern used by many popular open-source repositories:
+
+- strong hero section
+- short "what it is / why it exists"
+- highlights before implementation details
+- quick start near the top
+- clear docs index
+- demo and validation entry points
+
+That makes the repository easier to scan for both:
+
+- first-time visitors
+- reviewers or presentation audiences
+
+## Roadmap Direction
+
+Near-term improvement directions:
+
+- continue refining the frontend workbench experience
+- strengthen OpenClaw Auto stage handling and report organization
+- improve collection compare and reusable research branches
+- validate Docker Compose on a real Docker environment
+- continue splitting heavy research service logic into clearer subdomains
+
+## Notes
+
+- `research_local` is the current default mainline.
+- Legacy WeCom / reminder / mobile auth / admin paths are retained in code but **soft-disabled** from the default runtime.
+- Research APIs in local mode do **not** require JWT.
+- SQLite is the current default database. If higher concurrency becomes a priority, PostgreSQL should be the next step.
