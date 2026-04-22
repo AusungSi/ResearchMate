@@ -1,7 +1,7 @@
 <div align="center">
   <img src="docs/design/logo.png" alt="OpenClaw for Paper Research logo" width="220" />
 
-  # OpenClaw for Paper Research
+  # ResearchMate
 
   **A local research workbench for papers - built for continuous exploration, not one-shot reports.**
 
