@@ -230,7 +230,7 @@ export function Workbench() {
 
   const graphQuery = useQuery({
     queryKey: ["graph", activeTaskId],
-    queryFn: () => apiFetch<GraphResponse>(`/api/v1/research/tasks/${activeTaskId}/graph?view=tree&include_papers=true&paper_limit=24`),
+    queryFn: () => apiFetch<GraphResponse>(`/api/v1/research/tasks/${activeTaskId}/graph?view=tree&include_papers=true&paper_limit=50`),
     enabled: Boolean(activeTaskId),
     refetchInterval: 5000,
   });

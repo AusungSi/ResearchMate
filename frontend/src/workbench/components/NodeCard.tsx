@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { Handle, Position, type NodeProps } from "@xyflow/react";
 import { directionSubtitle, nodeTypeLabel, summarizeForNode, summarySourceLabel } from "../display";
 import type { FlowNodeData } from "../types";
@@ -11,6 +11,10 @@ export function NodeCard({ data }: NodeProps) {
   const previewUrl = node.type === "paper" && typeof node.preview_url === "string" ? node.preview_url : "";
   const showPreview = Boolean(previewUrl && !previewFailed);
   const isDirection = node.type === "direction";
+
+  useEffect(() => {
+    setPreviewFailed(false);
+  }, [previewUrl]);
 
   return (
     <div className="relative w-[380px] overflow-hidden rounded-[28px] border border-slate-200 bg-white/95 shadow-[0_10px_34px_rgba(15,23,42,0.08)] backdrop-blur">
