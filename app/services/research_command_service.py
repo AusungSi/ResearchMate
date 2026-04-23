@@ -369,7 +369,7 @@ class ResearchCommandService:
     def _help_text() -> str:
         return (
             "调研命令：\n"
-            "1) 调研 主题：{topic} 年份：2021-2026 领域：xxx 数量：20 来源：semantic_scholar|arxiv\n"
+            "1) 调研 主题：{topic} 年份：2021-2026 领域：xxx 数量：20 来源：semantic_scholar|openalex|arxiv\n"
             "2) 调研 状态\n"
             "3) 调研 图谱 查看 [方向 k]\n"
             "4) 复杂调研流程请在本地前端完成（企业微信仅保留提醒与状态）"
@@ -434,7 +434,7 @@ class ResearchCommandService:
                 if value:
                     extras[key] = value
         if not topic:
-            return "主题不能为空。请使用：调研 主题：{topic} 年份：2021-2026 数量：20 来源：arxiv"
+            return "主题不能为空。请使用：调研 主题：{topic} 年份：2021-2026 数量：20 来源：semantic_scholar|openalex|arxiv"
         constraints: dict[str, object] = {}
         year_value = extras.get("年份")
         if year_value:
@@ -456,10 +456,10 @@ class ResearchCommandService:
         if sources_value:
             raw_sources = re.split(r"[|,，/\s]+", sources_value)
             sources = [item.strip().lower() for item in raw_sources if item and item.strip()]
-            allowed = {"semantic_scholar", "arxiv"}
+            allowed = {"semantic_scholar", "arxiv", "openalex"}
             filtered = [src for src in sources if src in allowed]
             if not filtered:
-                return "来源仅支持 semantic_scholar 或 arxiv（可用 | 分隔）。"
+                return "来源仅支持 semantic_scholar、openalex 或 arxiv（可用 | 分隔）。"
             constraints["sources"] = filtered
         domain_value = extras.get("领域")
         if domain_value:
@@ -469,7 +469,7 @@ class ResearchCommandService:
     @staticmethod
     def _render_constraints(constraints: dict) -> str:
         if not constraints:
-            return "约束：默认（来源=semantic_scholar,arxiv；数量=系统默认）"
+            return "约束：默认（来源=semantic_scholar,openalex,arxiv；数量=系统默认）"
         parts: list[str] = []
         if constraints.get("year_from"):
             y_from = constraints.get("year_from")

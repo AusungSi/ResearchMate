@@ -110,7 +110,7 @@ class Settings(BaseSettings):
     research_seed_max_abstract_chars: int = 600
     research_round_topn_default: int = 12
     research_page_size: int = 10
-    research_sources_default: str = "semantic_scholar,arxiv"
+    research_sources_default: str = "semantic_scholar,openalex,arxiv"
     research_artifact_dir: str = "./artifacts/research"
     research_save_base_dir: str = "./artifacts/research/saved"
     research_cache_enabled: bool = True

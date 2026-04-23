@@ -132,7 +132,9 @@ def test_research_flow_create_plan_search_and_select(db_session):
         service._search_semantic_scholar = fake_search
         service._search_arxiv = lambda query, *, top_n, constraints: []
 
-        queued_task = service.enqueue_search(db_session, user_id=user.id, direction_index=1)
+        queued_task, queued, noop_reason = service.enqueue_search(db_session, user_id=user.id, direction_index=1)
+        assert queued is True
+        assert noop_reason is None
         assert queued_task.status.value == "searching"
 
         processed = service.process_one_job(db_session)
@@ -176,11 +178,11 @@ def test_research_job_retry_then_fail(db_session):
             constraints={},
         )
 
-        def fail_plan(topic: str, constraints: dict):
+        def fail_plan(*args, **kwargs):
             raise RuntimeError("plan boom")
 
         service._build_seed_corpus_for_task = lambda db, task, constraints: []  # noqa: E731
-        service._plan_directions = fail_plan
+        service._plan_directions_from_seed = fail_plan
 
         processed = service.process_one_job(db_session)
         assert processed == 1
@@ -272,6 +274,14 @@ def test_research_command_topic_with_constraints(db_session):
         settings.research_enabled = original_research_enabled
 
 
+def test_research_command_topic_accepts_openalex_source():
+    parsed = ResearchCommandService._parse_topic_payload("ultrasound report generation 来源：openalex|arxiv")
+    assert isinstance(parsed, tuple)
+    topic, constraints = parsed
+    assert topic == "ultrasound report generation"
+    assert constraints["sources"] == ["openalex", "arxiv"]
+
+
 def test_research_cache_hit_and_force_refresh(db_session):
     service = ResearchService(openclaw_client=FakeOpenClawClient(), wecom_client=None)
     user = UserRepo(db_session).get_or_create("research-cache-user", timezone_name="Asia/Shanghai")
@@ -282,7 +292,7 @@ def test_research_cache_hit_and_force_refresh(db_session):
         constraints={"sources": ["semantic_scholar"], "top_n": 5},
     )
     service._build_seed_corpus_for_task = lambda db, task, constraints: []  # noqa: E731
-    service._plan_directions = lambda _topic, _constraints: [  # noqa: E731
+    service._plan_directions_from_seed = lambda *args, **kwargs: [  # noqa: E731
         {"name": "方向A", "queries": ["cache query"], "exclude_terms": []},
     ]
     service.process_one_job(db_session)
@@ -373,6 +383,124 @@ def test_research_semantic_429_fallback_to_arxiv(db_session):
     assert page["items"][0]["source"] == "arxiv"
     metrics = service.metrics_snapshot()
     assert any(key.startswith("semantic_scholar:fallback_arxiv_from_") for key in metrics["research_search_source_status"])
+
+
+def test_research_search_supports_openalex_provider(db_session):
+    service = ResearchService(openclaw_client=FakeOpenClawClient(), wecom_client=None)
+    user = UserRepo(db_session).get_or_create("research-openalex-user", timezone_name="Asia/Shanghai")
+    service._build_seed_corpus_for_task = lambda db, task, constraints: []  # noqa: E731
+    service._plan_directions_from_seed = lambda *args, **kwargs: [  # noqa: E731
+        {"name": "方向A", "queries": ["openalex query"], "exclude_terms": []},
+    ]
+    task = service.create_task(
+        db_session,
+        user_id=user.id,
+        topic="openalex topic",
+        constraints={"sources": ["openalex"], "top_n": 5},
+    )
+    service.process_one_job(db_session)
+    service.venue_metrics_service.lookup_for_paper = lambda **_: {}  # type: ignore[method-assign]
+    service._search_openalex = lambda query, *, top_n, constraints: (  # noqa: E731
+        [
+            {
+                "paper_id": "oa-1",
+                "title": "OpenAlex Indexed Paper",
+                "title_norm": "openalex indexed paper",
+                "authors": ["A"],
+                "year": 2024,
+                "venue": "ACL",
+                "doi": "10.1000/openalex-1",
+                "url": "https://openalex.org/W1",
+                "abstract": "abstract",
+                "source": "openalex",
+                "relevance_score": None,
+            }
+        ],
+        "ok",
+        None,
+    )
+
+    service.enqueue_search(db_session, user_id=user.id, direction_index=1)
+    service.process_one_job(db_session)
+    page = service.page_direction_papers(db_session, user_id=user.id, direction_index=1, page=1)
+    assert page["total"] == 1
+    assert page["items"][0]["source"] == "openalex"
+    assert page["items"][0]["venue"] == "ACL"
+
+
+def test_research_search_prefers_ranked_venue_over_arxiv(db_session):
+    service = ResearchService(openclaw_client=FakeOpenClawClient(), wecom_client=None)
+    user = UserRepo(db_session).get_or_create("research-quality-user", timezone_name="Asia/Shanghai")
+    service._build_seed_corpus_for_task = lambda db, task, constraints: []  # noqa: E731
+    service._plan_directions_from_seed = lambda *args, **kwargs: [  # noqa: E731
+        {"name": "方向A", "queries": ["quality query"], "exclude_terms": []},
+    ]
+    task = service.create_task(
+        db_session,
+        user_id=user.id,
+        topic="quality topic",
+        constraints={"sources": ["semantic_scholar", "openalex", "arxiv"], "top_n": 5},
+    )
+    service.process_one_job(db_session)
+    service.venue_metrics_service.lookup_for_paper = lambda **kwargs: {  # type: ignore[method-assign]
+        "source_type": "journal" if kwargs.get("venue") == "Nature Medicine" else "repository",
+        "ccf": {"rank": None, "category": None},
+        "jcr": {"quartile": "Q1" if kwargs.get("venue") == "Nature Medicine" else None},
+        "cas": {"quartile": "1区" if kwargs.get("venue") == "Nature Medicine" else None, "top": "Top" if kwargs.get("venue") == "Nature Medicine" else None},
+        "sci": {"indexed": True if kwargs.get("venue") == "Nature Medicine" else False},
+        "ei": {"indexed": False},
+        "impact_factor": {"value": 58.7 if kwargs.get("venue") == "Nature Medicine" else None},
+        "paper_citation_count": 120 if kwargs.get("venue") == "Nature Medicine" else 0,
+        "venue_citation_count": 100000 if kwargs.get("venue") == "Nature Medicine" else 0,
+        "h_index": 300 if kwargs.get("venue") == "Nature Medicine" else 0,
+    }
+    service._search_semantic_scholar = lambda query, *, top_n, constraints: (  # noqa: E731
+        [
+            {
+                "paper_id": "s2-quality",
+                "title": "Clinical Foundation Models for Ultrasound Reporting",
+                "title_norm": "clinical foundation models for ultrasound reporting",
+                "authors": ["A"],
+                "year": 2023,
+                "venue": "Nature Medicine",
+                "doi": "10.1000/nature-med-1",
+                "url": "https://example.org/nature-med",
+                "abstract": "abstract",
+                "source": "semantic_scholar",
+                "relevance_score": None,
+            }
+        ],
+        "ok",
+        None,
+    )
+    service._search_openalex = lambda query, *, top_n, constraints: ([], "ok_empty", None)  # noqa: E731
+    service._search_arxiv = lambda query, *, top_n, constraints: (  # noqa: E731
+        [
+            {
+                "paper_id": "arxiv-new",
+                "title": "Fresh Preprint for Ultrasound Reporting",
+                "title_norm": "fresh preprint for ultrasound reporting",
+                "authors": ["B"],
+                "year": 2026,
+                "venue": "arXiv",
+                "doi": None,
+                "url": "https://arxiv.org/abs/9999.00001",
+                "abstract": "abstract",
+                "source": "arxiv",
+                "relevance_score": None,
+            }
+        ],
+        "ok",
+        None,
+    )
+
+    service.enqueue_search(db_session, user_id=user.id, direction_index=1)
+    service.process_one_job(db_session)
+    page = service.page_direction_papers(db_session, user_id=user.id, direction_index=1, page=1)
+    assert page["total"] == 2
+    assert page["items"][0]["venue"] == "Nature Medicine"
+    assert page["items"][0]["source"] == "semantic_scholar"
+    assert page["items"][1]["venue"] == "arXiv"
 
 
 def test_research_export_file_fallback_to_text_path(db_session):

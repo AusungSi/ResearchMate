@@ -1354,7 +1354,7 @@ class ResearchService:
         return self._task_to_dict(db, row)
 
     def get_workbench_config(self) -> dict:
-        discovery_providers = ["semantic_scholar", "arxiv", "openalex"]
+        discovery_providers = ["semantic_scholar", "openalex", "arxiv"]
         citation_providers = _resolve_citation_sources(None, self.settings.research_citation_sources_default)
         provider_status = [
             {
@@ -2916,7 +2916,7 @@ class ResearchService:
         cache_repo = ResearchSearchCacheRepo(db)
         for query in query_terms[:4]:
             effective_query = _merge_query_and_excludes(query, exclude_terms)
-            ordered_sources = [src for src in ("semantic_scholar", "arxiv") if src in allowed_sources]
+            ordered_sources = [src for src in ("semantic_scholar", "openalex", "arxiv") if src in allowed_sources]
             for source in ordered_sources:
                 result = self._search_with_cache(
                     cache_repo=cache_repo,
@@ -2942,6 +2942,7 @@ class ResearchService:
                 if touch_lease:
                     touch_lease()
         papers = self._dedupe_papers(all_papers)
+        papers = self._rank_discovered_papers(papers, top_n=top_n, constraints=constraints)
         papers = papers[: max(1, top_n)]
         for row in papers:
             row["method_summary"] = self._summarize_method(row.get("abstract") or "")
@@ -4902,10 +4903,10 @@ class ResearchService:
             "sources": constraints.get("sources"),
         }
         sources = _resolve_sources(constraints_seed.get("sources"), self.settings.research_sources_default)
-        ordered_sources = [src for src in ("semantic_scholar", "arxiv", "openalex") if src in sources] or [
+        ordered_sources = [src for src in ("semantic_scholar", "openalex", "arxiv") if src in sources] or [
             "semantic_scholar",
-            "arxiv",
             "openalex",
+            "arxiv",
         ]
 
         collected: list[dict] = []
@@ -4923,7 +4924,8 @@ class ResearchService:
                 collected.extend(fetched.papers)
             if len(collected) >= top_n * 2:
                 break
-        deduped = self._dedupe_papers(collected)[:top_n]
+        deduped = self._dedupe_papers(collected)
+        deduped = self._rank_discovered_papers(deduped, top_n=top_n, constraints=constraints_seed)[:top_n]
         return ResearchSeedPaperRepo(db).replace_for_task(task.id, deduped)
 
     def _plan_directions_from_seed(
@@ -5460,6 +5462,160 @@ class ResearchService:
         merged = list(by_doi.values()) + by_title
         merged.sort(key=lambda x: (x.get("year") or 0), reverse=True)
         return merged
+
+    def _rank_discovered_papers(self, papers: list[dict], *, top_n: int, constraints: dict) -> list[dict]:
+        if len(papers) <= 1:
+            return papers
+
+        ranked = list(papers)
+        ranked.sort(key=self._paper_preliminary_sort_key, reverse=True)
+        sources = _resolve_sources(constraints.get("sources"), self.settings.research_sources_default)
+        if sources == {"arxiv"}:
+            return ranked
+
+        rerank_limit = min(len(ranked), max(30, int(top_n) * 2))
+        metrics_cache: dict[tuple[str, str, str, int | None], dict] = {}
+        head = ranked[:rerank_limit]
+        tail = ranked[rerank_limit:]
+        head.sort(
+            key=lambda paper: self._paper_quality_sort_key(paper, metrics_cache=metrics_cache),
+            reverse=True,
+        )
+        return head + tail
+
+    @staticmethod
+    def _paper_preliminary_sort_key(paper: dict) -> tuple[float, int, int, int]:
+        source = str(paper.get("source") or "").strip().lower()
+        venue = str(paper.get("venue") or "").strip().lower()
+        doi = str(paper.get("doi") or "").strip()
+        year = _to_int_or_none(paper.get("year")) or 0
+        source_score = {
+            "openalex": 3,
+            "semantic_scholar": 2,
+            "arxiv": 0,
+        }.get(source, 1)
+        venue_score = 0.0
+        if venue and "arxiv" not in venue:
+            venue_score = 1.0
+        if venue in {"arxiv", "openalex"}:
+            venue_score = -1.0
+        doi_score = 1 if doi else 0
+        return (venue_score, source_score, doi_score, year)
+
+    def _paper_quality_sort_key(
+        self,
+        paper: dict,
+        *,
+        metrics_cache: dict[tuple[str, str, str, int | None], dict],
+    ) -> tuple[float, int, int, int]:
+        metrics = self._paper_quality_metrics(paper, metrics_cache=metrics_cache)
+        quality_score = self._paper_quality_score(paper, metrics)
+        source = str(paper.get("source") or "").strip().lower()
+        source_score = {
+            "openalex": 3,
+            "semantic_scholar": 2,
+            "arxiv": 0,
+        }.get(source, 1)
+        doi_score = 1 if str(paper.get("doi") or "").strip() else 0
+        year = _to_int_or_none(paper.get("year")) or 0
+        return (quality_score, source_score, doi_score, year)
+
+    def _paper_quality_metrics(
+        self,
+        paper: dict,
+        *,
+        metrics_cache: dict[tuple[str, str, str, int | None], dict],
+    ) -> dict:
+        venue = str(paper.get("venue") or "").strip()
+        source = str(paper.get("source") or "").strip().lower()
+        doi = str(paper.get("doi") or "").strip().lower()
+        title = str(paper.get("title") or "").strip()
+        year = _to_int_or_none(paper.get("year"))
+        cache_key = (venue.lower(), doi, title.lower(), year)
+        if cache_key in metrics_cache:
+            return metrics_cache[cache_key]
+
+        if not venue or source == "arxiv" or "arxiv" in venue.lower():
+            metrics_cache[cache_key] = {}
+            return {}
+
+        metrics = self.venue_metrics_service.lookup_for_paper(
+            venue=venue,
+            doi=doi or None,
+            title=title or None,
+            year=year,
+        )
+        metrics_cache[cache_key] = dict(metrics or {})
+        return metrics_cache[cache_key]
+
+    @staticmethod
+    def _paper_quality_score(paper: dict, metrics: dict) -> float:
+        source = str(paper.get("source") or "").strip().lower()
+        venue = str(paper.get("venue") or "").strip().lower()
+        doi = str(paper.get("doi") or "").strip()
+        year = _to_int_or_none(paper.get("year")) or 0
+        score = 0.0
+
+        if doi:
+            score += 1.5
+        if source == "openalex":
+            score += 1.0
+        elif source == "semantic_scholar":
+            score += 0.5
+        if venue and "arxiv" not in venue and venue != "openalex":
+            score += 1.0
+        if source == "arxiv" or "arxiv" in venue:
+            score -= 8.0
+
+        source_type = str(metrics.get("source_type") or "").strip().lower()
+        if source_type == "journal":
+            score += 2.5
+        elif source_type == "conference":
+            score += 2.0
+        elif source_type == "repository":
+            score -= 6.0
+
+        ccf_rank = str((metrics.get("ccf") or {}).get("rank") or "").strip().upper()
+        score += {
+            "A": 6.0,
+            "B": 4.0,
+            "C": 2.0,
+        }.get(ccf_rank, 0.0)
+
+        jcr_quartile = str((metrics.get("jcr") or {}).get("quartile") or "").strip().upper()
+        score += {
+            "Q1": 6.0,
+            "Q2": 4.0,
+            "Q3": 2.0,
+            "Q4": 1.0,
+        }.get(jcr_quartile, 0.0)
+
+        cas_quartile = str((metrics.get("cas") or {}).get("quartile") or "").strip()
+        score += {
+            "1区": 5.0,
+            "2区": 3.0,
+            "3区": 1.5,
+            "4区": 0.5,
+        }.get(cas_quartile, 0.0)
+        if str((metrics.get("cas") or {}).get("top") or "").strip().lower() == "top":
+            score += 1.0
+        if (metrics.get("sci") or {}).get("indexed") is True:
+            score += 1.5
+        if (metrics.get("ei") or {}).get("indexed") is True:
+            score += 1.0
+
+        impact_factor = (metrics.get("impact_factor") or {}).get("value")
+        if isinstance(impact_factor, (int, float)):
+            score += min(float(impact_factor), 20.0) / 5.0
+
+        paper_citation_count = _to_int_or_none(metrics.get("paper_citation_count")) or 0
+        venue_citation_count = _to_int_or_none(metrics.get("venue_citation_count")) or 0
+        h_index = _to_int_or_none(metrics.get("h_index")) or 0
+        score += min(paper_citation_count, 200) / 100.0
+        score += min(venue_citation_count, 500000) / 250000.0
+        score += min(h_index, 400) / 200.0
+        score += min(max(year - 2018, 0), 8) / 8.0
+        return score
 
     def _task_to_dict(self, db: Session, row: ResearchTask) -> dict:
         row = self._ensure_task_project(db, row)
