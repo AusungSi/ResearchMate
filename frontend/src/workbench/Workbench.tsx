@@ -86,6 +86,8 @@ const MANUAL_NODE_LABELS: Record<"note" | "question" | "reference" | "group" | "
   report: "新的报告",
 };
 
+const VENUE_METRICS_COLLAPSED_STORAGE_KEY = "research-workbench:venue-metrics-collapsed";
+
 function isTransientCanvasSaveError(cause: unknown) {
   const message = cause instanceof Error ? cause.message.toLowerCase() : String(cause).toLowerCase();
   return (
@@ -118,6 +120,16 @@ export function Workbench() {
   const [collectionLimit, setCollectionLimit] = useState(50);
   const [selectedCollectionItemIds, setSelectedCollectionItemIds] = useState<number[]>([]);
   const [relayoutNonce, setRelayoutNonce] = useState(0);
+  const [venueMetricsCollapsed, setVenueMetricsCollapsed] = useState(() => {
+    if (typeof window === "undefined") {
+      return false;
+    }
+    try {
+      return window.localStorage.getItem(VENUE_METRICS_COLLAPSED_STORAGE_KEY) === "true";
+    } catch {
+      return false;
+    }
+  });
   const flowRef = useRef<ReactFlowInstance<Node<FlowNodeData>, Edge> | null>(null);
   const zoteroFileInputRef = useRef<HTMLInputElement | null>(null);
   const persistTimer = useRef<number | null>(null);
@@ -205,6 +217,17 @@ export function Workbench() {
     setCollectionSearchText("");
     setSelectedCollectionItemIds([]);
   }, [activeCollectionId]);
+
+  useEffect(() => {
+    if (typeof window === "undefined") {
+      return;
+    }
+    try {
+      window.localStorage.setItem(VENUE_METRICS_COLLAPSED_STORAGE_KEY, venueMetricsCollapsed ? "true" : "false");
+    } catch {
+      // Ignore storage errors so the panel still works in restricted contexts.
+    }
+  }, [venueMetricsCollapsed]);
 
   const collectionDetailQuery = useQuery({
     queryKey: ["collection", activeCollectionId, collectionLimit],
@@ -1475,21 +1498,38 @@ export function Workbench() {
                   ) : null}
                   {venueMetricsQuery.data?.items?.length ? (
                     <div className="mt-4 rounded-2xl border border-slate-200 bg-slate-50 p-3">
-                      <div className="text-xs font-semibold uppercase tracking-[0.16em] text-slate-400">Venue Metrics</div>
-                      <div className="mt-3 space-y-2">
-                        {venueMetricsQuery.data.items.slice(0, 8).map((item) => (
-                          <div key={item.venue_key} className="rounded-2xl border border-slate-200 bg-white p-3 text-sm">
-                            <div className="flex items-start justify-between gap-3">
-                              <div>
-                                <div className="font-medium text-slate-900">{item.venue}</div>
-                                <div className="mt-1 text-xs text-slate-500">
-                                  {item.source_type || "类型未知"} · {item.paper_count} 篇论文
+                      <div className="flex items-center justify-between gap-3">
+                        <div className="text-xs font-semibold uppercase tracking-[0.16em] text-slate-400">Venue Metrics</div>
+                        <button
+                          type="button"
+                          className="rounded-full border border-slate-200 px-2 py-1 text-xs text-slate-500 transition hover:border-slate-300 hover:bg-white"
+                          aria-expanded={!venueMetricsCollapsed}
+                          aria-label={venueMetricsCollapsed ? "展开 Venue Metrics" : "折叠 Venue Metrics"}
+                          onClick={() => setVenueMetricsCollapsed((current) => !current)}
+                        >
+                          {venueMetricsCollapsed ? "展开" : "折叠"}
+                        </button>
+                      </div>
+                      <div
+                        className={`grid transition-all duration-300 ease-out ${venueMetricsCollapsed ? "grid-rows-[0fr] opacity-0" : "mt-3 grid-rows-[1fr] opacity-100"}`}
+                      >
+                        <div className="overflow-hidden">
+                          <div className="space-y-2">
+                            {venueMetricsQuery.data.items.slice(0, 8).map((item) => (
+                              <div key={item.venue_key} className="rounded-2xl border border-slate-200 bg-white p-3 text-sm">
+                                <div className="flex items-start justify-between gap-3">
+                                  <div>
+                                    <div className="font-medium text-slate-900">{item.venue}</div>
+                                    <div className="mt-1 text-xs text-slate-500">
+                                      {item.source_type || "类型未知"} · {item.paper_count} 篇论文
+                                    </div>
+                                  </div>
+                                  <div className="text-right text-xs text-slate-500">{formatVenueMetricSummary(item) || "暂无分级数据"}</div>
                                 </div>
                               </div>
-                              <div className="text-right text-xs text-slate-500">{formatVenueMetricSummary(item) || "暂无分级数据"}</div>
-                            </div>
+                            ))}
                           </div>
-                        ))}
+                        </div>
                       </div>
                     </div>
                   ) : null}
