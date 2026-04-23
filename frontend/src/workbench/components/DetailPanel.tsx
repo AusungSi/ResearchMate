@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import type { Node } from "@xyflow/react";
-import type { FlowNodeData, PaperAssetItem, PaperAssetResponse, PaperDetail, RoundCandidate, TaskMode } from "../types";
+import type { FlowNodeData, PaperAssetItem, PaperAssetResponse, PaperDetail, RoundCandidate, TaskMode, VenueMetrics } from "../types";
 import { inferRoundId, isPaperNode, tone } from "../utils";
 import { Badge, MarkdownText, SectionTitle, SmallButton } from "./shared";
 
@@ -66,6 +66,7 @@ const SUMMARY_STATUS_LABELS: Record<string, string> = {
 };
 
 const ASSET_KIND_LABELS: Record<string, string> = {
+  overall: "Overall 图",
   pdf: "PDF",
   txt: "TXT",
   md: "Markdown",
@@ -74,8 +75,33 @@ const ASSET_KIND_LABELS: Record<string, string> = {
   visual: "展示图",
 };
 
+const ASSET_STATUS_LABELS: Record<string, string> = {
+  available: "可访问",
+  not_started: "未处理",
+  fetching: "抓取中",
+  fetched: "已下载",
+  parsing: "解析中",
+  parsed: "已解析",
+  need_upload: "需上传 PDF",
+  failed: "处理失败",
+  needs_pdf: "需先获取 PDF",
+  not_extracted: "未提取到",
+  not_built: "未生成",
+  missing: "缺失",
+};
+
 function assetByKind(assets: PaperAssetResponse | null, kind: string) {
   return assets?.items.find((item) => item.kind === kind) || null;
+}
+
+function previewKindLabel(kind?: string | null) {
+  if (kind === "overall") return "Overall 图预览";
+  if (kind === "figure") return "主图预览";
+  return "展示图预览";
+}
+
+function assetStatusLabel(status?: string | null) {
+  return ASSET_STATUS_LABELS[String(status || "")] || String(status || "缺失");
 }
 
 function PreviewBox(props: { title: string; url?: string | null; emptyText: string }) {
@@ -110,6 +136,74 @@ function AssetActionButtons(props: {
   );
 }
 
+function yesNo(value?: boolean | null) {
+  if (value === true) return "是";
+  if (value === false) return "否";
+  return "-";
+}
+
+function formatMetricNumber(value?: number | null) {
+  if (typeof value !== "number" || Number.isNaN(value)) return "-";
+  return value.toLocaleString("zh-CN");
+}
+
+function formatImpactFactor(metrics?: VenueMetrics | null) {
+  const value = metrics?.impact_factor?.value;
+  if (typeof value !== "number" || Number.isNaN(value)) return "-";
+  const year = metrics?.impact_factor?.year;
+  return year ? `${value} (${year})` : String(value);
+}
+
+function hasVenueMetrics(metrics?: VenueMetrics | null) {
+  if (!metrics) return false;
+  return Boolean(
+    metrics.ccf?.rank ||
+      metrics.jcr?.quartile ||
+      metrics.cas?.quartile ||
+      metrics.impact_factor?.value != null ||
+      metrics.ei?.indexed != null ||
+      metrics.sci?.indexed != null ||
+      metrics.venue_citation_count != null ||
+      metrics.paper_citation_count != null,
+  );
+}
+
+function VenueMetricsPanel(props: { metrics?: VenueMetrics | null }) {
+  if (!hasVenueMetrics(props.metrics)) {
+    return (
+      <div className="mt-4 rounded-2xl border border-slate-200 bg-slate-50 p-3 text-sm text-slate-500">
+        当前还没有可用的 venue 分级或指标。可在 `data/venue_rankings/venue_catalog.csv` 提供 CCF/JCR/中科院/EI/IF 对照表，系统会自动匹配；公开可查的引用指标会优先使用 OpenAlex。
+      </div>
+    );
+  }
+  return (
+    <div className="mt-4 rounded-2xl border border-slate-200 bg-slate-50 p-3">
+      <div className="text-xs font-semibold uppercase tracking-[0.16em] text-slate-400">Venue Metrics</div>
+      <div className="mt-3 grid gap-2 text-sm text-slate-700 md:grid-cols-2">
+        <MetricItem label="CCF" value={props.metrics?.ccf?.rank ? `${props.metrics.ccf.rank}${props.metrics.ccf.category ? ` · ${props.metrics.ccf.category}` : ""}` : "-"} />
+        <MetricItem label="JCR" value={props.metrics?.jcr?.quartile ? `${props.metrics.jcr.quartile}${props.metrics.jcr.year ? ` · ${props.metrics.jcr.year}` : ""}` : "-"} />
+        <MetricItem label="中科院" value={props.metrics?.cas?.quartile ? `${props.metrics.cas.quartile}${props.metrics.cas.top ? ` · ${props.metrics.cas.top}` : ""}` : "-"} />
+        <MetricItem label="SCI" value={yesNo(props.metrics?.sci?.indexed)} />
+        <MetricItem label="EI" value={yesNo(props.metrics?.ei?.indexed)} />
+        <MetricItem label="IF" value={formatImpactFactor(props.metrics)} />
+        <MetricItem label="Venue 引用数" value={formatMetricNumber(props.metrics?.venue_citation_count)} />
+        <MetricItem label="Venue 收录论文数" value={formatMetricNumber(props.metrics?.venue_works_count)} />
+        <MetricItem label="Venue H-index" value={formatMetricNumber(props.metrics?.h_index)} />
+        <MetricItem label="论文引用数" value={formatMetricNumber(props.metrics?.paper_citation_count)} />
+      </div>
+    </div>
+  );
+}
+
+function MetricItem(props: { label: string; value: string }) {
+  return (
+    <div className="rounded-xl border border-slate-200 bg-white px-3 py-2">
+      <div className="text-[11px] uppercase tracking-wide text-slate-400">{props.label}</div>
+      <div className="mt-1 font-medium text-slate-900">{props.value}</div>
+    </div>
+  );
+}
+
 export function DetailPanel(props: Props) {
   const [feedback, setFeedback] = useState("");
   const [nextIntent, setNextIntent] = useState("");
@@ -118,14 +212,23 @@ export function DetailPanel(props: Props) {
   const nodeData = node?.data || null;
   const directionIndex = typeof nodeData?.direction_index === "number" ? nodeData.direction_index : null;
   const roundId = inferRoundId(node?.id || "", nodeData || undefined);
-  const isPaper = isPaperNode(node?.id);
+  const isPaper = isPaperNode(node?.id, nodeData || undefined);
   const pdfAsset = useMemo(() => assetByKind(props.paperAssets, "pdf"), [props.paperAssets]);
+  const overallAsset = useMemo(() => assetByKind(props.paperAssets, "overall"), [props.paperAssets]);
+  const figureAsset = useMemo(() => assetByKind(props.paperAssets, "figure"), [props.paperAssets]);
+  const visualAsset = useMemo(() => assetByKind(props.paperAssets, "visual"), [props.paperAssets]);
   const txtAsset = useMemo(() => assetByKind(props.paperAssets, "txt"), [props.paperAssets]);
   const mdAsset = useMemo(() => assetByKind(props.paperAssets, "md"), [props.paperAssets]);
   const bibAsset = useMemo(() => assetByKind(props.paperAssets, "bib"), [props.paperAssets]);
-  const figureAsset = useMemo(() => assetByKind(props.paperAssets, "figure"), [props.paperAssets]);
-  const visualAsset = useMemo(() => assetByKind(props.paperAssets, "visual"), [props.paperAssets]);
-  const preferredPreviewUrl = figureAsset?.open_url || visualAsset?.open_url || props.paperDetail?.preview_url || null;
+  const preferredPreviewUrl =
+    overallAsset?.open_url ||
+    overallAsset?.download_url ||
+    figureAsset?.open_url ||
+    figureAsset?.download_url ||
+    visualAsset?.open_url ||
+    visualAsset?.download_url ||
+    props.paperDetail?.preview_url ||
+    null;
   const summarySource = props.paperDetail?.summary_source || nodeData?.summary_source || null;
   const summaryStatus = props.paperDetail?.summary_status || nodeData?.summary_status || null;
   const displaySummary =
@@ -165,7 +268,7 @@ export function DetailPanel(props: Props) {
         {props.paperDetail?.venue ? <Badge tone="blue">{props.paperDetail.venue}</Badge> : null}
         {summarySource ? <Badge tone="slate">{SUMMARY_SOURCE_LABELS[summarySource] || summarySource}</Badge> : null}
         {summaryStatus ? <Badge tone="violet">{SUMMARY_STATUS_LABELS[summaryStatus] || summaryStatus}</Badge> : null}
-        {props.paperDetail?.preview_kind ? <Badge tone="amber">{props.paperDetail.preview_kind === "figure" ? "主图预览" : "展示图预览"}</Badge> : null}
+        {props.paperDetail?.preview_kind ? <Badge tone="amber">{previewKindLabel(props.paperDetail.preview_kind)}</Badge> : null}
         {nodeData?.isManual ? <Badge tone="amber">手工节点</Badge> : null}
       </div>
 
@@ -286,8 +389,13 @@ export function DetailPanel(props: Props) {
           <div className="mt-4">
             <div className="text-xs font-semibold uppercase tracking-[0.16em] text-slate-400">Paper Visual</div>
             <div className="mt-3 space-y-3">
-              <PreviewBox title={props.paperDetail?.title || "paper preview"} url={preferredPreviewUrl} emptyText="当前还没有可展示图片。若论文已有 PDF，可以点击“重建展示图”尝试生成主图或模板图。" />
-              <div className="grid gap-3 md:grid-cols-2">
+              <PreviewBox
+                title={props.paperDetail?.title || "paper preview"}
+                url={preferredPreviewUrl}
+                emptyText="当前还没有可展示图片。若论文已有 PDF，可以点击“重建展示图”尝试生成 overall 图、主图或模板图。"
+              />
+              <div className="grid gap-3 md:grid-cols-3">
+                <AssetStatusCard title="Overall Figure" item={overallAsset} />
                 <AssetStatusCard title="Main Figure" item={figureAsset} />
                 <AssetStatusCard title="Paper Visual" item={visualAsset} />
               </div>
@@ -302,6 +410,8 @@ export function DetailPanel(props: Props) {
               </a>
             ) : null}
           </div>
+
+          <VenueMetricsPanel metrics={props.paperDetail?.venue_metrics} />
 
           <div className="mt-4 rounded-2xl border border-slate-200 bg-slate-50 p-3">
             <div className="text-xs font-semibold uppercase tracking-[0.16em] text-slate-400">完整结构化摘要</div>
@@ -322,7 +432,7 @@ export function DetailPanel(props: Props) {
                 {props.paperAssets.items.map((item) => (
                   <div key={item.kind} className="rounded-xl border border-slate-200 bg-white px-3 py-2">
                     <div className="font-medium text-slate-900">{ASSET_KIND_LABELS[item.kind] || item.kind}</div>
-                    <div className="mt-1">{item.status === "available" ? "可访问" : "缺失"}</div>
+                    <div className="mt-1">{assetStatusLabel(item.status)}</div>
                     <AssetActionButtons item={item} onOpenAsset={props.onOpenAsset} onDownloadAsset={props.onDownloadAsset} />
                   </div>
                 ))}
@@ -370,7 +480,7 @@ function AssetStatusCard(props: { title: string; item: { status: string } | null
   return (
     <div className="rounded-2xl border border-slate-200 bg-slate-50 p-3">
       <div className="text-sm font-medium text-slate-900">{props.title}</div>
-      <div className="mt-1 text-xs text-slate-500">{props.item?.status === "available" ? "可用" : "暂无"}</div>
+      <div className="mt-1 text-xs text-slate-500">{assetStatusLabel(props.item?.status || "missing")}</div>
     </div>
   );
 }

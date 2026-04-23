@@ -337,6 +337,45 @@ export type PaperDetail = {
   preview_kind?: string | null;
   preview_url?: string | null;
   visual_status?: string | null;
+  venue_metrics?: VenueMetrics | null;
+};
+
+export type VenueMetrics = {
+  venue?: string;
+  venue_key?: string;
+  matched_venue?: string | null;
+  source_type?: string | null;
+  ccf?: { rank?: string | null; category?: string | null; source?: string | null } | null;
+  jcr?: { quartile?: string | null; year?: number | null; source?: string | null } | null;
+  cas?: { quartile?: string | null; top?: string | null; source?: string | null } | null;
+  ei?: { indexed?: boolean | null; source?: string | null } | null;
+  sci?: { indexed?: boolean | null; source?: string | null } | null;
+  impact_factor?: { value?: number | null; year?: number | null; source?: string | null } | null;
+  venue_citation_count?: number | null;
+  venue_works_count?: number | null;
+  h_index?: number | null;
+  i10_index?: number | null;
+  paper_citation_count?: number | null;
+  issn_l?: string | null;
+  issn?: string[];
+  openalex_id?: string | null;
+  homepage_url?: string | null;
+  host_organization_name?: string | null;
+  data_sources?: string[];
+};
+
+export type TaskVenueMetricItem = {
+  venue: string;
+  venue_key: string;
+  source_type?: string | null;
+  paper_count: number;
+  paper_ids: string[];
+  metrics: VenueMetrics;
+};
+
+export type TaskVenueMetricsResponse = {
+  task_id: string;
+  items: TaskVenueMetricItem[];
 };
 
 export type PaperAssetItem = {

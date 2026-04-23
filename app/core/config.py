@@ -110,7 +110,7 @@ class Settings(BaseSettings):
     research_seed_max_abstract_chars: int = 600
     research_round_topn_default: int = 12
     research_page_size: int = 10
-    research_sources_default: str = "semantic_scholar,arxiv"
+    research_sources_default: str = "semantic_scholar,openalex,arxiv"
     research_artifact_dir: str = "./artifacts/research"
     research_save_base_dir: str = "./artifacts/research/saved"
     research_cache_enabled: bool = True
@@ -138,6 +138,11 @@ class Settings(BaseSettings):
     research_graph_paper_limit_default: int = 8
     research_summary_enabled: bool = True
     research_summary_max_chars: int = 8000
+    research_venue_metrics_enabled: bool = True
+    research_venue_metrics_cache_ttl_seconds: int = 604800
+    research_venue_metrics_cache_dir: str = "./artifacts/research/venue_metrics_cache"
+    research_venue_rankings_dir: str = "./data/venue_rankings"
+    research_venue_openalex_enabled: bool = True
     paper_visual_provider: str = "template"
     paper_visual_diffusion_enabled: bool = False
     paper_visual_diffusion_base_url: str = ""

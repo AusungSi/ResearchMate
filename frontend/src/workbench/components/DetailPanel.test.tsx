@@ -68,6 +68,16 @@ describe("DetailPanel", () => {
           saved: false,
           key_points_status: "done",
           key_points: "1. Research problem: ...\n2. Core method: ...",
+          venue_metrics: {
+            ccf: { rank: "A", category: "NLP" },
+            jcr: { quartile: "Q1", year: 2024 },
+            cas: { quartile: "1区", top: "Top" },
+            sci: { indexed: true },
+            ei: { indexed: true },
+            impact_factor: { value: 12.3, year: 2024 },
+            venue_citation_count: 12345,
+            paper_citation_count: 234,
+          },
         }}
         paperAssets={{
           task_id: "R-1",
@@ -101,5 +111,8 @@ describe("DetailPanel", () => {
     expect(onDownloadPdf).toHaveBeenCalled();
     expect(screen.getAllByText("Paper Visual").length).toBeGreaterThan(0);
     expect(screen.getByText("Card Summary")).toBeInTheDocument();
+    expect(screen.getByText("Venue Metrics")).toBeInTheDocument();
+    expect(screen.getByText("A · NLP")).toBeInTheDocument();
+    expect(screen.getByText("Q1 · 2024")).toBeInTheDocument();
   });
 });

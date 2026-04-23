@@ -1119,6 +1119,21 @@ class ResearchPaperDetailResponse(BaseModel):
     preview_kind: str | None = None
     preview_url: str | None = None
     visual_status: str | None = None
+    venue_metrics: dict = Field(default_factory=dict)
+
+
+class ResearchVenueMetricsItem(BaseModel):
+    venue: str
+    venue_key: str
+    source_type: str | None = None
+    paper_count: int = 0
+    paper_ids: list[str] = Field(default_factory=list)
+    metrics: dict = Field(default_factory=dict)
+
+
+class ResearchVenueMetricsResponse(BaseModel):
+    task_id: str
+    items: list[ResearchVenueMetricsItem] = Field(default_factory=list)
 
 
 class DevUserListResponse(BaseModel):

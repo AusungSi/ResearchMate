@@ -19,6 +19,7 @@ from app.domain.schemas import (
     ResearchCompareResponse,
     ResearchPaperDetailResponse,
     ResearchPaperAssetResponse,
+    ResearchVenueMetricsResponse,
     ResearchExportResponse,
     ResearchExportListResponse,
     ResearchAutoRunResponse,
@@ -906,6 +907,24 @@ def get_paper_detail(
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     return ResearchPaperDetailResponse(**data)
+
+
+@router.get("/tasks/{task_id}/venues/metrics", response_model=ResearchVenueMetricsResponse)
+def get_task_venue_metrics(
+    task_id: str,
+    user_id: int = Depends(get_current_user_id),
+    db: Session = Depends(get_db),
+    research_service: ResearchService = Depends(get_research_service),
+) -> ResearchVenueMetricsResponse:
+    try:
+        data = research_service.get_task_venue_metrics(
+            db,
+            user_id=user_id,
+            task_id=task_id,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return ResearchVenueMetricsResponse(**data)
 
 
 @router.get("/tasks/{task_id}/nodes/{node_id:path}/chat", response_model=ResearchNodeChatResponse)

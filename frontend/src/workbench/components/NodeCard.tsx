@@ -5,6 +5,12 @@ import type { FlowNodeData } from "../types";
 import { tone } from "../utils";
 import { Badge } from "./shared";
 
+function previewKindLabel(kind?: string | null) {
+  if (kind === "overall") return "Overall 图";
+  if (kind === "figure") return "主图";
+  return "展示图";
+}
+
 export function NodeCard({ data }: NodeProps) {
   const node = data as FlowNodeData;
   const [previewFailed, setPreviewFailed] = useState(false);
@@ -36,7 +42,7 @@ export function NodeCard({ data }: NodeProps) {
           {node.venue ? <Badge tone="blue">{node.venue}</Badge> : null}
           {node.direction_index ? <Badge tone="green">{`方向 ${node.direction_index}`}</Badge> : null}
           {node.status ? <Badge tone="violet">{node.status}</Badge> : null}
-          {node.preview_kind ? <Badge tone="amber">{node.preview_kind === "figure" ? "主图" : "展示图"}</Badge> : null}
+          {node.preview_kind ? <Badge tone="amber">{previewKindLabel(node.preview_kind)}</Badge> : null}
           {node.summary_source ? <Badge tone="slate">{summarySourceLabel(node.summary_source)}</Badge> : null}
           {node.isManual ? <Badge tone="amber">手工节点</Badge> : null}
         </div>
