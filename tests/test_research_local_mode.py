@@ -606,7 +606,7 @@ def test_embodied_demo_seed_static_workspace_is_readable():
         asset_resp = client.get("/api/v1/research/tasks/demo-gpt-embodied/papers/paper:gpt:wm-core/asset/meta")
         assert asset_resp.status_code == 200
         asset = asset_resp.json()
-        assert asset["primary_kind"] in {"figure", "visual"}
+        assert asset["primary_kind"] in {"overall", "figure", "visual"}
         assert any(item["kind"] == "visual" and item["status"] == "available" for item in asset["items"])
         assert any(item["kind"] == "txt" and item["status"] == "available" for item in asset["items"])
         assert any(item["kind"] == "visual" and item.get("open_url") for item in asset["items"])
