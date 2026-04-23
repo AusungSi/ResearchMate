@@ -1271,7 +1271,6 @@ export function Workbench() {
                   系统节点来自 canonical graph，手工节点与手工连线只写入 canvas state。多选论文卡片后可以直接加入 Collection 或做 Compare。
                 </div>
                 {actionStatus ? <ActionBanner status={actionStatus} /> : null}
-                {taskProgress ? <TaskProgress progress={taskProgress} /> : null}
               </div>
               <div className="flex items-center gap-2">
                 <button
@@ -1312,7 +1311,14 @@ export function Workbench() {
             </div>
           </div>
 
-          <div className="min-h-0 flex-1">
+          <div className="relative min-h-0 flex-1">
+            {taskProgress ? (
+              <div className="pointer-events-none absolute left-6 top-5 z-10 w-[min(37.333rem,calc(100%-3rem))]">
+                <div className="pointer-events-auto">
+                  <TaskProgress key={activeTask?.task_id || "task-progress"} progress={taskProgress} />
+                </div>
+              </div>
+            ) : null}
             <ResearchCanvas
               nodes={nodes}
               edges={edges}
