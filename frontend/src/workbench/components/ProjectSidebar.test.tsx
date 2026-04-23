@@ -125,6 +125,8 @@ describe("ProjectSidebar", () => {
     expect(screen.getByText("Research Workbench")).toBeInTheDocument();
     expect(screen.getByText("项目列表")).toBeInTheDocument();
     expect(screen.getByText("任务列表")).toBeInTheDocument();
+    expect(screen.getByText("项目列表").compareDocumentPosition(screen.getByText("项目概览")) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(screen.getByText("项目列表").compareDocumentPosition(screen.getByText("新建研究任务")) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
     expect(screen.getByTestId("import-zotero-button")).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: /BibTeX/i })).not.toBeInTheDocument();
 

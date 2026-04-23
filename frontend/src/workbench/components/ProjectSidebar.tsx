@@ -88,6 +88,47 @@ export function ProjectSidebar(props: Props) {
         </p>
       </div>
 
+      <CollapsibleSection title="项目列表" collapsed={collapsed.projects} onToggle={() => toggleSection("projects")}>
+        <div className="flex gap-2">
+          <input
+            className="flex-1 rounded-2xl border border-slate-200 bg-slate-50 px-3 py-2 text-sm outline-none"
+            value={projectName}
+            onChange={(event) => setProjectName(event.target.value)}
+            placeholder="输入新的项目名"
+          />
+          <SmallButton
+            tone="solid"
+            disabled={!projectName.trim()}
+            onClick={() => {
+              props.onCreateProject({ name: projectName, description: "" });
+              setProjectName("");
+            }}
+            data-testid="create-project-button"
+          >
+            创建
+          </SmallButton>
+        </div>
+        <div className="mt-3 space-y-2">
+          {props.projects.map((project) => (
+            <button
+              key={project.project_id}
+              className={`w-full rounded-2xl border px-3 py-3 text-left transition ${
+                project.project_id === props.activeProjectId ? "border-slate-900 bg-slate-900 text-white" : "border-slate-200 bg-slate-50 hover:border-slate-300"
+              }`}
+              onClick={() => props.onSelectProject(project.project_id)}
+            >
+              <div className="flex items-center justify-between gap-2">
+                <div className="line-clamp-1 text-sm font-medium">{project.name}</div>
+                {project.is_default ? <Badge tone="blue">默认</Badge> : null}
+              </div>
+              <div className={`mt-1 text-xs ${project.project_id === props.activeProjectId ? "text-slate-300" : "text-slate-500"}`}>
+                任务 {project.task_count} · Collections {project.collection_count}
+              </div>
+            </button>
+          ))}
+        </div>
+      </CollapsibleSection>
+
       <CollapsibleSection
         title="项目概览"
         subtitle={activeProject?.name}
@@ -161,47 +202,6 @@ export function ProjectSidebar(props: Props) {
         >
           创建研究任务
         </button>
-      </CollapsibleSection>
-
-      <CollapsibleSection title="项目列表" collapsed={collapsed.projects} onToggle={() => toggleSection("projects")}>
-        <div className="flex gap-2">
-          <input
-            className="flex-1 rounded-2xl border border-slate-200 bg-slate-50 px-3 py-2 text-sm outline-none"
-            value={projectName}
-            onChange={(event) => setProjectName(event.target.value)}
-            placeholder="输入新的项目名"
-          />
-          <SmallButton
-            tone="solid"
-            disabled={!projectName.trim()}
-            onClick={() => {
-              props.onCreateProject({ name: projectName, description: "" });
-              setProjectName("");
-            }}
-            data-testid="create-project-button"
-          >
-            创建
-          </SmallButton>
-        </div>
-        <div className="mt-3 space-y-2">
-          {props.projects.map((project) => (
-            <button
-              key={project.project_id}
-              className={`w-full rounded-2xl border px-3 py-3 text-left transition ${
-                project.project_id === props.activeProjectId ? "border-slate-900 bg-slate-900 text-white" : "border-slate-200 bg-slate-50 hover:border-slate-300"
-              }`}
-              onClick={() => props.onSelectProject(project.project_id)}
-            >
-              <div className="flex items-center justify-between gap-2">
-                <div className="line-clamp-1 text-sm font-medium">{project.name}</div>
-                {project.is_default ? <Badge tone="blue">默认</Badge> : null}
-              </div>
-              <div className={`mt-1 text-xs ${project.project_id === props.activeProjectId ? "text-slate-300" : "text-slate-500"}`}>
-                任务 {project.task_count} · Collections {project.collection_count}
-              </div>
-            </button>
-          ))}
-        </div>
       </CollapsibleSection>
 
       <CollapsibleSection
