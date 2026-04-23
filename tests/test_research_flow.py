@@ -345,7 +345,7 @@ def test_research_cache_hit_and_force_refresh(db_session):
 def test_research_semantic_429_fallback_to_arxiv(db_session):
     service = ResearchService(openclaw_client=FakeOpenClawClient(), wecom_client=None)
     user = UserRepo(db_session).get_or_create("research-fallback-user", timezone_name="Asia/Shanghai")
-    service._plan_directions = lambda _topic, _constraints: [  # noqa: E731
+    service._plan_directions = lambda *args, **kwargs: [  # noqa: E731
         {"name": "方向A", "queries": ["fallback query"], "exclude_terms": []},
     ]
     task = service.create_task(
@@ -516,7 +516,7 @@ def test_research_export_file_fallback_to_text_path(db_session):
         wecom.file_fail = True
         service = ResearchService(openclaw_client=FakeOpenClawClient(), wecom_client=wecom)
         user = UserRepo(db_session).get_or_create("research-export-user", timezone_name="Asia/Shanghai")
-        service._plan_directions = lambda _topic, _constraints: [  # noqa: E731
+        service._plan_directions = lambda *args, **kwargs: [  # noqa: E731
             {"name": "方向A", "queries": ["export query"], "exclude_terms": []},
         ]
         task = service.create_task(
@@ -578,7 +578,7 @@ def test_research_command_fulltext_and_graph_commands(db_session):
         wecom = FakeWeCom()
         service = ResearchService(openclaw_client=FakeOpenClawClient(), wecom_client=wecom)
         user = UserRepo(db_session).get_or_create("research-graph-cmd-user", timezone_name="Asia/Shanghai")
-        service._plan_directions = lambda _topic, _constraints: [  # noqa: E731
+        service._plan_directions = lambda *args, **kwargs: [  # noqa: E731
             {"name": "方向A", "queries": ["graph query"], "exclude_terms": []},
         ]
         task = service.create_task(

@@ -16,6 +16,7 @@ vi.mock("@xyflow/react", () => ({
   Background: () => <div data-testid="background" />,
   Controls: () => <div data-testid="controls" />,
   Handle: () => null,
+  MarkerType: { ArrowClosed: "arrowclosed" },
   MiniMap: () => <div data-testid="minimap" />,
   Position: { Left: "left", Right: "right" },
   SelectionMode: { Partial: "partial" },
