@@ -12,7 +12,7 @@ from app.api.mobile import get_current_user_id
 from app.api.research import router as research_router
 from app.domain.models import Base
 from app.infra.db import get_db
-from app.infra.repos import ResearchJobRepo, UserRepo
+from app.infra.repos import ResearchDirectionRepo, ResearchJobRepo, ResearchPaperRepo, UserRepo
 from app.llm.openclaw_client import LLMCallResult, LLMTaskType
 from app.services.research_service import ResearchService
 
@@ -244,6 +244,74 @@ def test_graph_build_and_view_endpoint():
         view_resp = client.get(f"/api/v1/research/tasks/{task.task_id}/graph/view?direction_index=1")
         assert view_resp.status_code == 200
         assert "cytoscape" in view_resp.text.lower()
+    finally:
+        client.close()
+        db_session.close()
+
+
+def test_compare_task_papers_endpoint_returns_structured_items():
+    client, service, user, db_session = _build_test_client()
+    try:
+        task = service.create_task(
+            db_session,
+            user_id=user.id,
+            topic="api compare topic",
+            constraints={"top_n": 5},
+        )
+        service.process_one_job(db_session)
+        direction = ResearchDirectionRepo(db_session).get_by_index(task.id, 1)
+        assert direction is not None
+        papers = ResearchPaperRepo(db_session).replace_direction_papers(
+            direction,
+            [
+                {
+                    "paper_id": "cmp-1",
+                    "title": "Compare Paper One",
+                    "title_norm": "compare paper one",
+                    "authors": ["A"],
+                    "year": 2024,
+                    "venue": "NeurIPS",
+                    "doi": "10.1000/cmp1",
+                    "url": "https://example.org/cmp1",
+                    "abstract": "paper one abstract",
+                    "source": "semantic_scholar",
+                    "relevance_score": None,
+                },
+                {
+                    "paper_id": "cmp-2",
+                    "title": "Compare Paper Two",
+                    "title_norm": "compare paper two",
+                    "authors": ["B"],
+                    "year": 2025,
+                    "venue": "ICLR",
+                    "doi": "10.1000/cmp2",
+                    "url": "https://example.org/cmp2",
+                    "abstract": "paper two abstract",
+                    "source": "semantic_scholar",
+                    "relevance_score": None,
+                },
+            ],
+        )
+        ResearchDirectionRepo(db_session).update_papers_count(direction, len(papers))
+        service.llm_gateway.chat_text = lambda **_kwargs: LLMCallResult(  # noqa: E731
+            text='{"title":"Compare Result","focus":"overall","overview":"structured compare","common_points":["shared"],"differences":["diff"],"recommended_next_steps":["next"]}',
+            provider="fake",
+            model="fake",
+            latency_ms=1,
+            via_fallback=False,
+        )
+
+        compare_resp = client.post(
+            f"/api/v1/research/tasks/{task.task_id}/papers/compare",
+            json={"paper_ids": ["cmp-1", "cmp-2"]},
+        )
+
+        assert compare_resp.status_code == 200
+        body = compare_resp.json()
+        assert body["scope"] == "task_papers"
+        assert len(body["items"]) == 2
+        assert body["items"][0]["paper_id"] == "cmp-1"
+        assert body["items"][1]["paper_id"] == "cmp-2"
     finally:
         client.close()
         db_session.close()

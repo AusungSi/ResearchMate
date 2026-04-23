@@ -5786,7 +5786,7 @@ class ResearchService:
             "common_points": _load_json_list(row.common_points_json),
             "differences": _load_json_list(row.differences_json),
             "recommended_next_steps": _load_json_list(row.recommended_next_steps_json),
-            "items": _load_json_list(row.items_json),
+            "items": _load_json_list_of_dict(row.items_json),
             "created_at": row.created_at,
         }
 
