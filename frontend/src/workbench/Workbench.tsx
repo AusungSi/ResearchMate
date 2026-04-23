@@ -86,6 +86,8 @@ const MANUAL_NODE_LABELS: Record<"note" | "question" | "reference" | "group" | "
   report: "新的报告",
 };
 
+const VENUE_METRICS_COLLAPSED_STORAGE_KEY = "research-workbench:venue-metrics-collapsed";
+
 function isTransientCanvasSaveError(cause: unknown) {
   const message = cause instanceof Error ? cause.message.toLowerCase() : String(cause).toLowerCase();
   return (
@@ -118,6 +120,17 @@ export function Workbench() {
   const [collectionLimit, setCollectionLimit] = useState(50);
   const [selectedCollectionItemIds, setSelectedCollectionItemIds] = useState<number[]>([]);
   const [relayoutNonce, setRelayoutNonce] = useState(0);
+  const [miniMapBottomOffset, setMiniMapBottomOffset] = useState(108);
+  const [venueMetricsCollapsed, setVenueMetricsCollapsed] = useState(() => {
+    if (typeof window === "undefined") {
+      return false;
+    }
+    try {
+      return window.localStorage.getItem(VENUE_METRICS_COLLAPSED_STORAGE_KEY) === "true";
+    } catch {
+      return false;
+    }
+  });
   const flowRef = useRef<ReactFlowInstance<Node<FlowNodeData>, Edge> | null>(null);
   const zoteroFileInputRef = useRef<HTMLInputElement | null>(null);
   const persistTimer = useRef<number | null>(null);
@@ -206,6 +219,17 @@ export function Workbench() {
     setSelectedCollectionItemIds([]);
   }, [activeCollectionId]);
 
+  useEffect(() => {
+    if (typeof window === "undefined") {
+      return;
+    }
+    try {
+      window.localStorage.setItem(VENUE_METRICS_COLLAPSED_STORAGE_KEY, venueMetricsCollapsed ? "true" : "false");
+    } catch {
+      // Ignore storage errors so the panel still works in restricted contexts.
+    }
+  }, [venueMetricsCollapsed]);
+
   const collectionDetailQuery = useQuery({
     queryKey: ["collection", activeCollectionId, collectionLimit],
     queryFn: () => apiFetch<CollectionSummary>(`/api/v1/research/collections/${activeCollectionId}?offset=0&limit=${collectionLimit}`),
@@ -274,6 +298,14 @@ export function Workbench() {
     intervalMs: activeTask?.mode === "openclaw_auto" ? 3000 : 4000,
   });
   const taskProgress = useMemo(() => deriveTaskProgress(activeTask, eventsState.summary, eventsState.items), [activeTask, eventsState.items, eventsState.summary]);
+
+  useEffect(() => {
+    if (!actionStatus) return;
+    const timer = window.setTimeout(() => {
+      setActionStatus(null);
+    }, 5000);
+    return () => window.clearTimeout(timer);
+  }, [actionStatus]);
 
   const merged = useMemo(
     () => mergeCanvasWithGraph(graphQuery.data, canvasQuery.data, eventsState.items, configQuery.data?.default_canvas_ui || defaultCanvasUi()),
@@ -374,6 +406,12 @@ export function Workbench() {
   useEffect(() => {
     if (activeTaskId === lastTaskIdRef.current) return;
     lastTaskIdRef.current = activeTaskId;
+    if (persistTimer.current) {
+      window.clearTimeout(persistTimer.current);
+      persistTimer.current = null;
+    }
+    interactionLockRef.current = false;
+    suppressViewportPersistRef.current = false;
     setActiveCollectionId("");
     setSelectedNodeId("");
     setDetailTab("info");
@@ -391,6 +429,9 @@ export function Workbench() {
     pendingCanvasSignature.current = "";
     canvasRetryCountRef.current = {};
     nodeChatRetryCountRef.current = {};
+    setNodes([]);
+    setEdges([]);
+    setViewport({ x: 0, y: 0, zoom: 1 });
   }, [activeTaskId]);
 
   useEffect(() => {
@@ -402,8 +443,14 @@ export function Workbench() {
   }, []);
 
   const selectedNode = nodes.find((node) => node.id === selectedNodeId) || null;
-  const selectedPaperId = selectedNode?.id && isPaperNode(selectedNode.id, selectedNode.data) ? selectedNode.id : "";
+  const selectedPaperId = useMemo(() => {
+    if (!selectedNode?.id || !isPaperNode(selectedNode.id, selectedNode.data)) {
+      return "";
+    }
+    return String(selectedNode.data?.paper_id || selectedNode.id).trim();
+  }, [selectedNode]);
   const selectedPaperCount = useMemo(() => selectedPaperNodes(nodes).length, [nodes]);
+  const hiddenNodeCount = useMemo(() => nodes.filter((node) => Boolean(node.hidden)).length, [nodes]);
   const selectedFulltextItem = useMemo(
     () => fulltextStatusQuery.data?.items.find((item) => item.paper_id === selectedPaperId) || null,
     [fulltextStatusQuery.data?.items, selectedPaperId],
@@ -522,6 +569,7 @@ export function Workbench() {
     }
     pendingCanvasSignature.current = signature;
     persistTimer.current = window.setTimeout(() => {
+      persistTimer.current = null;
       saveCanvas.mutate({ taskId: activeTaskId, payload });
     }, 450);
   }
@@ -1020,6 +1068,20 @@ export function Workbench() {
     setActionStatus({ tone: "success", text: "已删除手工节点。" });
   }
 
+  function restoreHiddenNodes() {
+    const hasHiddenNodes = nodesRef.current.some((node) => Boolean(node.hidden));
+    if (!hasHiddenNodes) {
+      setActionStatus({ tone: "neutral", text: "当前没有隐藏节点可恢复。" });
+      return;
+    }
+    const nextNodes = nodesRef.current.map((node) => (node.hidden ? { ...node, hidden: false } : node));
+    const nextEdges = applyHiddenEdgeVisibility(nextNodes, edgesRef.current);
+    setNodes(nextNodes);
+    setEdges(nextEdges);
+    queueSave(nextNodes, nextEdges);
+    setActionStatus({ tone: "success", text: "已恢复画布中的隐藏节点。" });
+  }
+
   function handleNodesChange(changes: NodeChange<Node<FlowNodeData>>[]) {
     const removedIds = changes.filter((change) => change.type === "remove").map((change) => change.id);
     if (!removedIds.length) {
@@ -1254,28 +1316,25 @@ export function Workbench() {
           onCreateCollection={(payload) => createCollection.mutate(payload)}
           onCreateTask={(payload) => createTask.mutate(payload)}
           onQuickAction={(action) => workbenchAction.mutate({ type: "quick", action })}
+          onSearchDirection={(directionIndex) => workbenchAction.mutate({ type: "search_direction", directionIndex })}
           onImportZoteroFile={() => zoteroFileInputRef.current?.click()}
         />
       }
       canvas={
         <main className="relative flex h-full flex-col overflow-hidden bg-[radial-gradient(circle_at_20%_20%,rgba(59,130,246,0.06),transparent_26%),radial-gradient(circle_at_80%_20%,rgba(16,185,129,0.05),transparent_20%),linear-gradient(to_bottom,white,white)]">
-          <div className="shrink-0 border-b border-slate-200 px-6 py-4">
-            <div className="flex items-start justify-between gap-4">
-              <div>
+          <div className="shrink-0 border-b border-slate-200 px-6 py-3">
+            <div className="flex flex-wrap items-end justify-between gap-x-4 gap-y-2">
+              <div className="min-w-0 flex-1">
                 <div className="text-xs font-semibold uppercase tracking-[0.18em] text-slate-400">Research Canvas</div>
                 <div className="mt-1 text-lg font-semibold text-slate-900">卡片式研究画布</div>
                 <div className="mt-1 text-sm text-slate-500">
                   {activeTask ? `${activeTask.topic} · ${merged.nodes.length} 个节点 / ${edgeCountLabel(merged.edges)}` : "请选择任务，或先在左侧创建一个新的研究任务。"}
                 </div>
-                <div className="mt-1 text-xs text-slate-400">
-                  系统节点来自 canonical graph，手工节点与手工连线只写入 canvas state。多选论文卡片后可以直接加入 Collection 或做 Compare。
-                </div>
-                {actionStatus ? <ActionBanner status={actionStatus} /> : null}
-                {taskProgress ? <TaskProgress progress={taskProgress} /> : null}
+                {actionStatus ? <ActionBanner status={actionStatus} onDismiss={() => setActionStatus(null)} /> : null}
               </div>
-              <div className="flex items-center gap-2">
+              <div className="ml-auto flex max-w-full flex-wrap items-center justify-end gap-2">
                 <button
-                  className={`rounded-full border px-3 py-1 text-xs ${uiState.show_minimap ? "border-slate-900 bg-slate-900 text-white" : "border-slate-200 bg-white text-slate-600"}`}
+                  className={`whitespace-nowrap rounded-full border px-3 py-1.5 text-xs ${uiState.show_minimap ? "border-slate-900 bg-slate-900 text-white" : "border-slate-200 bg-white text-slate-600"}`}
                   onClick={() => {
                     const next = { ...uiState, show_minimap: !uiState.show_minimap };
                     setUiState(next);
@@ -1285,7 +1344,7 @@ export function Workbench() {
                   MiniMap
                 </button>
                 <select
-                  className="rounded-full border border-slate-200 bg-white px-3 py-1 text-xs text-slate-600"
+                  className="min-w-0 rounded-full border border-slate-200 bg-white px-3 py-1.5 text-xs text-slate-600"
                   value={uiState.layout_mode}
                   onChange={(event) => {
                     const next = { ...uiState, layout_mode: event.target.value };
@@ -1299,7 +1358,7 @@ export function Workbench() {
                   <option value="elk_stress">自由图谱</option>
                 </select>
                 <button
-                  className="rounded-full border border-slate-200 bg-white px-3 py-1 text-xs text-slate-600"
+                  className="whitespace-nowrap rounded-full border border-slate-200 bg-white px-3 py-1.5 text-xs text-slate-600"
                   onClick={() => {
                     layoutSignatureRef.current = "";
                     setRelayoutNonce((current) => current + 1);
@@ -1307,16 +1366,24 @@ export function Workbench() {
                 >
                   重新布局
                 </button>
-                <div className="rounded-full border border-slate-200 bg-white px-3 py-1 text-xs text-slate-600">已选论文 {selectedPaperCount}</div>
+                <div className="whitespace-nowrap rounded-full border border-slate-200 bg-white px-3 py-1.5 text-xs text-slate-600">已选论文 {selectedPaperCount}</div>
               </div>
             </div>
           </div>
 
-          <div className="min-h-0 flex-1">
+          <div className="relative min-h-0 flex-1">
+            {taskProgress ? (
+              <div className="pointer-events-none absolute left-6 top-5 z-10 w-[min(37.333rem,calc(100%-3rem))]">
+                <div className="pointer-events-auto">
+                  <TaskProgress key={activeTask?.task_id || "task-progress"} progress={taskProgress} />
+                </div>
+              </div>
+            ) : null}
             <ResearchCanvas
               nodes={nodes}
               edges={edges}
               showMiniMap={uiState.show_minimap}
+              miniMapBottomOffset={miniMapBottomOffset}
               flowRef={flowRef}
               onNodesChange={handleNodesChange}
               onEdgesChange={onEdgesChange}
@@ -1369,6 +1436,8 @@ export function Workbench() {
 
           <QuickActionBar
             selectedPaperCount={selectedPaperCount}
+            hiddenNodeCount={hiddenNodeCount}
+            onHeightChange={(height) => setMiniMapBottomOffset(Math.max(108, height + 32))}
             onAddNote={() => addManualNode("note")}
             onAddQuestion={() => addManualNode("question")}
             onAddReference={() => addManualNode("reference")}
@@ -1388,6 +1457,7 @@ export function Workbench() {
                 setActionStatus({ tone: "danger", text: cause instanceof Error ? cause.message : String(cause) });
               });
             }}
+            onRestoreHiddenNodes={restoreHiddenNodes}
             onSaveCanvas={() => queueSave(nodesRef.current, edgesRef.current)}
           />
         </main>
@@ -1469,21 +1539,38 @@ export function Workbench() {
                   ) : null}
                   {venueMetricsQuery.data?.items?.length ? (
                     <div className="mt-4 rounded-2xl border border-slate-200 bg-slate-50 p-3">
-                      <div className="text-xs font-semibold uppercase tracking-[0.16em] text-slate-400">Venue Metrics</div>
-                      <div className="mt-3 space-y-2">
-                        {venueMetricsQuery.data.items.slice(0, 8).map((item) => (
-                          <div key={item.venue_key} className="rounded-2xl border border-slate-200 bg-white p-3 text-sm">
-                            <div className="flex items-start justify-between gap-3">
-                              <div>
-                                <div className="font-medium text-slate-900">{item.venue}</div>
-                                <div className="mt-1 text-xs text-slate-500">
-                                  {item.source_type || "类型未知"} · {item.paper_count} 篇论文
+                      <div className="flex items-center justify-between gap-3">
+                        <div className="text-xs font-semibold uppercase tracking-[0.16em] text-slate-400">Venue Metrics</div>
+                        <button
+                          type="button"
+                          className="rounded-full border border-slate-200 px-2 py-1 text-xs text-slate-500 transition hover:border-slate-300 hover:bg-white"
+                          aria-expanded={!venueMetricsCollapsed}
+                          aria-label={venueMetricsCollapsed ? "展开 Venue Metrics" : "折叠 Venue Metrics"}
+                          onClick={() => setVenueMetricsCollapsed((current) => !current)}
+                        >
+                          {venueMetricsCollapsed ? "展开" : "折叠"}
+                        </button>
+                      </div>
+                      <div
+                        className={`grid transition-all duration-300 ease-out ${venueMetricsCollapsed ? "grid-rows-[0fr] opacity-0" : "mt-3 grid-rows-[1fr] opacity-100"}`}
+                      >
+                        <div className="overflow-hidden">
+                          <div className="space-y-2">
+                            {venueMetricsQuery.data.items.slice(0, 8).map((item) => (
+                              <div key={item.venue_key} className="rounded-2xl border border-slate-200 bg-white p-3 text-sm">
+                                <div className="flex items-start justify-between gap-3">
+                                  <div>
+                                    <div className="font-medium text-slate-900">{item.venue}</div>
+                                    <div className="mt-1 text-xs text-slate-500">
+                                      {item.source_type || "类型未知"} · {item.paper_count} 篇论文
+                                    </div>
+                                  </div>
+                                  <div className="text-right text-xs text-slate-500">{formatVenueMetricSummary(item) || "暂无分级数据"}</div>
                                 </div>
                               </div>
-                              <div className="text-right text-xs text-slate-500">{formatVenueMetricSummary(item) || "暂无分级数据"}</div>
-                            </div>
+                            ))}
                           </div>
-                        ))}
+                        </div>
                       </div>
                     </div>
                   ) : null}
@@ -1707,7 +1794,7 @@ function isMissingPrerequisite(noopReason: string) {
   return noopReason.includes("missing") || noopReason.startsWith("no_") || noopReason === "paper_missing";
 }
 
-function ActionBanner(props: { status: ActionStatus }) {
+function ActionBanner(props: { status: ActionStatus; onDismiss: () => void }) {
   const className =
     props.status.tone === "success"
       ? "border-emerald-200 bg-emerald-50 text-emerald-700"
@@ -1717,7 +1804,22 @@ function ActionBanner(props: { status: ActionStatus }) {
           ? "border-rose-200 bg-rose-50 text-rose-700"
           : "border-slate-200 bg-slate-50 text-slate-600";
 
-  return <div className={`mt-3 rounded-2xl border px-3 py-2 text-sm ${className}`}>{props.status.text}</div>;
+  return (
+    <div className={`mt-3 flex items-center justify-between gap-3 rounded-2xl border px-3 py-2 text-sm ${className}`}>
+      <div className="min-w-0 flex-1">{props.status.text}</div>
+      <button
+        type="button"
+        className="inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-full border border-current/15 bg-white/50 text-current transition hover:bg-white/80"
+        aria-label="关闭提示"
+        onClick={props.onDismiss}
+      >
+        <svg viewBox="0 0 16 16" className="h-3.5 w-3.5" aria-hidden="true" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round">
+          <path d="M4 4l8 8" />
+          <path d="M12 4l-8 8" />
+        </svg>
+      </button>
+    </div>
+  );
 }
 
 function formatVenueMetricSummary(item: TaskVenueMetricItem) {

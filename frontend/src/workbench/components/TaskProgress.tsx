@@ -1,3 +1,4 @@
+import { useState } from "react";
 import type { TaskProgressViewModel } from "../progress";
 import { Badge } from "./shared";
 
@@ -11,9 +12,26 @@ const stageStateClass: Record<string, string> = {
   pending: "border-slate-200 bg-white text-slate-700",
 };
 
+const glassCardClass = "border border-slate-200 bg-white/96 shadow-lg backdrop-blur";
+
 export function TaskProgress(props: Props) {
+  const [hidden, setHidden] = useState(true);
+
+  if (hidden) {
+    return (
+      <button
+        type="button"
+        className={`inline-flex w-fit items-center justify-start rounded-full px-4 py-2.5 text-left transition hover:border-slate-300 hover:bg-white ${glassCardClass}`}
+        aria-label="展开 Task Progress"
+        onClick={() => setHidden(false)}
+      >
+        <span className="text-[11px] font-semibold uppercase tracking-[0.18em] text-slate-400">Task Progress</span>
+      </button>
+    );
+  }
+
   return (
-    <div className="mt-4 rounded-3xl border border-slate-200 bg-white/95 p-4 shadow-sm">
+    <div className={`w-full rounded-2xl p-4 ${glassCardClass}`}>
       <div className="flex flex-wrap items-start justify-between gap-4">
         <div className="min-w-0 flex-1">
           <div className="text-[11px] font-semibold uppercase tracking-[0.18em] text-slate-400">Task Progress</div>
@@ -23,11 +41,21 @@ export function TaskProgress(props: Props) {
           </div>
           <div className="mt-1 text-sm leading-6 text-slate-500">{props.progress.summary}</div>
         </div>
-        <div className="shrink-0 text-right">
-          <div className="text-2xl font-semibold tracking-tight text-slate-900">{props.progress.percent}%</div>
-          <div className="mt-1 text-xs text-slate-400">
-            已完成 {props.progress.completedCount}/{props.progress.totalCount}
+        <div className="flex shrink-0 items-start gap-2">
+          <div className="text-right">
+            <div className="text-2xl font-semibold tracking-tight text-slate-900">{props.progress.percent}%</div>
+            <div className="mt-1 text-xs text-slate-400">
+              已完成 {props.progress.completedCount}/{props.progress.totalCount}
+            </div>
           </div>
+          <button
+            type="button"
+            className="rounded-full border border-slate-200 bg-white/80 px-3 py-1.5 text-[11px] font-medium text-slate-600 transition hover:border-slate-300 hover:bg-white"
+            aria-label="隐藏 Task Progress"
+            onClick={() => setHidden(true)}
+          >
+            隐藏
+          </button>
         </div>
       </div>
 

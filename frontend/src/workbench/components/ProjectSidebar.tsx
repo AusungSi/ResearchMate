@@ -24,6 +24,7 @@ type Props = {
   onCreateCollection: (payload: { name: string; description: string }) => void;
   onCreateTask: (payload: { topic: string; mode: TaskMode; llm_backend: Backend; llm_model: string }) => void;
   onQuickAction: (action: "plan" | "search_first" | "build_graph" | "build_fulltext" | "auto_start") => void;
+  onSearchDirection: (directionIndex: number) => void;
   onImportZoteroFile: () => void;
 };
 
@@ -36,6 +37,7 @@ export function ProjectSidebar(props: Props) {
   const [mode, setMode] = useState<TaskMode>(props.config?.default_mode || "gpt_step");
   const [backend, setBackend] = useState<Backend>(props.config?.default_backend || "gpt");
   const [model, setModel] = useState(props.config?.default_gpt_model || "gpt-5.4");
+  const [showDirectionSelect, setShowDirectionSelect] = useState(false);
   const [collapsed, setCollapsed] = useState<Record<SectionKey, boolean>>({
     overview: false,
     create: false,
@@ -73,6 +75,14 @@ export function ProjectSidebar(props: Props) {
     () => new Map(props.tasks.map((task) => [task.task_id, deriveTaskProgress(task)])),
     [props.tasks],
   );
+  const availableDirections = useMemo(
+    () => [...(props.activeTask?.directions || [])].sort((left, right) => left.direction_index - right.direction_index),
+    [props.activeTask?.directions],
+  );
+
+  useEffect(() => {
+    setShowDirectionSelect(false);
+  }, [props.activeTaskId]);
 
   function toggleSection(key: SectionKey) {
     setCollapsed((current) => ({ ...current, [key]: !current[key] }));
@@ -87,6 +97,47 @@ export function ProjectSidebar(props: Props) {
           项目是长期研究空间，任务是一次具体调研，Collection 用来沉淀可复用论文集合。列表较多时可以折叠每个区块。
         </p>
       </div>
+
+      <CollapsibleSection title="项目列表" collapsed={collapsed.projects} onToggle={() => toggleSection("projects")}>
+        <div className="flex gap-2">
+          <input
+            className="flex-1 rounded-2xl border border-slate-200 bg-slate-50 px-3 py-2 text-sm outline-none"
+            value={projectName}
+            onChange={(event) => setProjectName(event.target.value)}
+            placeholder="输入新的项目名"
+          />
+          <SmallButton
+            tone="solid"
+            disabled={!projectName.trim()}
+            onClick={() => {
+              props.onCreateProject({ name: projectName, description: "" });
+              setProjectName("");
+            }}
+            data-testid="create-project-button"
+          >
+            创建
+          </SmallButton>
+        </div>
+        <div className="mt-3 space-y-2">
+          {props.projects.map((project) => (
+            <button
+              key={project.project_id}
+              className={`w-full rounded-2xl border px-3 py-3 text-left transition ${
+                project.project_id === props.activeProjectId ? "border-slate-900 bg-slate-900 text-white" : "border-slate-200 bg-slate-50 hover:border-slate-300"
+              }`}
+              onClick={() => props.onSelectProject(project.project_id)}
+            >
+              <div className="flex items-center justify-between gap-2">
+                <div className="line-clamp-1 text-sm font-medium">{project.name}</div>
+                {project.is_default ? <Badge tone="blue">默认</Badge> : null}
+              </div>
+              <div className={`mt-1 text-xs ${project.project_id === props.activeProjectId ? "text-slate-300" : "text-slate-500"}`}>
+                任务 {project.task_count} · Collections {project.collection_count}
+              </div>
+            </button>
+          ))}
+        </div>
+      </CollapsibleSection>
 
       <CollapsibleSection
         title="项目概览"
@@ -161,47 +212,6 @@ export function ProjectSidebar(props: Props) {
         >
           创建研究任务
         </button>
-      </CollapsibleSection>
-
-      <CollapsibleSection title="项目列表" collapsed={collapsed.projects} onToggle={() => toggleSection("projects")}>
-        <div className="flex gap-2">
-          <input
-            className="flex-1 rounded-2xl border border-slate-200 bg-slate-50 px-3 py-2 text-sm outline-none"
-            value={projectName}
-            onChange={(event) => setProjectName(event.target.value)}
-            placeholder="输入新的项目名"
-          />
-          <SmallButton
-            tone="solid"
-            disabled={!projectName.trim()}
-            onClick={() => {
-              props.onCreateProject({ name: projectName, description: "" });
-              setProjectName("");
-            }}
-            data-testid="create-project-button"
-          >
-            创建
-          </SmallButton>
-        </div>
-        <div className="mt-3 space-y-2">
-          {props.projects.map((project) => (
-            <button
-              key={project.project_id}
-              className={`w-full rounded-2xl border px-3 py-3 text-left transition ${
-                project.project_id === props.activeProjectId ? "border-slate-900 bg-slate-900 text-white" : "border-slate-200 bg-slate-50 hover:border-slate-300"
-              }`}
-              onClick={() => props.onSelectProject(project.project_id)}
-            >
-              <div className="flex items-center justify-between gap-2">
-                <div className="line-clamp-1 text-sm font-medium">{project.name}</div>
-                {project.is_default ? <Badge tone="blue">默认</Badge> : null}
-              </div>
-              <div className={`mt-1 text-xs ${project.project_id === props.activeProjectId ? "text-slate-300" : "text-slate-500"}`}>
-                任务 {project.task_count} · Collections {project.collection_count}
-              </div>
-            </button>
-          ))}
-        </div>
       </CollapsibleSection>
 
       <CollapsibleSection
@@ -281,9 +291,34 @@ export function ProjectSidebar(props: Props) {
           <SmallButton disabled={!props.activeTask} onClick={() => props.onQuickAction("plan")}>
             1. 规划方向
           </SmallButton>
-          <SmallButton disabled={!props.activeTask} onClick={() => props.onQuickAction("search_first")}>
-            2. 检索方向 1
+          <SmallButton
+            disabled={!props.activeTask || !availableDirections.length}
+            onClick={() => setShowDirectionSelect((current) => !current)}
+          >
+            2. 检索方向
           </SmallButton>
+          {showDirectionSelect ? (
+            <select
+              aria-label="检索方向选择"
+              className="rounded-2xl border border-slate-200 bg-white px-3 py-2 text-sm text-slate-600 outline-none"
+              defaultValue=""
+              onChange={(event) => {
+                const value = Number(event.target.value);
+                if (!value) return;
+                props.onSearchDirection(value);
+                setShowDirectionSelect(false);
+              }}
+            >
+              <option value="" disabled>
+                选择研究方向
+              </option>
+              {availableDirections.map((direction) => (
+                <option key={direction.direction_index} value={direction.direction_index}>
+                  {`方向${direction.direction_index}`}
+                </option>
+              ))}
+            </select>
+          ) : null}
           <SmallButton disabled={!props.activeTask} onClick={() => props.onQuickAction("build_graph")}>
             3. 构建图谱
           </SmallButton>
@@ -296,6 +331,7 @@ export function ProjectSidebar(props: Props) {
             </SmallButton>
           ) : null}
         </div>
+        {props.activeTask && !availableDirections.length ? <div className="mt-2 text-xs text-slate-400">请先规划方向，再选择对应方向进行检索。</div> : null}
       </CollapsibleSection>
 
       <CollapsibleSection title="Provider 状态" collapsed={collapsed.providers} onToggle={() => toggleSection("providers")}>

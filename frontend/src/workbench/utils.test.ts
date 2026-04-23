@@ -106,4 +106,52 @@ describe("mergeCanvasWithGraph", () => {
     expect(payload.edges).toHaveLength(1);
     expect(payload.edges[0].id).toBe("manual-edge");
   });
+
+  it("drops stale lightweight system nodes from saved canvas when canonical graph no longer contains them", () => {
+    const graph: GraphResponse = {
+      task_id: "R-3",
+      status: "done",
+      view: "tree",
+      nodes: [
+        { id: "topic:R-3", type: "topic", label: "Research topic" },
+        { id: "direction:R-3:1", type: "direction", label: "Direction 1" },
+      ],
+      edges: [{ source: "topic:R-3", target: "direction:R-3:1", type: "topic_direction" }],
+    };
+    const canvas: CanvasResponse = {
+      task_id: "R-3",
+      nodes: [
+        {
+          id: "topic:R-3",
+          type: "topic",
+          position: { x: 10, y: 20 },
+          data: { userNote: "" },
+          hidden: false,
+        },
+        {
+          id: "old-paper-token",
+          type: "paper",
+          position: { x: 200, y: 300 },
+          data: { userNote: "" },
+          hidden: false,
+        },
+        {
+          id: "note:keep",
+          type: "note",
+          position: { x: 420, y: 200 },
+          data: { label: "Keep me", summary: "manual", isManual: true },
+          hidden: false,
+        },
+      ],
+      edges: [],
+      viewport: { x: 0, y: 0, zoom: 1 },
+      ui: defaultCanvasUi(),
+    };
+
+    const merged = mergeCanvasWithGraph(graph, canvas, []);
+
+    expect(merged.nodes.some((node) => node.id === "old-paper-token")).toBe(false);
+    expect(merged.nodes.some((node) => node.id === "note:keep" && node.data?.isManual)).toBe(true);
+    expect(merged.nodes.some((node) => node.id === "direction:R-3:1")).toBe(true);
+  });
 });

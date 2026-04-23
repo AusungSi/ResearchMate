@@ -397,6 +397,8 @@ export function mergeCanvasWithGraph(graph?: GraphResponse, canvas?: CanvasRespo
 
   for (const node of canvas?.nodes || []) {
     if (canonicalNodes.has(node.id)) continue;
+    const manual = isPersistedManualNode(node);
+    if (!manual && !hasPersistedSystemSnapshot(node)) continue;
     nodes.push({
       id: node.id,
       type: "cardNode",
@@ -409,7 +411,7 @@ export function mergeCanvasWithGraph(graph?: GraphResponse, canvas?: CanvasRespo
         id: node.id,
         type: node.type,
         label: String(node.data?.label || node.id),
-        isManual: true,
+        ...(manual ? { isManual: true } : {}),
       } as FlowNodeData,
     });
   }
@@ -455,6 +457,16 @@ export function mergeCanvasWithGraph(graph?: GraphResponse, canvas?: CanvasRespo
     viewport: canvas?.viewport || { x: 0, y: 0, zoom: 1 },
     ui: { ...fallbackUi, ...(canvas?.ui || {}) },
   };
+}
+
+function isPersistedManualNode(node: CanvasResponse["nodes"][number]) {
+  return Boolean((node.data as Record<string, unknown> | undefined)?.isManual) || /^(note|question|reference|group|report|checkpoint):/.test(node.id);
+}
+
+function hasPersistedSystemSnapshot(node: CanvasResponse["nodes"][number]) {
+  const data = node.data;
+  if (!data || typeof data !== "object" || Array.isArray(data)) return false;
+  return Object.keys(data).some((key) => key !== "userNote");
 }
 
 export async function runAutoLayout(nodes: Array<Node<FlowNodeData>>, edges: Array<Edge>, mode = "elk_layered") {

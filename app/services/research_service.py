@@ -3115,7 +3115,12 @@ class ResearchService:
         depth = max(1, int(self.settings.research_graph_depth_default))
 
         if view == ResearchGraphViewType.TREE.value:
-            tree = self._build_tree_graph(db, task)
+            tree = self._build_tree_graph(
+                db,
+                task,
+                include_papers=True,
+                paper_limit=self.settings.research_graph_paper_limit_default,
+            )
             ResearchGraphSnapshotRepo(db).upsert_snapshot(
                 task_id=task.id,
                 direction_index=direction_index,
@@ -5786,7 +5791,7 @@ class ResearchService:
             "common_points": _load_json_list(row.common_points_json),
             "differences": _load_json_list(row.differences_json),
             "recommended_next_steps": _load_json_list(row.recommended_next_steps_json),
-            "items": _load_json_list(row.items_json),
+            "items": _load_json_list_of_dict(row.items_json),
             "created_at": row.created_at,
         }
 

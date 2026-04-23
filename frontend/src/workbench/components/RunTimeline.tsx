@@ -1,6 +1,6 @@
 import { useMemo, useState } from "react";
 import { autoStatusLabel, eventTypeLabel, formatRunState, stepLabel } from "../display";
-import type { RunEvent, RunSummary, TaskMode } from "../types";
+import type { RunEvent, RunStepCard, RunSummary, TaskMode } from "../types";
 import { formatDateTime } from "../utils";
 import { Badge, MarkdownText, SectionTitle, SmallButton } from "./shared";
 
@@ -131,7 +131,7 @@ export function RunTimeline(props: Props) {
                 <div className="text-xs text-slate-500">#{card.seq}</div>
               </div>
               {card.status ? <div className="mt-2 text-xs text-slate-500">状态：{card.status}</div> : null}
-              {Object.keys(card.details || {}).length ? <pre className="mt-3 overflow-auto rounded-2xl bg-white p-3 text-xs text-slate-600">{JSON.stringify(card.details, null, 2)}</pre> : null}
+              <NaturalLanguageDetails lines={describeStepCard(card)} />
             </div>
           ))}
         </div>
@@ -211,17 +211,246 @@ function groupEvents(events: RunEvent[]) {
 
 function describeEvent(event: RunEvent) {
   const payload = event.payload || {};
+  const details = filterDetailRecord(payload.details);
   if (payload.kind === "gpt_step") {
-    const details = payload.details && typeof payload.details === "object" ? JSON.stringify(payload.details, null, 2) : "";
-    return [String(payload.title || payload.step || "GPT Step"), details].filter(Boolean).join("\n");
+    return [String(payload.message || payload.title || payload.step || "GPT Step"), ...describeRecord(details)].filter(Boolean).join("\n");
   }
-  if (typeof payload.message === "string" && payload.message.trim()) return payload.message;
-  if (typeof payload.summary === "string" && payload.summary.trim()) return payload.summary;
-  if (typeof payload.content === "string" && payload.content.trim()) return payload.content;
-  if (typeof payload.report_excerpt === "string" && payload.report_excerpt.trim()) return payload.report_excerpt;
-  if (typeof payload.title === "string" && payload.title.trim()) return payload.title;
+  const headline = firstMeaningfulText(payload.message, payload.summary, payload.content, payload.report_excerpt, payload.title);
+  const extraLines = describeRecord(omitKeys(payload, ["message", "summary", "content", "report_excerpt", "title", "kind", "run_id", "task_id", "event_type", "details"]));
+  const detailLines = describeRecord(details);
+  if (headline) return [headline, ...extraLines, ...detailLines].filter(Boolean).join("\n");
   if (event.event_type === "artifact") {
     return `产物：${String(payload.path || payload.kind || "artifact")}`;
   }
-  return JSON.stringify(payload, null, 2);
+  const lines = [...extraLines, ...detailLines];
+  return lines.length ? lines.join("\n") : `${eventTypeLabel(event.event_type, payload)}已记录。`;
+}
+
+function describeStepCard(card: RunStepCard) {
+  return describeRecord(card.details);
+}
+
+function NaturalLanguageDetails(props: { lines: string[] }) {
+  if (!props.lines.length) return null;
+  return (
+    <div className="mt-3 space-y-2 rounded-2xl bg-white p-3 text-xs text-slate-600">
+      {props.lines.map((line, index) => (
+        <div key={`${line}-${index}`}>{line}</div>
+      ))}
+    </div>
+  );
+}
+
+function describeRecord(input: unknown, prefix = ""): string[] {
+  if (!input || typeof input !== "object" || Array.isArray(input)) return [];
+  const lines: string[] = [];
+  for (const [rawKey, rawValue] of Object.entries(input)) {
+    if (!isMeaningfulValue(rawValue)) continue;
+    const key = String(rawKey);
+    const special = describeSpecialField(key, rawValue, prefix);
+    if (special) {
+      lines.push(...special);
+      continue;
+    }
+    if (Array.isArray(rawValue)) {
+      const arrayText = formatArrayValue(rawValue, key);
+      if (arrayText) {
+        lines.push(`${composeFieldLabel(key, prefix)}：${arrayText}`);
+      }
+      continue;
+    }
+    if (typeof rawValue === "object") {
+      lines.push(...describeRecord(rawValue, composeFieldLabel(key, prefix)));
+      continue;
+    }
+    const scalar = formatScalarValue(rawValue, key);
+    if (!scalar) continue;
+    lines.push(`${composeFieldLabel(key, prefix)}：${scalar}`);
+  }
+  return lines;
+}
+
+function describeSpecialField(key: string, value: unknown, prefix = ""): string[] | null {
+  if (key === "source_coverage" && value && typeof value === "object" && !Array.isArray(value)) {
+    const parts = Object.entries(value)
+      .filter(([, item]) => isMeaningfulValue(item))
+      .map(([name, count]) => `${formatSourceName(name)} ${String(count)}`);
+    return parts.length ? [`${composeFieldLabel(key, prefix)}：${parts.join("，")}`] : [];
+  }
+  if (key === "provider_errors" && value && typeof value === "object" && !Array.isArray(value)) {
+    const parts = Object.entries(value)
+      .filter(([, item]) => isMeaningfulValue(item))
+      .map(([name, message]) => `${formatSourceName(name)}（${String(message).trim()}）`);
+    return parts.length ? [`${composeFieldLabel(key, prefix)}：${parts.join("；")}`] : [];
+  }
+  if (key === "scores") {
+    return [];
+  }
+  if ((key === "force" || key === "force_refresh" || key === "fallback_used") && value === false) {
+    return [];
+  }
+  if (key === "result_refs") {
+    return [];
+  }
+  return null;
+}
+
+function formatArrayValue(items: unknown[], key: string) {
+  const normalized = items.filter((item) => isMeaningfulValue(item));
+  if (!normalized.length) return "";
+  if (normalized.every((item) => typeof item !== "object")) {
+    return normalized.map((item) => formatScalarValue(item, key)).filter(Boolean).join("；");
+  }
+  const segments = normalized
+    .map((item) => describeRecord(item).join("，"))
+    .filter((item) => item.trim());
+  return segments.join("；");
+}
+
+function formatScalarValue(value: unknown, key: string) {
+  if (typeof value === "boolean") {
+    return value ? "是" : "否";
+  }
+  if (typeof value === "number") {
+    if (isCountField(key)) return value.toLocaleString("zh-CN");
+    return String(value);
+  }
+  const text = String(value).trim();
+  if (!text) return "";
+  if (key === "view") return viewLabel(text);
+  if (key === "mode") return modeValueLabel(text);
+  if (key === "llm_backend") return backendValueLabel(text);
+  if (key === "source") return sourceValueLabel(text);
+  if (key === "year_from" || key === "year_to") return text;
+  return text;
+}
+
+function composeFieldLabel(key: string, prefix = "") {
+  const base = fieldLabel(key);
+  if (!prefix) return base;
+  return `${prefix}${base}`;
+}
+
+function fieldLabel(key: string) {
+  const labels: Record<string, string> = {
+    mode: "模式",
+    llm_backend: "后端",
+    llm_model: "模型",
+    project_id: "项目 ID",
+    direction_index: "方向",
+    round_id: "轮次",
+    parent_round_id: "来源轮次",
+    child_round_id: "新轮次",
+    candidate_id: "候选 ID",
+    action: "操作",
+    candidate_count: "候选数量",
+    paper_count: "论文数量",
+    direction_count: "方向数量",
+    node_count: "节点数",
+    edge_count: "连线数",
+    paper_id: "论文 ID",
+    source: "来源",
+    view: "视图",
+    top_n: "检索上限",
+    force: "强制执行",
+    force_refresh: "强制刷新",
+    explicit_queries: "检索词",
+    year_from: "起始年份",
+    year_to: "结束年份",
+    sources: "数据源",
+    citation_sources: "引用来源",
+    constraints_override: "约束",
+    parsed: "已解析全文",
+    need_upload: "待补传全文",
+    fetched: "已下载 PDF",
+    failed: "失败项",
+    source_coverage: "来源覆盖",
+    provider_errors: "来源异常",
+    task_id: "任务 ID",
+    run_id: "运行 ID",
+    path: "路径",
+    kind: "类型",
+    summary: "摘要",
+    content: "内容",
+    checkpoint_id: "Checkpoint ID",
+    title: "标题",
+    status: "状态",
+    quality_score: "文本质量分",
+    text_chars: "文本字符数",
+    expand_limit_per_paper: "单篇扩展上限",
+    seed_top_n: "种子论文数",
+    weight: "权重",
+    source_name: "来源名称",
+  };
+  return labels[key] || key.replace(/_/g, " ");
+}
+
+function isCountField(key: string) {
+  return /(?:_count|_total|_chars|_seq)$/.test(key) || ["parsed", "need_upload", "fetched", "failed", "node_count", "edge_count", "direction_index", "round_id", "parent_round_id", "child_round_id", "candidate_id", "quality_score", "top_n", "seed_top_n", "expand_limit_per_paper", "year_from", "year_to"].includes(key);
+}
+
+function filterDetailRecord(input: unknown) {
+  if (!input || typeof input !== "object" || Array.isArray(input)) return {};
+  return omitKeys(input as Record<string, unknown>, ["message", "summary", "content", "report_excerpt", "title", "status"]);
+}
+
+function omitKeys(record: Record<string, unknown>, keys: string[]) {
+  const hidden = new Set(keys);
+  return Object.fromEntries(Object.entries(record).filter(([key, value]) => !hidden.has(key) && isMeaningfulValue(value)));
+}
+
+function isMeaningfulValue(value: unknown): boolean {
+  if (value == null) return false;
+  if (typeof value === "string") return value.trim().length > 0;
+  if (Array.isArray(value)) return value.some((item) => isMeaningfulValue(item));
+  if (typeof value === "object") return Object.values(value).some((item) => isMeaningfulValue(item));
+  return true;
+}
+
+function firstMeaningfulText(...values: unknown[]) {
+  for (const value of values) {
+    if (typeof value === "string" && value.trim()) {
+      return value.trim();
+    }
+  }
+  return "";
+}
+
+function viewLabel(value: string) {
+  const labels: Record<string, string> = {
+    tree: "树状图",
+    citation: "引用图谱",
+  };
+  return labels[value] || value;
+}
+
+function modeValueLabel(value: string) {
+  const labels: Record<string, string> = {
+    gpt_step: "GPT Step",
+    openclaw_auto: "OpenClaw Auto",
+  };
+  return labels[value] || value;
+}
+
+function backendValueLabel(value: string) {
+  const labels: Record<string, string> = {
+    gpt: "GPT API",
+    openclaw: "OpenClaw",
+  };
+  return labels[value] || value;
+}
+
+function sourceValueLabel(value: string) {
+  const labels: Record<string, string> = {
+    fulltext: "全文",
+    abstract: "摘要",
+    semantic_scholar: "Semantic Scholar",
+    openalex: "OpenAlex",
+    arxiv: "arXiv",
+  };
+  return labels[value] || value;
+}
+
+function formatSourceName(value: string) {
+  return sourceValueLabel(value);
 }

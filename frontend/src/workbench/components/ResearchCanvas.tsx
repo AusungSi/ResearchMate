@@ -20,6 +20,7 @@ export function ResearchCanvas(props: {
   nodes: Array<Node<FlowNodeData>>;
   edges: Array<Edge>;
   showMiniMap: boolean;
+  miniMapBottomOffset: number;
   flowRef: React.MutableRefObject<ReactFlowInstance<Node<FlowNodeData>, Edge> | null>;
   onNodesChange: OnNodesChange<Node<FlowNodeData>>;
   onEdgesChange: OnEdgesChange<Edge>;
@@ -69,7 +70,7 @@ export function ResearchCanvas(props: {
       maxZoom={1.6}
     >
       <Background color="#d8e0ea" gap={28} />
-      {props.showMiniMap ? <MiniMap pannable zoomable /> : null}
+      {props.showMiniMap ? <MiniMap pannable zoomable style={{ right: 24, bottom: props.miniMapBottomOffset }} /> : null}
       <Controls />
     </ReactFlow>
   );
