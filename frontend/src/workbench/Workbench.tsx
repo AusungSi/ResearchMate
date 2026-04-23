@@ -120,6 +120,7 @@ export function Workbench() {
   const [collectionLimit, setCollectionLimit] = useState(50);
   const [selectedCollectionItemIds, setSelectedCollectionItemIds] = useState<number[]>([]);
   const [relayoutNonce, setRelayoutNonce] = useState(0);
+  const [miniMapBottomOffset, setMiniMapBottomOffset] = useState(108);
   const [venueMetricsCollapsed, setVenueMetricsCollapsed] = useState(() => {
     if (typeof window === "undefined") {
       return false;
@@ -1315,27 +1316,25 @@ export function Workbench() {
           onCreateCollection={(payload) => createCollection.mutate(payload)}
           onCreateTask={(payload) => createTask.mutate(payload)}
           onQuickAction={(action) => workbenchAction.mutate({ type: "quick", action })}
+          onSearchDirection={(directionIndex) => workbenchAction.mutate({ type: "search_direction", directionIndex })}
           onImportZoteroFile={() => zoteroFileInputRef.current?.click()}
         />
       }
       canvas={
         <main className="relative flex h-full flex-col overflow-hidden bg-[radial-gradient(circle_at_20%_20%,rgba(59,130,246,0.06),transparent_26%),radial-gradient(circle_at_80%_20%,rgba(16,185,129,0.05),transparent_20%),linear-gradient(to_bottom,white,white)]">
-          <div className="shrink-0 border-b border-slate-200 px-6 py-4">
-            <div className="flex items-start justify-between gap-4">
-              <div>
+          <div className="shrink-0 border-b border-slate-200 px-6 py-3">
+            <div className="flex flex-wrap items-end justify-between gap-x-4 gap-y-2">
+              <div className="min-w-0 flex-1">
                 <div className="text-xs font-semibold uppercase tracking-[0.18em] text-slate-400">Research Canvas</div>
                 <div className="mt-1 text-lg font-semibold text-slate-900">卡片式研究画布</div>
                 <div className="mt-1 text-sm text-slate-500">
                   {activeTask ? `${activeTask.topic} · ${merged.nodes.length} 个节点 / ${edgeCountLabel(merged.edges)}` : "请选择任务，或先在左侧创建一个新的研究任务。"}
                 </div>
-                <div className="mt-1 text-xs text-slate-400">
-                  系统节点来自 canonical graph，手工节点与手工连线只写入 canvas state。多选论文卡片后可以直接加入 Collection 或做 Compare。
-                </div>
                 {actionStatus ? <ActionBanner status={actionStatus} onDismiss={() => setActionStatus(null)} /> : null}
               </div>
-              <div className="flex items-center gap-2">
+              <div className="ml-auto flex max-w-full flex-wrap items-center justify-end gap-2">
                 <button
-                  className={`rounded-full border px-3 py-1 text-xs ${uiState.show_minimap ? "border-slate-900 bg-slate-900 text-white" : "border-slate-200 bg-white text-slate-600"}`}
+                  className={`whitespace-nowrap rounded-full border px-3 py-1.5 text-xs ${uiState.show_minimap ? "border-slate-900 bg-slate-900 text-white" : "border-slate-200 bg-white text-slate-600"}`}
                   onClick={() => {
                     const next = { ...uiState, show_minimap: !uiState.show_minimap };
                     setUiState(next);
@@ -1345,7 +1344,7 @@ export function Workbench() {
                   MiniMap
                 </button>
                 <select
-                  className="rounded-full border border-slate-200 bg-white px-3 py-1 text-xs text-slate-600"
+                  className="min-w-0 rounded-full border border-slate-200 bg-white px-3 py-1.5 text-xs text-slate-600"
                   value={uiState.layout_mode}
                   onChange={(event) => {
                     const next = { ...uiState, layout_mode: event.target.value };
@@ -1359,7 +1358,7 @@ export function Workbench() {
                   <option value="elk_stress">自由图谱</option>
                 </select>
                 <button
-                  className="rounded-full border border-slate-200 bg-white px-3 py-1 text-xs text-slate-600"
+                  className="whitespace-nowrap rounded-full border border-slate-200 bg-white px-3 py-1.5 text-xs text-slate-600"
                   onClick={() => {
                     layoutSignatureRef.current = "";
                     setRelayoutNonce((current) => current + 1);
@@ -1367,7 +1366,7 @@ export function Workbench() {
                 >
                   重新布局
                 </button>
-                <div className="rounded-full border border-slate-200 bg-white px-3 py-1 text-xs text-slate-600">已选论文 {selectedPaperCount}</div>
+                <div className="whitespace-nowrap rounded-full border border-slate-200 bg-white px-3 py-1.5 text-xs text-slate-600">已选论文 {selectedPaperCount}</div>
               </div>
             </div>
           </div>
@@ -1384,6 +1383,7 @@ export function Workbench() {
               nodes={nodes}
               edges={edges}
               showMiniMap={uiState.show_minimap}
+              miniMapBottomOffset={miniMapBottomOffset}
               flowRef={flowRef}
               onNodesChange={handleNodesChange}
               onEdgesChange={onEdgesChange}
@@ -1437,6 +1437,7 @@ export function Workbench() {
           <QuickActionBar
             selectedPaperCount={selectedPaperCount}
             hiddenNodeCount={hiddenNodeCount}
+            onHeightChange={(height) => setMiniMapBottomOffset(Math.max(108, height + 32))}
             onAddNote={() => addManualNode("note")}
             onAddQuestion={() => addManualNode("question")}
             onAddReference={() => addManualNode("reference")}

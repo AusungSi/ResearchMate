@@ -6,7 +6,25 @@ describe("ProjectSidebar", () => {
   it("renders collapsible sections, local Zotero entry and creation actions", () => {
     const onCreateProject = vi.fn();
     const onCreateCollection = vi.fn();
+    const onSearchDirection = vi.fn();
     const onImportZoteroFile = vi.fn();
+    const activeTask = {
+      task_id: "R-1",
+      project_id: "project-default",
+      project_name: "Default Project",
+      topic: "Embodied AI",
+      status: "done",
+      mode: "gpt_step" as const,
+      llm_backend: "gpt" as const,
+      llm_model: "gpt-5.4",
+      auto_status: "idle",
+      latest_run_id: "step-R-1",
+      directions: [
+        { direction_index: 1, name: "World Model", papers_count: 12 },
+        { direction_index: 2, name: "VLA", papers_count: 8 },
+      ],
+      graph_stats: {},
+    };
 
     render(
       <ProjectSidebar
@@ -74,20 +92,7 @@ describe("ProjectSidebar", () => {
           },
         ]}
         tasks={[
-          {
-            task_id: "R-1",
-            project_id: "project-default",
-            project_name: "Default Project",
-            topic: "Embodied AI",
-            status: "done",
-            mode: "gpt_step",
-            llm_backend: "gpt",
-            llm_model: "gpt-5.4",
-            auto_status: "idle",
-            latest_run_id: "step-R-1",
-            directions: [],
-            graph_stats: {},
-          },
+          activeTask,
         ]}
         collections={[
           {
@@ -110,7 +115,7 @@ describe("ProjectSidebar", () => {
         activeProjectId="project-default"
         activeTaskId="R-1"
         activeCollectionId="collection-1"
-        activeTask={null}
+        activeTask={activeTask}
         onSelectProject={vi.fn()}
         onSelectTask={vi.fn()}
         onSelectCollection={vi.fn()}
@@ -118,6 +123,7 @@ describe("ProjectSidebar", () => {
         onCreateCollection={onCreateCollection}
         onCreateTask={vi.fn()}
         onQuickAction={vi.fn()}
+        onSearchDirection={onSearchDirection}
         onImportZoteroFile={onImportZoteroFile}
       />,
     );
@@ -140,6 +146,10 @@ describe("ProjectSidebar", () => {
     fireEvent.change(screen.getByPlaceholderText("输入 Collection 名称"), { target: { value: "Collection A" } });
     fireEvent.click(screen.getByTestId("create-collection-button"));
     expect(onCreateCollection).toHaveBeenCalled();
+
+    fireEvent.click(screen.getByText("2. 检索方向"));
+    fireEvent.change(screen.getByLabelText("检索方向选择"), { target: { value: "2" } });
+    expect(onSearchDirection).toHaveBeenCalledWith(2);
 
     fireEvent.click(screen.getAllByText("折叠")[0]);
     expect(screen.getAllByText("展开").length).toBeGreaterThan(0);

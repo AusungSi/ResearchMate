@@ -7,6 +7,9 @@ import { ResearchCanvas } from "./ResearchCanvas";
 const { reactFlowSpy } = vi.hoisted(() => ({
   reactFlowSpy: vi.fn(),
 }));
+const { miniMapSpy } = vi.hoisted(() => ({
+  miniMapSpy: vi.fn(),
+}));
 
 vi.mock("@xyflow/react", () => ({
   ReactFlow: (props: ReactFlowProps<Node<FlowNodeData>, Edge>) => {
@@ -17,7 +20,10 @@ vi.mock("@xyflow/react", () => ({
   Controls: () => <div data-testid="controls" />,
   Handle: () => null,
   MarkerType: { ArrowClosed: "arrowclosed" },
-  MiniMap: () => <div data-testid="minimap" />,
+  MiniMap: (props: Record<string, unknown>) => {
+    miniMapSpy(props);
+    return <div data-testid="minimap" />;
+  },
   Position: { Left: "left", Right: "right" },
   SelectionMode: { Partial: "partial" },
   addEdge: vi.fn(),
@@ -30,6 +36,7 @@ describe("ResearchCanvas", () => {
         nodes={[]}
         edges={[]}
         showMiniMap
+        miniMapBottomOffset={124}
         flowRef={{ current: null }}
         onNodesChange={vi.fn()}
         onEdgesChange={vi.fn()}
@@ -50,5 +57,6 @@ describe("ResearchCanvas", () => {
     expect(props.panOnDrag).toBe(true);
     expect(props.selectionOnDrag).toBe(false);
     expect(props.selectionKeyCode).toEqual(["Shift"]);
+    expect(miniMapSpy.mock.calls.at(-1)?.[0]).toMatchObject({ style: { bottom: 124, right: 24 } });
   });
 });

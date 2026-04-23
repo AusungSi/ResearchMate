@@ -1,8 +1,10 @@
+import { useEffect, useRef } from "react";
 import { SmallButton } from "./shared";
 
 type Props = {
   selectedPaperCount: number;
   hiddenNodeCount: number;
+  onHeightChange?: (height: number) => void;
   onAddNote: () => void;
   onAddQuestion: () => void;
   onAddReference: () => void;
@@ -16,9 +18,20 @@ type Props = {
 
 export function QuickActionBar(props: Props) {
   const actionButtonClass = "flex-none whitespace-nowrap";
+  const containerRef = useRef<HTMLDivElement | null>(null);
+
+  useEffect(() => {
+    if (!props.onHeightChange || !containerRef.current || typeof ResizeObserver === "undefined") return;
+    const node = containerRef.current;
+    const notify = () => props.onHeightChange?.(node.offsetHeight);
+    notify();
+    const observer = new ResizeObserver(() => notify());
+    observer.observe(node);
+    return () => observer.disconnect();
+  }, [props.onHeightChange]);
 
   return (
-    <div className="absolute bottom-5 left-20 right-6 z-10">
+    <div ref={containerRef} className="absolute bottom-5 left-20 right-6 z-10">
       <div className="flex w-full flex-wrap items-center justify-center gap-2 rounded-2xl border border-slate-200 bg-white/96 px-3 py-3 shadow-lg backdrop-blur">
         <SmallButton className={actionButtonClass} tone="solid" onClick={props.onAddNote}>
           添加笔记

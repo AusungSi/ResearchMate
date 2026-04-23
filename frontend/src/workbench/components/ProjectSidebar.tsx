@@ -24,6 +24,7 @@ type Props = {
   onCreateCollection: (payload: { name: string; description: string }) => void;
   onCreateTask: (payload: { topic: string; mode: TaskMode; llm_backend: Backend; llm_model: string }) => void;
   onQuickAction: (action: "plan" | "search_first" | "build_graph" | "build_fulltext" | "auto_start") => void;
+  onSearchDirection: (directionIndex: number) => void;
   onImportZoteroFile: () => void;
 };
 
@@ -36,6 +37,7 @@ export function ProjectSidebar(props: Props) {
   const [mode, setMode] = useState<TaskMode>(props.config?.default_mode || "gpt_step");
   const [backend, setBackend] = useState<Backend>(props.config?.default_backend || "gpt");
   const [model, setModel] = useState(props.config?.default_gpt_model || "gpt-5.4");
+  const [showDirectionSelect, setShowDirectionSelect] = useState(false);
   const [collapsed, setCollapsed] = useState<Record<SectionKey, boolean>>({
     overview: false,
     create: false,
@@ -73,6 +75,14 @@ export function ProjectSidebar(props: Props) {
     () => new Map(props.tasks.map((task) => [task.task_id, deriveTaskProgress(task)])),
     [props.tasks],
   );
+  const availableDirections = useMemo(
+    () => [...(props.activeTask?.directions || [])].sort((left, right) => left.direction_index - right.direction_index),
+    [props.activeTask?.directions],
+  );
+
+  useEffect(() => {
+    setShowDirectionSelect(false);
+  }, [props.activeTaskId]);
 
   function toggleSection(key: SectionKey) {
     setCollapsed((current) => ({ ...current, [key]: !current[key] }));
@@ -281,9 +291,34 @@ export function ProjectSidebar(props: Props) {
           <SmallButton disabled={!props.activeTask} onClick={() => props.onQuickAction("plan")}>
             1. 规划方向
           </SmallButton>
-          <SmallButton disabled={!props.activeTask} onClick={() => props.onQuickAction("search_first")}>
+          <SmallButton
+            disabled={!props.activeTask || !availableDirections.length}
+            onClick={() => setShowDirectionSelect((current) => !current)}
+          >
             2. 检索方向
           </SmallButton>
+          {showDirectionSelect ? (
+            <select
+              aria-label="检索方向选择"
+              className="rounded-2xl border border-slate-200 bg-white px-3 py-2 text-sm text-slate-600 outline-none"
+              defaultValue=""
+              onChange={(event) => {
+                const value = Number(event.target.value);
+                if (!value) return;
+                props.onSearchDirection(value);
+                setShowDirectionSelect(false);
+              }}
+            >
+              <option value="" disabled>
+                选择研究方向
+              </option>
+              {availableDirections.map((direction) => (
+                <option key={direction.direction_index} value={direction.direction_index}>
+                  {`方向${direction.direction_index}`}
+                </option>
+              ))}
+            </select>
+          ) : null}
           <SmallButton disabled={!props.activeTask} onClick={() => props.onQuickAction("build_graph")}>
             3. 构建图谱
           </SmallButton>
@@ -296,6 +331,7 @@ export function ProjectSidebar(props: Props) {
             </SmallButton>
           ) : null}
         </div>
+        {props.activeTask && !availableDirections.length ? <div className="mt-2 text-xs text-slate-400">请先规划方向，再选择对应方向进行检索。</div> : null}
       </CollapsibleSection>
 
       <CollapsibleSection title="Provider 状态" collapsed={collapsed.providers} onToggle={() => toggleSection("providers")}>
