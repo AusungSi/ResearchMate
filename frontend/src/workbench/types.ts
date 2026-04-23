@@ -163,6 +163,7 @@ export type GraphNode = {
   id: string;
   type: string;
   label: string;
+  paper_id?: string | null;
   year?: number | null;
   source?: string | null;
   venue?: string | null;

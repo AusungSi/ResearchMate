@@ -298,6 +298,14 @@ export function Workbench() {
   });
   const taskProgress = useMemo(() => deriveTaskProgress(activeTask, eventsState.summary, eventsState.items), [activeTask, eventsState.items, eventsState.summary]);
 
+  useEffect(() => {
+    if (!actionStatus) return;
+    const timer = window.setTimeout(() => {
+      setActionStatus(null);
+    }, 5000);
+    return () => window.clearTimeout(timer);
+  }, [actionStatus]);
+
   const merged = useMemo(
     () => mergeCanvasWithGraph(graphQuery.data, canvasQuery.data, eventsState.items, configQuery.data?.default_canvas_ui || defaultCanvasUi()),
     [graphQuery.data, canvasQuery.data, configQuery.data?.default_canvas_ui, eventsState.items],
@@ -397,6 +405,12 @@ export function Workbench() {
   useEffect(() => {
     if (activeTaskId === lastTaskIdRef.current) return;
     lastTaskIdRef.current = activeTaskId;
+    if (persistTimer.current) {
+      window.clearTimeout(persistTimer.current);
+      persistTimer.current = null;
+    }
+    interactionLockRef.current = false;
+    suppressViewportPersistRef.current = false;
     setActiveCollectionId("");
     setSelectedNodeId("");
     setDetailTab("info");
@@ -414,6 +428,9 @@ export function Workbench() {
     pendingCanvasSignature.current = "";
     canvasRetryCountRef.current = {};
     nodeChatRetryCountRef.current = {};
+    setNodes([]);
+    setEdges([]);
+    setViewport({ x: 0, y: 0, zoom: 1 });
   }, [activeTaskId]);
 
   useEffect(() => {
@@ -425,8 +442,14 @@ export function Workbench() {
   }, []);
 
   const selectedNode = nodes.find((node) => node.id === selectedNodeId) || null;
-  const selectedPaperId = selectedNode?.id && isPaperNode(selectedNode.id, selectedNode.data) ? selectedNode.id : "";
+  const selectedPaperId = useMemo(() => {
+    if (!selectedNode?.id || !isPaperNode(selectedNode.id, selectedNode.data)) {
+      return "";
+    }
+    return String(selectedNode.data?.paper_id || selectedNode.id).trim();
+  }, [selectedNode]);
   const selectedPaperCount = useMemo(() => selectedPaperNodes(nodes).length, [nodes]);
+  const hiddenNodeCount = useMemo(() => nodes.filter((node) => Boolean(node.hidden)).length, [nodes]);
   const selectedFulltextItem = useMemo(
     () => fulltextStatusQuery.data?.items.find((item) => item.paper_id === selectedPaperId) || null,
     [fulltextStatusQuery.data?.items, selectedPaperId],
@@ -545,6 +568,7 @@ export function Workbench() {
     }
     pendingCanvasSignature.current = signature;
     persistTimer.current = window.setTimeout(() => {
+      persistTimer.current = null;
       saveCanvas.mutate({ taskId: activeTaskId, payload });
     }, 450);
   }
@@ -1043,6 +1067,20 @@ export function Workbench() {
     setActionStatus({ tone: "success", text: "已删除手工节点。" });
   }
 
+  function restoreHiddenNodes() {
+    const hasHiddenNodes = nodesRef.current.some((node) => Boolean(node.hidden));
+    if (!hasHiddenNodes) {
+      setActionStatus({ tone: "neutral", text: "当前没有隐藏节点可恢复。" });
+      return;
+    }
+    const nextNodes = nodesRef.current.map((node) => (node.hidden ? { ...node, hidden: false } : node));
+    const nextEdges = applyHiddenEdgeVisibility(nextNodes, edgesRef.current);
+    setNodes(nextNodes);
+    setEdges(nextEdges);
+    queueSave(nextNodes, nextEdges);
+    setActionStatus({ tone: "success", text: "已恢复画布中的隐藏节点。" });
+  }
+
   function handleNodesChange(changes: NodeChange<Node<FlowNodeData>>[]) {
     const removedIds = changes.filter((change) => change.type === "remove").map((change) => change.id);
     if (!removedIds.length) {
@@ -1293,7 +1331,7 @@ export function Workbench() {
                 <div className="mt-1 text-xs text-slate-400">
                   系统节点来自 canonical graph，手工节点与手工连线只写入 canvas state。多选论文卡片后可以直接加入 Collection 或做 Compare。
                 </div>
-                {actionStatus ? <ActionBanner status={actionStatus} /> : null}
+                {actionStatus ? <ActionBanner status={actionStatus} onDismiss={() => setActionStatus(null)} /> : null}
               </div>
               <div className="flex items-center gap-2">
                 <button
@@ -1398,6 +1436,7 @@ export function Workbench() {
 
           <QuickActionBar
             selectedPaperCount={selectedPaperCount}
+            hiddenNodeCount={hiddenNodeCount}
             onAddNote={() => addManualNode("note")}
             onAddQuestion={() => addManualNode("question")}
             onAddReference={() => addManualNode("reference")}
@@ -1417,6 +1456,7 @@ export function Workbench() {
                 setActionStatus({ tone: "danger", text: cause instanceof Error ? cause.message : String(cause) });
               });
             }}
+            onRestoreHiddenNodes={restoreHiddenNodes}
             onSaveCanvas={() => queueSave(nodesRef.current, edgesRef.current)}
           />
         </main>
@@ -1753,7 +1793,7 @@ function isMissingPrerequisite(noopReason: string) {
   return noopReason.includes("missing") || noopReason.startsWith("no_") || noopReason === "paper_missing";
 }
 
-function ActionBanner(props: { status: ActionStatus }) {
+function ActionBanner(props: { status: ActionStatus; onDismiss: () => void }) {
   const className =
     props.status.tone === "success"
       ? "border-emerald-200 bg-emerald-50 text-emerald-700"
@@ -1763,7 +1803,22 @@ function ActionBanner(props: { status: ActionStatus }) {
           ? "border-rose-200 bg-rose-50 text-rose-700"
           : "border-slate-200 bg-slate-50 text-slate-600";
 
-  return <div className={`mt-3 rounded-2xl border px-3 py-2 text-sm ${className}`}>{props.status.text}</div>;
+  return (
+    <div className={`mt-3 flex items-center justify-between gap-3 rounded-2xl border px-3 py-2 text-sm ${className}`}>
+      <div className="min-w-0 flex-1">{props.status.text}</div>
+      <button
+        type="button"
+        className="inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-full border border-current/15 bg-white/50 text-current transition hover:bg-white/80"
+        aria-label="关闭提示"
+        onClick={props.onDismiss}
+      >
+        <svg viewBox="0 0 16 16" className="h-3.5 w-3.5" aria-hidden="true" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round">
+          <path d="M4 4l8 8" />
+          <path d="M12 4l-8 8" />
+        </svg>
+      </button>
+    </div>
+  );
 }
 
 function formatVenueMetricSummary(item: TaskVenueMetricItem) {

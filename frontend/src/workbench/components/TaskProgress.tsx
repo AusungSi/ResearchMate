@@ -15,7 +15,7 @@ const stageStateClass: Record<string, string> = {
 const glassCardClass = "border border-slate-200 bg-white/96 shadow-lg backdrop-blur";
 
 export function TaskProgress(props: Props) {
-  const [hidden, setHidden] = useState(false);
+  const [hidden, setHidden] = useState(true);
 
   if (hidden) {
     return (

@@ -3115,7 +3115,12 @@ class ResearchService:
         depth = max(1, int(self.settings.research_graph_depth_default))
 
         if view == ResearchGraphViewType.TREE.value:
-            tree = self._build_tree_graph(db, task)
+            tree = self._build_tree_graph(
+                db,
+                task,
+                include_papers=True,
+                paper_limit=self.settings.research_graph_paper_limit_default,
+            )
             ResearchGraphSnapshotRepo(db).upsert_snapshot(
                 task_id=task.id,
                 direction_index=direction_index,

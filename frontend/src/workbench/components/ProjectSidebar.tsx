@@ -282,7 +282,7 @@ export function ProjectSidebar(props: Props) {
             1. 规划方向
           </SmallButton>
           <SmallButton disabled={!props.activeTask} onClick={() => props.onQuickAction("search_first")}>
-            2. 检索方向 1
+            2. 检索方向
           </SmallButton>
           <SmallButton disabled={!props.activeTask} onClick={() => props.onQuickAction("build_graph")}>
             3. 构建图谱

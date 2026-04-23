@@ -26,6 +26,7 @@ describe("TaskProgress", () => {
   it("collapses into a compact chip and can be expanded again", () => {
     render(<TaskProgress progress={progress} />);
 
+    fireEvent.click(screen.getByRole("button", { name: "展开 Task Progress" }));
     expect(screen.getByText("当前阶段：检索与探索")).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "隐藏 Task Progress" }));
 
