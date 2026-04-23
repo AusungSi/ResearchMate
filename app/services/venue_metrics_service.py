@@ -34,6 +34,22 @@ class VenueMetricsService:
         if not self.settings.research_venue_metrics_enabled or not venue_text:
             return {}
 
+        local_entry = self._lookup_local_catalog(venue_text)
+        if local_entry:
+            venue_key = _normalize_venue_key(venue_text)
+            cached = self._read_cache(venue_key)
+            if cached:
+                return dict(cached)
+            metrics = self._build_metrics(
+                venue=venue_text,
+                resolved_venue=venue_text,
+                venue_key=venue_key,
+                local_entry=local_entry,
+                source_meta={},
+            )
+            self._write_cache(venue_key, metrics)
+            return metrics
+
         work_meta = self._lookup_openalex_work(doi=doi, title=title, year=year)
         resolved_venue = str(
             work_meta.get("source_display_name")
