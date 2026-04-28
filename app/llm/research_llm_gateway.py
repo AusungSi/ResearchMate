@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from time import perf_counter
+from collections.abc import Iterator
 import json
 import re
 
@@ -49,6 +50,36 @@ class ResearchLLMGateway:
                 max_tokens=max_tokens,
             )
         return self._chat_gpt(
+            prompt=prompt,
+            system_prompt=system_prompt,
+            model=model,
+            temperature=temperature,
+            max_tokens=max_tokens,
+        )
+
+    def chat_text_stream(
+        self,
+        *,
+        backend: str,
+        prompt: str,
+        system_prompt: str | None = None,
+        model: str | None = None,
+        temperature: float = 0.2,
+        max_tokens: int = 1200,
+    ) -> Iterator[str]:
+        backend_norm = (backend or "gpt").strip().lower()
+        if backend_norm == "openclaw":
+            yield from self._chunk_text(
+                self._chat_openclaw(
+                    prompt=prompt,
+                    system_prompt=system_prompt,
+                    model=model,
+                    temperature=temperature,
+                    max_tokens=max_tokens,
+                ).text
+            )
+            return
+        yield from self._chat_gpt_stream(
             prompt=prompt,
             system_prompt=system_prompt,
             model=model,
@@ -155,6 +186,93 @@ class ResearchLLMGateway:
             model=chosen_model,
             latency_ms=int((perf_counter() - started) * 1000),
         )
+
+    def _chat_gpt_stream(
+        self,
+        *,
+        prompt: str,
+        system_prompt: str | None,
+        model: str | None,
+        temperature: float,
+        max_tokens: int,
+    ) -> Iterator[str]:
+        api_key = self.settings.research_gpt_api_key.strip()
+        chosen_model = (model or self.settings.research_gpt_model).strip()
+        if not api_key:
+            yield from self._chunk_text(self._fallback_response(prompt))
+            return
+
+        base_url = self.settings.research_gpt_base_url.rstrip("/")
+        if not base_url.endswith("/chat/completions"):
+            if base_url.endswith("/v1"):
+                base_url = f"{base_url}/chat/completions"
+            else:
+                base_url = f"{base_url}/v1/chat/completions"
+
+        headers = {
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json",
+        }
+        messages: list[dict[str, str]] = []
+        if system_prompt and system_prompt.strip():
+            messages.append({"role": "system", "content": system_prompt.strip()})
+        messages.append({"role": "user", "content": prompt.strip()})
+        payload = {
+            "model": chosen_model,
+            "messages": messages,
+            "temperature": temperature,
+            "max_tokens": max_tokens,
+            "stream": True,
+        }
+        try:
+            with httpx.Client(timeout=max(5, int(self.settings.research_gpt_timeout_seconds))) as client:
+                with client.stream("POST", base_url, headers=headers, json=payload) as resp:
+                    resp.raise_for_status()
+                    emitted = False
+                    for raw_line in resp.iter_lines():
+                        line = (raw_line or "").strip()
+                        if not line.startswith("data:"):
+                            continue
+                        data_text = line[5:].strip()
+                        if not data_text or data_text == "[DONE]":
+                            continue
+                        try:
+                            data = json.loads(data_text)
+                        except Exception:
+                            continue
+                        choices = data.get("choices") or []
+                        if not choices:
+                            continue
+                        delta = choices[0].get("delta") or {}
+                        content = str(delta.get("content") or "")
+                        if content:
+                            emitted = True
+                            yield content
+                    if emitted:
+                        return
+        except Exception:
+            pass
+
+        try:
+            response = self._chat_gpt(
+                prompt=prompt,
+                system_prompt=system_prompt,
+                model=chosen_model,
+                temperature=temperature,
+                max_tokens=max_tokens,
+            )
+            yield from self._chunk_text(response.text)
+            return
+        except Exception:
+            yield from self._chunk_text(self._fallback_response(prompt))
+
+    @staticmethod
+    def _chunk_text(text: str, chunk_size: int = 48) -> Iterator[str]:
+        next_text = str(text or "")
+        if not next_text:
+            return
+        for index in range(0, len(next_text), max(1, chunk_size)):
+            yield next_text[index : index + max(1, chunk_size)]
 
     @staticmethod
     def _fallback_response(prompt: str) -> str:

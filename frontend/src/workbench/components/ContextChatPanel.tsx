@@ -1,7 +1,7 @@
-import { useEffect, useMemo, useState } from "react";
-import type { ChatItem } from "../types";
+import { useMemo, useRef } from "react";
+import type { ChatAttachment, ChatMessage, ChatThread } from "../types";
 import { formatDateTime } from "../utils";
-import { MarkdownText, SectionTitle, SmallButton } from "./shared";
+import { MarkdownText, SmallButton } from "./shared";
 
 type ChatTargetOption = {
   id: string;
@@ -11,184 +11,266 @@ type ChatTargetOption = {
 
 type Props = {
   disabled: boolean;
+  taskTitle?: string | null;
+  threads: ChatThread[];
+  activeThreadId: string;
+  messages: ChatMessage[];
   nodeOptions: ChatTargetOption[];
-  activeNodeId: string;
-  activeNodeLabel?: string | null;
-  activeNodeType?: string | null;
-  history: ChatItem[];
-  question: string;
+  contextNodeIds: string[];
+  attachments: ChatAttachment[];
+  uploadingNames: string[];
+  draft: string;
   busy?: boolean;
-  onQuestionChange: (value: string) => void;
-  onSelectNode: (nodeId: string) => void;
-  onSend: (question: string, threadId?: string) => void;
-  onSaveAnswer: (kind: "note" | "question" | "reference" | "report", item: ChatItem) => void;
+  streaming?: boolean;
+  error?: string | null;
+  onDraftChange: (value: string) => void;
+  onSelectThread: (threadId: string) => void;
+  onNewThread: () => void;
+  onSend: () => void;
+  onUploadFiles: (files: FileList) => void;
+  onRemoveAttachment: (attachmentId: string) => void;
+  onAddContextNode: (nodeId: string) => void;
+  onRemoveContextNode: (nodeId: string) => void;
+  onUseSuggestion: (question: string) => void;
+  onSaveAnswer: (kind: "note" | "report", item: ChatMessage) => void;
 };
 
-const DEFAULT_QUESTIONS = [
-  "请总结这个节点的核心价值。",
-  "这个节点下一步最值得补什么证据？",
-  "它和当前研究任务的关系是什么？",
-];
+const GENERIC_SUGGESTIONS = ["请总结当前任务的核心判断。", "下一步最值得补什么证据？", "请给我一个更可执行的研究建议。"];
 
-function quickQuestionsForNodeType(nodeType?: string | null) {
-  if (nodeType === "paper") {
-    return [
-      "这篇论文解决什么问题？",
-      "核心方法是什么？",
-      "关键证据和实验结论是什么？",
-      "有哪些局限和风险？",
-      "它和当前任务的关系是什么？",
-    ];
+function suggestionsForTypes(types: string[]) {
+  if (!types.length) return [];
+  if (types.every((type) => type === "paper")) {
+    return ["这些论文分别解决什么问题？", "它们的核心方法和证据有什么差别？", "基于这些论文，当前任务下一步应该怎么推进？"];
   }
-  if (nodeType === "direction") {
-    return [
-      "这个方向的核心价值是什么？",
-      "下一步最值得补哪些论文？",
-      "这个方向和当前主题的关系是什么？",
-    ];
+  if (types.includes("direction")) {
+    return ["这个方向的研究价值是什么？", "继续检索时最该补哪类论文？", "它和当前任务主线是什么关系？"];
   }
-  if (nodeType === "round") {
-    return [
-      "这一轮探索的目标是什么？",
-      "当前候选方向各自的利弊是什么？",
-      "下一轮应该如何收敛？",
-    ];
+  if (types.includes("round")) {
+    return ["这一轮探索已经覆盖了什么？", "下一轮最值得收敛到哪里？", "这里还缺哪些关键证据？"];
   }
-  if (nodeType === "checkpoint") {
-    return [
-      "这个 checkpoint 已经确认了什么？",
-      "系统建议的下一步是什么？",
-      "我现在该如何给 guidance？",
-    ];
-  }
-  if (nodeType === "report") {
-    return [
-      "这份阶段报告最重要的结论是什么？",
-      "还有哪些空白没有补齐？",
-      "下一步最值得继续扩展什么？",
-    ];
-  }
-  if (nodeType === "question") {
-    return [
-      "请直接回答这个问题节点。",
-      "这个问题应该连接到哪些论文或方向？",
-      "这个问题下一步该怎么验证？",
-    ];
-  }
-  return DEFAULT_QUESTIONS;
+  return GENERIC_SUGGESTIONS;
 }
 
 export function ContextChatPanel(props: Props) {
-  const [forceNewThread, setForceNewThread] = useState(false);
-  const threadId = forceNewThread ? undefined : props.history.at(-1)?.thread_id;
-  const quickQuestions = useMemo(() => quickQuestionsForNodeType(props.activeNodeType), [props.activeNodeType]);
-
-  useEffect(() => {
-    setForceNewThread(false);
-  }, [props.activeNodeId]);
+  const fileInputRef = useRef<HTMLInputElement | null>(null);
+  const activeThread = props.threads.find((item) => item.thread_id === props.activeThreadId) || null;
+  const contextMap = useMemo(() => new Map(props.nodeOptions.map((item) => [item.id, item])), [props.nodeOptions]);
+  const selectedTypes = useMemo(
+    () => props.contextNodeIds.map((id) => String(contextMap.get(id)?.type || "")).filter(Boolean),
+    [contextMap, props.contextNodeIds],
+  );
+  const suggestionChips = useMemo(() => suggestionsForTypes(selectedTypes), [selectedTypes]);
+  const selectableNodes = useMemo(
+    () => props.nodeOptions.filter((item) => !props.contextNodeIds.includes(item.id)),
+    [props.contextNodeIds, props.nodeOptions],
+  );
 
   return (
-    <div className="flex h-full min-h-0 flex-col rounded-3xl border border-slate-200 bg-white p-4 shadow-sm">
-      <SectionTitle
-        eyebrow="聊天"
-        title="研究对话"
-        description={
-          props.disabled
-            ? "请先选择一个任务。聊天现在不会自动绑定右侧选中的节点，你可以手动指定要围绕哪个节点提问。"
-            : "聊天页现在是独立的整栏视图。你可以手动选择对话对象，再围绕该节点连续追问。"
-        }
-      />
-
-      <div className="mt-4">
-        <label className="text-xs font-semibold uppercase tracking-[0.16em] text-slate-400">对话对象</label>
-        <select
-          className="mt-2 w-full rounded-2xl border border-slate-200 bg-slate-50 px-3 py-2 text-sm text-slate-700 outline-none"
-          value={props.activeNodeId}
-          disabled={props.disabled}
-          onChange={(event) => props.onSelectNode(event.target.value)}
-        >
-          <option value="">请选择一个节点</option>
-          {props.nodeOptions.map((item) => (
-            <option key={item.id} value={item.id}>
-              {item.label}
-            </option>
-          ))}
-        </select>
-        <div className="mt-2 text-xs text-slate-500">
-          {props.activeNodeId ? `当前对话对象：${props.activeNodeLabel || props.activeNodeId}` : "还没有选定对话对象。"}
-        </div>
-      </div>
-
-      <div className="mt-3 flex flex-wrap gap-2">
-        {quickQuestions.map((item) => (
-          <button
-            key={item}
-            className="rounded-full border border-slate-200 bg-slate-50 px-3 py-1 text-xs text-slate-600 transition hover:border-slate-300 hover:bg-white"
-            disabled={props.disabled || !props.activeNodeId}
-            onClick={() => props.onQuestionChange(item)}
-          >
-            {item}
-          </button>
-        ))}
-        <button
-          className="rounded-full border border-dashed border-slate-300 bg-white px-3 py-1 text-xs text-slate-500 transition hover:border-slate-400"
-          disabled={props.disabled || !props.activeNodeId}
-          onClick={() => setForceNewThread(true)}
-        >
-          新建 thread
-        </button>
-      </div>
-
-      <div className="mt-4 min-h-0 flex-1 space-y-3 overflow-auto pr-1">
-        {props.history.map((item, index) => (
-          <div key={`${item.created_at}-${index}`} className="rounded-2xl border border-slate-200 bg-slate-50 p-3">
-            <div className="flex items-center justify-between text-xs text-slate-500">
-              <span>提问</span>
-              <span>{formatDateTime(item.created_at)}</span>
-            </div>
-            <div className="mt-1 text-sm text-slate-800">{item.question}</div>
-            <div className="mt-3 text-xs font-medium text-slate-500">回答</div>
-            <MarkdownText
-              className="prose prose-sm mt-2 max-w-none text-sm leading-6 text-slate-700 prose-headings:mb-2 prose-headings:mt-3 prose-headings:text-slate-900 prose-p:my-2 prose-li:my-1 prose-code:rounded prose-code:bg-slate-100 prose-code:px-1 prose-code:py-0.5"
-              text={item.answer}
-            />
-            <div className="mt-3 flex flex-wrap gap-2">
-              <SmallButton onClick={() => props.onSaveAnswer("note", item)}>保存为笔记节点</SmallButton>
-              <SmallButton onClick={() => props.onSaveAnswer("report", item)}>保存为报告节点</SmallButton>
-              <SmallButton onClick={() => props.onSaveAnswer("question", item)}>保存为问题节点</SmallButton>
-              <SmallButton onClick={() => props.onSaveAnswer("reference", item)}>保存为参考节点</SmallButton>
+    <div className="flex h-full min-h-0 flex-col overflow-hidden rounded-[28px] border border-slate-200 bg-white shadow-sm">
+      <div className="border-b border-slate-200 bg-white/90 px-5 py-4 backdrop-blur">
+        <div className="flex items-start justify-between gap-3">
+          <div className="min-w-0">
+            <div className="flex items-center gap-3">
+              <span className="inline-flex h-10 w-10 items-center justify-center rounded-2xl bg-slate-900 text-sm font-semibold text-white">AI</span>
+              <div className="min-w-0">
+                <div className="text-[11px] font-semibold uppercase tracking-[0.16em] text-slate-400">Research Chat</div>
+                <div className="mt-1 line-clamp-1 text-base font-semibold text-slate-900">{activeThread?.title || "新对话"}</div>
+                <div className="mt-1 text-xs text-slate-500">
+                  {props.taskTitle || "当前任务"}
+                  {props.contextNodeIds.length ? ` · 已引用 ${props.contextNodeIds.length} 个节点` : ""}
+                  {props.attachments.length ? ` · 已附加 ${props.attachments.length} 个文件` : ""}
+                </div>
+              </div>
             </div>
           </div>
-        ))}
-        {!props.history.length ? (
-          <div className="rounded-2xl bg-slate-50 p-3 text-sm text-slate-500">
-            {props.activeNodeId ? "这里会显示当前对话对象的问答历史。" : "先选择一个节点，再开始提问。"}
+
+          <div className="flex items-center gap-2">
+            <select
+              aria-label="chat-thread-select"
+              className="max-w-[220px] rounded-full border border-slate-200 bg-slate-50 px-3 py-2 text-xs text-slate-600 outline-none"
+              disabled={props.disabled || !props.threads.length}
+              value={props.activeThreadId}
+              onChange={(event) => props.onSelectThread(event.target.value)}
+            >
+              {!props.threads.length ? <option value="">暂无对话</option> : null}
+              {props.threads.map((thread) => (
+                <option key={thread.thread_id} value={thread.thread_id}>
+                  {thread.title}
+                </option>
+              ))}
+            </select>
+            <SmallButton tone="solid" disabled={props.disabled} onClick={props.onNewThread}>
+              新建对话
+            </SmallButton>
+          </div>
+        </div>
+
+        {props.contextNodeIds.length || props.attachments.length || props.uploadingNames.length ? (
+          <div className="mt-3 flex flex-wrap gap-2">
+            {props.contextNodeIds.map((nodeId) => (
+              <button
+                key={nodeId}
+                className="inline-flex items-center gap-2 rounded-full border border-emerald-200 bg-emerald-50 px-3 py-1 text-xs text-emerald-700"
+                onClick={() => props.onRemoveContextNode(nodeId)}
+              >
+                <span className="max-w-[220px] truncate">{contextMap.get(nodeId)?.label || nodeId}</span>
+                <span className="text-emerald-500">×</span>
+              </button>
+            ))}
+            {props.attachments.map((item) => (
+              <button
+                key={item.attachment_id}
+                className="inline-flex items-center gap-2 rounded-full border border-blue-200 bg-blue-50 px-3 py-1 text-xs text-blue-700"
+                onClick={() => props.onRemoveAttachment(item.attachment_id)}
+              >
+                <span className="max-w-[220px] truncate">{item.filename}</span>
+                <span className="text-blue-500">×</span>
+              </button>
+            ))}
+            {props.uploadingNames.map((name) => (
+              <span key={name} className="inline-flex items-center gap-2 rounded-full border border-slate-200 bg-slate-100 px-3 py-1 text-xs text-slate-500">
+                <span className="max-w-[180px] truncate">{name}</span>
+                <span className="animate-pulse">上传中</span>
+              </span>
+            ))}
           </div>
         ) : null}
       </div>
 
-      <div className="mt-4 flex gap-2">
-        <textarea
-          className="h-28 flex-1 rounded-2xl border border-slate-200 bg-white px-3 py-3 text-sm outline-none"
-          value={props.question}
-          onChange={(event) => props.onQuestionChange(event.target.value)}
-          placeholder={props.activeNodeId ? "围绕当前对话对象输入一个更具体的问题..." : "请先在上方选择对话对象"}
-          disabled={props.disabled || !props.activeNodeId}
-        />
-        <div className="flex shrink-0 flex-col gap-2">
-          <SmallButton
-            tone="solid"
-            disabled={props.disabled || !props.activeNodeId || !props.question.trim() || props.busy}
-            onClick={() => {
-              props.onSend(props.question, threadId);
-              props.onQuestionChange("");
-              setForceNewThread(false);
-            }}
-          >
-            提问
-          </SmallButton>
+      <div className="min-h-0 flex-1 overflow-auto bg-[linear-gradient(180deg,#ffffff_0%,#f8fafc_100%)] px-5 py-6">
+        <div className="mx-auto flex max-w-[760px] flex-col gap-5">
+          {props.messages.map((item) => (
+            <div key={`${item.id}-${item.created_at}`} className={`flex ${item.role === "user" ? "justify-end" : "justify-start"}`}>
+              <div
+                className={`max-w-[92%] rounded-[24px] px-4 py-3 shadow-sm ${
+                  item.role === "user" ? "rounded-br-md bg-slate-900 text-white" : "rounded-bl-md border border-slate-200 bg-white text-slate-800"
+                }`}
+              >
+                <div className={`text-[11px] ${item.role === "user" ? "text-slate-300" : "text-slate-400"}`}>{formatDateTime(item.created_at)}</div>
+                {item.role === "assistant" ? (
+                  <MarkdownText
+                    className="prose prose-sm mt-2 max-w-none text-sm leading-7 text-slate-700 prose-headings:mb-2 prose-headings:mt-4 prose-p:my-2 prose-li:my-1 prose-code:rounded prose-code:bg-slate-100 prose-code:px-1 prose-code:py-0.5"
+                    text={item.content}
+                  />
+                ) : (
+                  <div className="mt-2 whitespace-pre-wrap text-sm leading-7 text-white">{item.content}</div>
+                )}
+
+                {item.role === "assistant" ? (
+                  <div className="mt-3 flex flex-wrap gap-2">
+                    <SmallButton onClick={() => props.onSaveAnswer("note", item)}>保存为笔记</SmallButton>
+                    <SmallButton onClick={() => props.onSaveAnswer("report", item)}>保存为报告</SmallButton>
+                  </div>
+                ) : null}
+              </div>
+            </div>
+          ))}
+
+          {props.streaming ? (
+            <div className="flex justify-start">
+              <div className="max-w-[92%] rounded-[24px] rounded-bl-md border border-slate-200 bg-white px-4 py-3 shadow-sm">
+                <div className="text-[11px] text-slate-400">正在思考</div>
+                <div className="mt-3 flex items-center gap-2">
+                  <span className="h-2.5 w-2.5 animate-bounce rounded-full bg-slate-300 [animation-delay:-0.3s]" />
+                  <span className="h-2.5 w-2.5 animate-bounce rounded-full bg-slate-300 [animation-delay:-0.15s]" />
+                  <span className="h-2.5 w-2.5 animate-bounce rounded-full bg-slate-300" />
+                  <span className="ml-1 inline-block h-4 w-[2px] animate-pulse bg-slate-300" />
+                </div>
+              </div>
+            </div>
+          ) : null}
+
+          {!props.messages.length && !props.streaming ? (
+            <div className="rounded-[24px] border border-dashed border-slate-200 bg-white/80 px-5 py-10 text-center text-sm text-slate-500">
+              从当前任务开始一轮连续研究对话。
+            </div>
+          ) : null}
         </div>
       </div>
+
+      <div className="border-t border-slate-200 bg-white px-5 py-4">
+        <div className="mx-auto max-w-[760px]">
+          {props.error ? <div className="mb-3 rounded-2xl border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-700">{props.error}</div> : null}
+
+          {suggestionChips.length ? (
+            <div className="mb-3 flex flex-wrap gap-2">
+              {suggestionChips.map((item) => (
+                <button
+                  key={item}
+                  className="rounded-full border border-slate-200 bg-slate-50 px-3 py-1 text-xs text-slate-600 transition hover:border-slate-300 hover:bg-white"
+                  disabled={props.disabled || props.busy}
+                  onClick={() => props.onUseSuggestion(item)}
+                >
+                  {item}
+                </button>
+              ))}
+            </div>
+          ) : null}
+
+          <div className="rounded-[30px] border border-slate-200 bg-slate-50 p-3 shadow-inner">
+            <div className="mb-3 flex flex-wrap items-center gap-2">
+              <button
+                className="inline-flex h-10 w-10 items-center justify-center rounded-full border border-slate-200 bg-white text-lg text-slate-500 transition hover:border-slate-300 hover:text-slate-700"
+                disabled={props.disabled || props.busy}
+                onClick={() => fileInputRef.current?.click()}
+              >
+                +
+              </button>
+              <select
+                className="rounded-full border border-slate-200 bg-white px-3 py-2 text-xs text-slate-600 outline-none"
+                value=""
+                disabled={props.disabled || props.busy || !selectableNodes.length}
+                onChange={(event) => {
+                  const nodeId = event.target.value;
+                  if (nodeId) {
+                    props.onAddContextNode(nodeId);
+                  }
+                }}
+              >
+                <option value="">添加上下文节点</option>
+                {selectableNodes.map((item) => (
+                  <option key={item.id} value={item.id}>
+                    {item.label}
+                  </option>
+                ))}
+              </select>
+              <div className="text-xs text-slate-500">支持 PDF / TXT / MD / JSON / BIB / CSLJSON</div>
+            </div>
+
+            <div className="flex items-end gap-3 rounded-[24px] border border-slate-200 bg-white px-3 py-3">
+              <textarea
+                className="min-h-[92px] flex-1 resize-none bg-transparent px-1 text-sm leading-7 text-slate-800 outline-none"
+                value={props.draft}
+                disabled={props.disabled || props.busy}
+                onChange={(event) => props.onDraftChange(event.target.value)}
+                placeholder="围绕任务、节点上下文和上传附件继续追问，或让它帮你比较方法、提取证据、总结当前判断。"
+              />
+              <button
+                className="inline-flex h-11 shrink-0 items-center justify-center rounded-full bg-slate-900 px-4 text-sm font-medium text-white transition hover:bg-slate-800 disabled:cursor-not-allowed disabled:bg-slate-300"
+                disabled={props.disabled || props.busy || !props.draft.trim()}
+                onClick={props.onSend}
+              >
+                {props.busy ? "发送中" : "发送"}
+              </button>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <input
+        ref={fileInputRef}
+        type="file"
+        className="hidden"
+        multiple
+        accept=".pdf,.txt,.md,.json,.bib,.csljson"
+        onChange={(event) => {
+          const files = event.target.files;
+          if (files?.length) {
+            props.onUploadFiles(files);
+          }
+          event.currentTarget.value = "";
+        }}
+      />
     </div>
   );
 }

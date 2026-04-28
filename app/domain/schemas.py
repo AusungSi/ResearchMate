@@ -944,6 +944,9 @@ class ResearchRunSummary(BaseModel):
     guidance_history: list[ResearchRunGuidanceItem] = Field(default_factory=list)
     step_cards: list[ResearchRunStepCard] = Field(default_factory=list)
     artifacts: list[dict] = Field(default_factory=list)
+    active_node_ids: list[str] = Field(default_factory=list)
+    active_edges: list[str] = Field(default_factory=list)
+    running_label: str | None = None
 
 
 class ResearchRunEventItem(BaseModel):
@@ -1006,6 +1009,70 @@ class ResearchNodeChatResponse(BaseModel):
     thread_id: str | None = None
     item: ResearchNodeChatItem | None = None
     history: list[ResearchNodeChatItem] = Field(default_factory=list)
+
+
+class ResearchChatThreadResponse(BaseModel):
+    thread_id: str
+    task_id: str
+    title: str
+    message_count: int = 0
+    latest_preview: str | None = None
+    created_at: datetime
+    updated_at: datetime
+
+
+class ResearchChatThreadListResponse(BaseModel):
+    task_id: str
+    items: list[ResearchChatThreadResponse] = Field(default_factory=list)
+
+
+class ResearchChatThreadCreateRequest(BaseModel):
+    title: str | None = None
+
+
+class ResearchChatAttachmentResponse(BaseModel):
+    attachment_id: str
+    task_id: str
+    filename: str
+    mime_type: str | None = None
+    file_ext: str | None = None
+    size_bytes: int = 0
+    text_preview: str | None = None
+    created_at: datetime
+    updated_at: datetime
+
+
+class ResearchChatAttachmentListResponse(BaseModel):
+    task_id: str
+    items: list[ResearchChatAttachmentResponse] = Field(default_factory=list)
+
+
+class ResearchChatMessageResponse(BaseModel):
+    id: int | None = None
+    task_id: str
+    thread_id: str
+    role: str
+    content: str
+    context_node_ids: list[str] = Field(default_factory=list)
+    attachment_ids: list[str] = Field(default_factory=list)
+    provider: str | None = None
+    model: str | None = None
+    status: str = "done"
+    created_at: datetime
+    updated_at: datetime
+
+
+class ResearchChatMessageListResponse(BaseModel):
+    task_id: str
+    thread_id: str
+    items: list[ResearchChatMessageResponse] = Field(default_factory=list)
+
+
+class ResearchTaskChatStreamRequest(BaseModel):
+    thread_id: str | None = None
+    message: str = Field(min_length=1)
+    context_node_ids: list[str] = Field(default_factory=list)
+    attachment_ids: list[str] = Field(default_factory=list)
 
 
 class ResearchAutoRunResponse(BaseModel):
@@ -1119,6 +1186,21 @@ class ResearchPaperDetailResponse(BaseModel):
     preview_kind: str | None = None
     preview_url: str | None = None
     visual_status: str | None = None
+    venue_metrics: dict = Field(default_factory=dict)
+
+
+class ResearchVenueMetricsItem(BaseModel):
+    venue: str
+    venue_key: str
+    source_type: str | None = None
+    paper_count: int = 0
+    paper_ids: list[str] = Field(default_factory=list)
+    metrics: dict = Field(default_factory=dict)
+
+
+class ResearchVenueMetricsResponse(BaseModel):
+    task_id: str
+    items: list[ResearchVenueMetricsItem] = Field(default_factory=list)
 
 
 class DevUserListResponse(BaseModel):

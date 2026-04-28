@@ -29,6 +29,9 @@ from app.domain.models import (
     MobileDevice,
     PendingAction,
     ResearchCanvasState,
+    ResearchChatAttachment,
+    ResearchChatMessage,
+    ResearchChatThread,
     ResearchCompareReport,
     ResearchCollection,
     ResearchCollectionExportRecord,
@@ -831,6 +834,167 @@ class ResearchNodeChatRepo:
             .limit(max(1, min(200, int(limit))))
         )
         return list(self.db.execute(stmt).scalars().all())
+
+
+class ResearchChatThreadRepo:
+    def __init__(self, db: Session):
+        self.db = db
+
+    def create(self, *, task_id: int, thread_id: str, title: str) -> ResearchChatThread:
+        now = datetime.now(timezone.utc)
+        row = ResearchChatThread(
+            task_id=task_id,
+            thread_id=thread_id[:64],
+            title=(title or "新对话").strip()[:255] or "新对话",
+            created_at=now,
+            updated_at=now,
+        )
+        self.db.add(row)
+        self.db.flush()
+        return row
+
+    def get_by_thread_id(self, *, task_id: int, thread_id: str) -> ResearchChatThread | None:
+        stmt = select(ResearchChatThread).where(
+            and_(
+                ResearchChatThread.task_id == task_id,
+                ResearchChatThread.thread_id == thread_id,
+            )
+        )
+        return self.db.execute(stmt).scalar_one_or_none()
+
+    def list_for_task(self, *, task_id: int, limit: int = 30) -> list[ResearchChatThread]:
+        stmt = (
+            select(ResearchChatThread)
+            .where(ResearchChatThread.task_id == task_id)
+            .order_by(desc(ResearchChatThread.updated_at), desc(ResearchChatThread.id))
+            .limit(max(1, min(200, int(limit))))
+        )
+        return list(self.db.execute(stmt).scalars().all())
+
+    def touch(self, row: ResearchChatThread, *, title: str | None = None) -> ResearchChatThread:
+        row.updated_at = datetime.now(timezone.utc)
+        if title is not None and title.strip():
+            row.title = title.strip()[:255]
+        self.db.add(row)
+        self.db.flush()
+        return row
+
+
+class ResearchChatAttachmentRepo:
+    def __init__(self, db: Session):
+        self.db = db
+
+    def create(
+        self,
+        *,
+        task_id: int,
+        attachment_id: str,
+        filename: str,
+        mime_type: str | None,
+        file_ext: str | None,
+        size_bytes: int,
+        storage_path: str,
+        text_preview: str | None,
+    ) -> ResearchChatAttachment:
+        now = datetime.now(timezone.utc)
+        row = ResearchChatAttachment(
+            task_id=task_id,
+            attachment_id=attachment_id[:64],
+            filename=filename[:255],
+            mime_type=(mime_type[:128] if mime_type else None),
+            file_ext=(file_ext[:32] if file_ext else None),
+            size_bytes=max(0, int(size_bytes or 0)),
+            storage_path=storage_path,
+            text_preview=text_preview,
+            created_at=now,
+            updated_at=now,
+        )
+        self.db.add(row)
+        self.db.flush()
+        return row
+
+    def list_for_task(self, *, task_id: int, attachment_ids: list[str] | None = None) -> list[ResearchChatAttachment]:
+        filters = [ResearchChatAttachment.task_id == task_id]
+        if attachment_ids:
+            filters.append(ResearchChatAttachment.attachment_id.in_(attachment_ids))
+        stmt = (
+            select(ResearchChatAttachment)
+            .where(and_(*filters))
+            .order_by(ResearchChatAttachment.created_at.asc(), ResearchChatAttachment.id.asc())
+        )
+        return list(self.db.execute(stmt).scalars().all())
+
+    def get_by_attachment_id(self, *, task_id: int, attachment_id: str) -> ResearchChatAttachment | None:
+        stmt = select(ResearchChatAttachment).where(
+            and_(
+                ResearchChatAttachment.task_id == task_id,
+                ResearchChatAttachment.attachment_id == attachment_id,
+            )
+        )
+        return self.db.execute(stmt).scalar_one_or_none()
+
+
+class ResearchChatMessageRepo:
+    def __init__(self, db: Session):
+        self.db = db
+
+    def create(
+        self,
+        *,
+        task_id: int,
+        thread_id: int,
+        role: str,
+        content: str,
+        context_node_ids: list[str] | None = None,
+        attachment_ids: list[str] | None = None,
+        provider: str | None = None,
+        model: str | None = None,
+        status: str = "done",
+    ) -> ResearchChatMessage:
+        now = datetime.now(timezone.utc)
+        row = ResearchChatMessage(
+            task_id=task_id,
+            thread_id=thread_id,
+            role=(role or "user")[:16],
+            content=content.strip(),
+            context_node_ids_json=orjson.dumps(context_node_ids or []).decode("utf-8"),
+            attachment_ids_json=orjson.dumps(attachment_ids or []).decode("utf-8"),
+            provider=(provider[:32] if provider else None),
+            model=(model[:128] if model else None),
+            status=(status or "done")[:16],
+            created_at=now,
+            updated_at=now,
+        )
+        self.db.add(row)
+        self.db.flush()
+        return row
+
+    def list_for_thread(self, *, task_id: int, thread_id: int, limit: int = 100) -> list[ResearchChatMessage]:
+        stmt = (
+            select(ResearchChatMessage)
+            .where(
+                and_(
+                    ResearchChatMessage.task_id == task_id,
+                    ResearchChatMessage.thread_id == thread_id,
+                )
+            )
+            .order_by(ResearchChatMessage.created_at.asc(), ResearchChatMessage.id.asc())
+            .limit(max(1, min(500, int(limit))))
+        )
+        return list(self.db.execute(stmt).scalars().all())
+
+    def count_for_thread(self, *, thread_id: int) -> int:
+        stmt = select(func.count(ResearchChatMessage.id)).where(ResearchChatMessage.thread_id == thread_id)
+        return int(self.db.execute(stmt).scalar() or 0)
+
+    def latest_for_thread(self, *, thread_id: int) -> ResearchChatMessage | None:
+        stmt = (
+            select(ResearchChatMessage)
+            .where(ResearchChatMessage.thread_id == thread_id)
+            .order_by(desc(ResearchChatMessage.created_at), desc(ResearchChatMessage.id))
+            .limit(1)
+        )
+        return self.db.execute(stmt).scalar_one_or_none()
 
 
 class ResearchSessionRepo:

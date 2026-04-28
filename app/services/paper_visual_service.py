@@ -23,6 +23,36 @@ class PaperVisualAsset:
     source: str
 
 
+@dataclass
+class _FigureCandidate:
+    xref: int | None
+    page_index: int
+    width: int
+    height: int
+    pixel_area: int
+    placed_area: float
+    rect: tuple[float, float, float, float]
+    nearby_text: str
+    figure_number: int | None
+    overall_keyword_hits: int
+    render_mode: str = "image"
+
+
+OVERALL_FIGURE_KEYWORDS = (
+    "overall",
+    "overview",
+    "framework",
+    "architecture",
+    "pipeline",
+    "workflow",
+    "system overview",
+    "overall framework",
+    "method overview",
+    "model overview",
+    "teaser",
+)
+
+
 class PaperVisualService:
     def __init__(self, settings: Settings) -> None:
         self.settings = settings
@@ -45,12 +75,12 @@ class PaperVisualService:
         visual_dir = self.ensure_visual_dir(artifact_root=artifact_root, task_id=task_id, paper_token=paper_token)
         assets: dict[str, PaperVisualAsset] = {}
 
-        figure_asset = self._extract_primary_figure(
+        pdf_assets = self._extract_pdf_figure_assets(
             pdf_path=Path(pdf_path).expanduser().resolve() if pdf_path else None,
-            output_path=visual_dir / "figure-primary.png",
+            primary_output_path=visual_dir / "figure-primary.png",
+            overall_output_path=visual_dir / "figure-overall.png",
         )
-        if figure_asset:
-            assets["figure"] = figure_asset
+        assets.update(pdf_assets)
 
         visual_asset = self._render_template_visual(
             output_path=visual_dir / "paper-visual.svg",
@@ -69,7 +99,18 @@ class PaperVisualService:
         visual_dir = self.visual_dir(artifact_root=artifact_root, task_id=task_id, paper_token=paper_token)
         assets: dict[str, PaperVisualAsset] = {}
         figure_path = visual_dir / "figure-primary.png"
+        overall_path = visual_dir / "figure-overall.png"
         visual_path = visual_dir / "paper-visual.svg"
+        if overall_path.exists():
+            width, height = self._image_dimensions(overall_path)
+            assets["overall"] = PaperVisualAsset(
+                kind="overall",
+                path=str(overall_path),
+                mime_type="image/png",
+                width=width,
+                height=height,
+                source="pdf_extract_overall",
+            )
         if figure_path.exists():
             width, height = self._image_dimensions(figure_path)
             assets["figure"] = PaperVisualAsset(
@@ -100,56 +141,290 @@ class PaperVisualService:
         path.mkdir(parents=True, exist_ok=True)
         return path
 
-    def _extract_primary_figure(self, *, pdf_path: Path | None, output_path: Path) -> PaperVisualAsset | None:
+    def _extract_pdf_figure_assets(
+        self,
+        *,
+        pdf_path: Path | None,
+        primary_output_path: Path,
+        overall_output_path: Path,
+    ) -> dict[str, PaperVisualAsset]:
         if fitz is None or pdf_path is None or not pdf_path.exists():
-            return None
-        best: tuple[float, int, int, int] | None = None
+            return {}
+        assets: dict[str, PaperVisualAsset] = {}
         doc = fitz.open(pdf_path)
         try:
-            scan_pages = min(len(doc), max(1, int(self.settings.paper_visual_scan_pages)))
-            min_width = max(1, int(self.settings.paper_visual_min_width))
-            min_height = max(1, int(self.settings.paper_visual_min_height))
-            min_page_area_ratio = max(0.0, float(self.settings.paper_visual_min_page_area_ratio))
-            for page_index in range(scan_pages):
-                page = doc[page_index]
-                page_area = max(float(page.rect.width * page.rect.height), 1.0)
-                for image in page.get_images(full=True):
-                    xref = int(image[0])
-                    width = int(image[2] or 0)
-                    height = int(image[3] or 0)
-                    if width < min_width or height < min_height:
-                        continue
-                    aspect = width / max(height, 1)
-                    if aspect < 0.2 or aspect > 5.0:
-                        continue
-                    rects = page.get_image_rects(xref)
-                    placed_area = max((float(rect.width * rect.height) for rect in rects), default=0.0)
-                    if placed_area / page_area < min_page_area_ratio:
-                        continue
-                    pixel_area = width * height
-                    score = (placed_area, -page_index, pixel_area, xref)
-                    if best is None or score > best:
-                        best = score
-            if best is None:
-                if output_path.exists():
-                    output_path.unlink()
-                return None
-            xref = best[3]
-            pix = fitz.Pixmap(doc, xref)
-            if pix.alpha or pix.n > 4:
-                pix = fitz.Pixmap(fitz.csRGB, pix)
-            output_path.parent.mkdir(parents=True, exist_ok=True)
-            pix.save(output_path)
-            return PaperVisualAsset(
+            candidates = self._figure_candidates(doc)
+            primary_candidate = self._choose_primary_candidate(candidates)
+            overall_candidate = self._choose_overall_candidate(candidates)
+
+            primary_asset = self._save_candidate_asset(
+                doc=doc,
+                candidate=primary_candidate,
+                output_path=primary_output_path,
                 kind="figure",
-                path=str(output_path),
-                mime_type="image/png",
-                width=int(pix.width),
-                height=int(pix.height),
                 source="pdf_extract",
             )
+            if primary_asset:
+                assets["figure"] = primary_asset
+
+            overall_asset = self._save_candidate_asset(
+                doc=doc,
+                candidate=overall_candidate,
+                output_path=overall_output_path,
+                kind="overall",
+                source="pdf_extract_overall",
+            )
+            if overall_asset:
+                assets["overall"] = overall_asset
+            return assets
         finally:
             doc.close()
+
+    def _figure_candidates(self, doc) -> list[_FigureCandidate]:
+        scan_pages = min(len(doc), max(1, int(self.settings.paper_visual_scan_pages)))
+        min_width = max(1, int(self.settings.paper_visual_min_width))
+        min_height = max(1, int(self.settings.paper_visual_min_height))
+        min_page_area_ratio = max(0.0, float(self.settings.paper_visual_min_page_area_ratio))
+        seen: set[tuple[int, int, tuple[int, int, int, int]]] = set()
+        candidates: list[_FigureCandidate] = []
+
+        for page_index in range(scan_pages):
+            page = doc[page_index]
+            page_area = max(float(page.rect.width * page.rect.height), 1.0)
+            text_blocks = self._page_text_blocks(page)
+            for image in page.get_images(full=True):
+                xref = int(image[0])
+                width = int(image[2] or 0)
+                height = int(image[3] or 0)
+                if width < min_width or height < min_height:
+                    continue
+                aspect = width / max(height, 1)
+                if aspect < 0.2 or aspect > 5.0:
+                    continue
+                rects = page.get_image_rects(xref)
+                if not rects:
+                    continue
+                best_rect = max(rects, key=lambda rect: float(rect.width * rect.height))
+                rect_key = (
+                    int(round(best_rect.x0)),
+                    int(round(best_rect.y0)),
+                    int(round(best_rect.x1)),
+                    int(round(best_rect.y1)),
+                )
+                dedupe_key = (page_index, xref, rect_key)
+                if dedupe_key in seen:
+                    continue
+                seen.add(dedupe_key)
+
+                placed_area = float(best_rect.width * best_rect.height)
+                if placed_area / page_area < min_page_area_ratio:
+                    continue
+                nearby_text = self._nearby_text_for_rect(text_blocks=text_blocks, image_rect=best_rect)
+                candidates.append(
+                    _FigureCandidate(
+                        xref=xref,
+                        page_index=page_index,
+                        width=width,
+                        height=height,
+                        pixel_area=width * height,
+                        placed_area=placed_area,
+                        rect=(float(best_rect.x0), float(best_rect.y0), float(best_rect.x1), float(best_rect.y1)),
+                        nearby_text=nearby_text,
+                        figure_number=_extract_figure_number(nearby_text),
+                        overall_keyword_hits=_count_overall_keyword_hits(nearby_text),
+                        render_mode="image",
+                    )
+                )
+            candidates.extend(
+                self._caption_clip_candidates(
+                    page=page,
+                    page_index=page_index,
+                    text_blocks=text_blocks,
+                    min_width=min_width,
+                    min_height=min_height,
+                    min_page_area_ratio=min_page_area_ratio,
+                    page_area=page_area,
+                )
+            )
+        return candidates
+
+    def _caption_clip_candidates(
+        self,
+        *,
+        page,
+        page_index: int,
+        text_blocks: list[tuple[object, str]],
+        min_width: int,
+        min_height: int,
+        min_page_area_ratio: float,
+        page_area: float,
+    ) -> list[_FigureCandidate]:
+        candidates: list[_FigureCandidate] = []
+        page_rect = page.rect
+        page_mid_x = float(page_rect.x0 + page_rect.width / 2.0)
+        page_margin_x = max(18.0, float(page_rect.width) * 0.03)
+        for block_rect, text in text_blocks:
+            figure_number = _extract_figure_number(text)
+            if figure_number is None:
+                continue
+            caption_rect = fitz.Rect(block_rect)
+            caption_center_x = float(caption_rect.x0 + caption_rect.width / 2.0)
+            full_width_caption = abs(caption_center_x - page_mid_x) <= float(page_rect.width) * 0.14 or float(caption_rect.width) >= float(page_rect.width) * 0.42
+            if full_width_caption:
+                x0 = float(page_rect.x0) + page_margin_x
+                x1 = float(page_rect.x1) - page_margin_x
+            elif caption_center_x < page_mid_x:
+                x0 = float(page_rect.x0) + page_margin_x
+                x1 = float(page_mid_x) + page_margin_x * 0.5
+            else:
+                x0 = float(page_mid_x) - page_margin_x * 0.5
+                x1 = float(page_rect.x1) - page_margin_x
+
+            y1 = max(float(page_rect.y0) + 24.0, float(caption_rect.y0) - 6.0)
+            y0 = max(float(page_rect.y0) + 24.0, y1 - max(float(min_height), float(page_rect.height) * 0.42))
+            upper_text_blocks = [
+                rect
+                for rect, block_text in text_blocks
+                if float(rect.y1) <= float(caption_rect.y0)
+                and len(block_text.strip()) >= 80
+                and float(rect.width) >= float(page_rect.width) * 0.28
+            ]
+            if upper_text_blocks:
+                lower_bound = max(float(rect.y1) for rect in upper_text_blocks)
+                y0 = max(y0, min(lower_bound + 8.0, y1 - float(min_height)))
+
+            clip_rect = fitz.Rect(x0, y0, x1, y1) & page_rect
+            if clip_rect.width < min_width or clip_rect.height < min_height:
+                continue
+            placed_area = float(clip_rect.width * clip_rect.height)
+            if placed_area / max(page_area, 1.0) < min_page_area_ratio:
+                continue
+            candidates.append(
+                _FigureCandidate(
+                    xref=None,
+                    page_index=page_index,
+                    width=int(round(clip_rect.width * 2.0)),
+                    height=int(round(clip_rect.height * 2.0)),
+                    pixel_area=int(round(clip_rect.width * clip_rect.height * 4.0)),
+                    placed_area=placed_area,
+                    rect=(float(clip_rect.x0), float(clip_rect.y0), float(clip_rect.x1), float(clip_rect.y1)),
+                    nearby_text=text,
+                    figure_number=figure_number,
+                    overall_keyword_hits=_count_overall_keyword_hits(text),
+                    render_mode="clip",
+                )
+            )
+        return candidates
+
+    def _page_text_blocks(self, page) -> list[tuple[object, str]]:
+        blocks = page.get_text("dict").get("blocks") or []
+        out: list[tuple[object, str]] = []
+        for block in blocks:
+            if int(block.get("type") or 0) != 0:
+                continue
+            bbox = block.get("bbox")
+            if not bbox:
+                continue
+            text = _flatten_text_block(block)
+            if text:
+                out.append((fitz.Rect(bbox), text))
+        return out
+
+    def _nearby_text_for_rect(self, *, text_blocks: list[tuple[object, str]], image_rect) -> str:
+        ranked: list[tuple[int, float, str]] = []
+        max_gap = max(56.0, float(image_rect.height) * 0.38)
+        for block_rect, text in text_blocks:
+            horizontal_overlap = min(float(block_rect.x1), float(image_rect.x1)) - max(float(block_rect.x0), float(image_rect.x0))
+            min_width = max(1.0, min(float(block_rect.width), float(image_rect.width)))
+            aligned = horizontal_overlap >= min_width * 0.2
+            if not aligned:
+                block_center = float(block_rect.x0 + block_rect.width / 2.0)
+                image_center = float(image_rect.x0 + image_rect.width / 2.0)
+                aligned = abs(block_center - image_center) <= max(float(image_rect.width) * 0.45, 48.0)
+            if not aligned:
+                continue
+
+            if float(block_rect.y0) >= float(image_rect.y1):
+                gap = float(block_rect.y0) - float(image_rect.y1)
+            elif float(image_rect.y0) >= float(block_rect.y1):
+                gap = float(image_rect.y0) - float(block_rect.y1)
+            elif block_rect.intersects(image_rect):
+                gap = 0.0
+            else:
+                continue
+
+            if gap > max_gap:
+                continue
+            caption_bonus = 1 if re.search(r"\bfig(?:ure)?\.?\s*\d+\b", text, flags=re.IGNORECASE) else 0
+            ranked.append((caption_bonus, -gap, text))
+
+        ranked.sort(reverse=True)
+        return " ".join(item[2] for item in ranked[:3])
+
+    def _choose_primary_candidate(self, candidates: list[_FigureCandidate]) -> _FigureCandidate | None:
+        if not candidates:
+            return None
+        return max(
+            candidates,
+            key=lambda item: (
+                item.placed_area,
+                -item.page_index,
+                item.pixel_area,
+                item.xref or -1,
+            ),
+        )
+
+    def _choose_overall_candidate(self, candidates: list[_FigureCandidate]) -> _FigureCandidate | None:
+        qualified = [
+            item
+            for item in candidates
+            if item.overall_keyword_hits > 0 or (item.figure_number == 1 and item.page_index <= 2)
+        ]
+        if not qualified:
+            return None
+        return max(
+            qualified,
+            key=lambda item: (
+                item.overall_keyword_hits,
+                1 if item.figure_number == 1 else 0,
+                -item.page_index,
+                item.placed_area,
+                item.pixel_area,
+                item.xref or -1,
+            ),
+        )
+
+    def _save_candidate_asset(
+        self,
+        *,
+        doc,
+        candidate: _FigureCandidate | None,
+        output_path: Path,
+        kind: str,
+        source: str,
+    ) -> PaperVisualAsset | None:
+        if candidate is None:
+            if output_path.exists():
+                output_path.unlink()
+            return None
+        if candidate.render_mode == "clip":
+            page = doc[candidate.page_index]
+            clip_rect = fitz.Rect(candidate.rect)
+            pix = page.get_pixmap(matrix=fitz.Matrix(2, 2), clip=clip_rect, alpha=False)
+        else:
+            pix = fitz.Pixmap(doc, candidate.xref)
+            if pix.alpha or pix.n > 4:
+                pix = fitz.Pixmap(fitz.csRGB, pix)
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        pix.save(output_path)
+        return PaperVisualAsset(
+            kind=kind,
+            path=str(output_path),
+            mime_type="image/png",
+            width=int(pix.width),
+            height=int(pix.height),
+            source=source,
+        )
 
     def _render_template_visual(
         self,
@@ -240,6 +515,34 @@ def _author_line(authors: list[str]) -> str:
     if len(cleaned) <= 3:
         return ", ".join(cleaned)
     return f"{', '.join(cleaned[:3])}, et al."
+
+
+def _flatten_text_block(block: dict) -> str:
+    lines = block.get("lines") or []
+    parts: list[str] = []
+    for line in lines:
+        for span in line.get("spans") or []:
+            text = str(span.get("text") or "").strip()
+            if text:
+                parts.append(text)
+    return " ".join(parts).strip()
+
+
+def _extract_figure_number(text: str) -> int | None:
+    if not text:
+        return None
+    match = re.search(r"\bfig(?:ure)?\.?\s*(\d+)\b", text, flags=re.IGNORECASE)
+    if not match:
+        return None
+    try:
+        return int(match.group(1))
+    except Exception:
+        return None
+
+
+def _count_overall_keyword_hits(text: str) -> int:
+    lowered = (text or "").lower()
+    return sum(1 for keyword in OVERALL_FIGURE_KEYWORDS if keyword in lowered)
 
 
 def _wrap_text(text: str, *, max_chars: int, max_lines: int) -> list[str]:

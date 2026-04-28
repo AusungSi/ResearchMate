@@ -31,17 +31,7 @@ export function CollectionDetailPanel(props: Props) {
     });
   }, [props.collection, props.searchText]);
 
-  if (!props.collection) {
-    return (
-      <div className="rounded-3xl border border-slate-200 bg-white p-4 shadow-sm">
-        <SectionTitle
-          eyebrow="Collection"
-          title="当前没有选中 Collection"
-          description="在左侧选择一个 Collection 后，这里会显示集合摘要、条目、导出记录，以及继续调研的入口。"
-        />
-      </div>
-    );
-  }
+  if (!props.collection) return null;
 
   const allVisibleSelected = visibleItems.length > 0 && visibleItems.every((item) => props.selectedItemIds.includes(item.item_id));
 
@@ -66,8 +56,8 @@ export function CollectionDetailPanel(props: Props) {
         <SmallButton onClick={props.onExportCslJson}>导出 CSL JSON</SmallButton>
       </div>
 
-      <div className="mt-4 rounded-2xl border border-slate-200 bg-white p-3">
-        <div className="text-xs font-semibold uppercase tracking-[0.16em] text-slate-400">Export History</div>
+      <details className="mt-4 rounded-2xl border border-slate-200 bg-white p-3">
+        <summary className="cursor-pointer list-none text-xs font-semibold uppercase tracking-[0.16em] text-slate-400">Export History</summary>
         {props.exportHistory.length ? (
           <div className="mt-3 space-y-2">
             {props.exportHistory.slice(0, 6).map((item) => (
@@ -78,20 +68,18 @@ export function CollectionDetailPanel(props: Props) {
                 </div>
                 <div className="mt-1 text-slate-500">{formatDateTime(item.created_at)}</div>
                 {item.output_path ? <div className="mt-2 break-all">{item.output_path}</div> : null}
-                <div className="mt-2 flex flex-wrap gap-2">
-                  {item.download_url ? (
-                    <a className="rounded-xl border border-slate-200 bg-white px-3 py-2 text-xs font-medium text-slate-700" href={item.download_url} rel="noreferrer" target="_blank">
-                      打开 / 下载
-                    </a>
-                  ) : null}
-                </div>
+                {item.download_url ? (
+                  <a className="mt-2 inline-flex rounded-xl border border-slate-200 bg-white px-3 py-2 text-xs font-medium text-slate-700" href={item.download_url} rel="noreferrer" target="_blank">
+                    打开 / 下载
+                  </a>
+                ) : null}
               </div>
             ))}
           </div>
         ) : (
-          <div className="mt-3 rounded-2xl bg-slate-50 p-3 text-sm text-slate-500">这个 Collection 还没有导出记录。执行一次导出后，这里会保留最近历史。</div>
+          <div className="mt-3 rounded-2xl bg-slate-50 p-3 text-sm text-slate-500">这个 Collection 还没有导出记录。</div>
         )}
-      </div>
+      </details>
 
       <div className="mt-4 rounded-2xl border border-slate-200 bg-white p-3">
         <div className="flex flex-wrap items-center gap-2">

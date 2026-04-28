@@ -1,6 +1,6 @@
 import { useMemo, useState } from "react";
 import { autoStatusLabel, eventTypeLabel, formatRunState, stepLabel } from "../display";
-import type { RunEvent, RunSummary, TaskMode } from "../types";
+import type { ProviderStatus, RunEvent, RunSummary, TaskMode } from "../types";
 import { formatDateTime } from "../utils";
 import { Badge, MarkdownText, SectionTitle, SmallButton } from "./shared";
 
@@ -10,7 +10,9 @@ type Props = {
   runId: string;
   events: RunEvent[];
   summary: RunSummary | null;
+  providerStatus?: ProviderStatus[];
   error?: string;
+  onStart?: () => void;
   onGuidance: (text: string) => void;
   onContinue: () => void;
   onCancel: () => void;
@@ -19,37 +21,44 @@ type Props = {
 export function RunTimeline(props: Props) {
   const [guidance, setGuidance] = useState("");
   const groups = useMemo(() => groupEvents(props.events), [props.events]);
+  const providerItems = props.providerStatus || [];
+  const configuredProviders = providerItems.filter((item) => item.configured);
+  const canStartAuto = props.mode === "openclaw_auto" && ["idle", "completed", "canceled", "failed", ""].includes(props.autoStatus);
 
   return (
     <div className="mt-4 rounded-3xl border border-slate-200 bg-white p-4 shadow-sm">
       <div className="flex items-center justify-between gap-3">
-        <SectionTitle
-          eyebrow="Run Log"
-          title={props.mode === "openclaw_auto" ? "自动研究时间线" : "GPT Step 步骤记录"}
-          description={formatRunState(props.mode, props.runId, props.autoStatus, props.summary)}
-        />
-        <div className="flex gap-2">
+        <SectionTitle eyebrow="Run Status" title="运行状态" description={formatRunState(props.mode, props.runId, props.autoStatus, props.summary)} />
+        <div className="flex flex-wrap justify-end gap-2">
+          {canStartAuto ? (
+            <SmallButton tone="solid" onClick={props.onStart}>
+              启动自动研究
+            </SmallButton>
+          ) : null}
           {props.mode === "openclaw_auto" && props.autoStatus === "awaiting_guidance" ? (
             <SmallButton tone="solid" onClick={props.onContinue}>
               继续自动研究
             </SmallButton>
           ) : null}
-          {props.mode === "openclaw_auto" && props.runId ? <SmallButton onClick={props.onCancel}>停止本次运行</SmallButton> : null}
+          {props.mode === "openclaw_auto" && props.runId && props.autoStatus === "running" ? <SmallButton onClick={props.onCancel}>停止本次运行</SmallButton> : null}
         </div>
       </div>
 
       <div className="mt-3 flex flex-wrap gap-2">
-        {props.summary?.phase_groups?.map((phase) => (
+        {props.summary?.running_label ? <Badge tone={props.mode === "openclaw_auto" && props.autoStatus === "running" ? "green" : "slate"}>最近阶段 · {props.summary.running_label}</Badge> : null}
+        {configuredProviders.length ? <Badge tone="blue">Provider 已配置 {configuredProviders.length}</Badge> : <Badge tone="amber">Provider 未完整配置</Badge>}
+        {props.summary?.phase_groups?.slice(-4).map((phase) => (
           <Badge key={phase.key} tone="slate">
             {formatPhaseLabel(phase.key, phase.label)} · {phase.event_count}
           </Badge>
         ))}
       </div>
 
-      {props.mode === "openclaw_auto" && props.autoStatus === "awaiting_guidance" ? (
-        <div className="mt-3 rounded-2xl border border-blue-200 bg-blue-50 p-3 text-sm text-blue-700">系统已经到达 checkpoint，正在等待你的 guidance 后继续。</div>
-      ) : null}
       {props.error ? <div className="mt-3 rounded-2xl border border-rose-200 bg-rose-50 p-3 text-sm text-rose-700">{props.error}</div> : null}
+
+      {props.mode === "openclaw_auto" && props.autoStatus === "awaiting_guidance" ? (
+        <div className="mt-3 rounded-2xl border border-blue-200 bg-blue-50 p-3 text-sm text-blue-700">系统已到达 checkpoint，提交 guidance 后可以继续。</div>
+      ) : null}
 
       {props.mode === "openclaw_auto" && props.runId ? (
         <div className="mt-3 rounded-2xl border border-slate-200 bg-slate-50 p-3">
@@ -75,77 +84,89 @@ export function RunTimeline(props: Props) {
         </div>
       ) : null}
 
-      {props.mode === "openclaw_auto" ? (
-        <div className="mt-4 space-y-4">
-          {props.summary?.latest_checkpoint ? (
-            <div className="rounded-2xl border border-blue-200 bg-blue-50 p-4">
-              <div className="text-xs font-semibold uppercase tracking-[0.16em] text-blue-500">Checkpoint</div>
-              <div className="mt-2 text-base font-semibold text-slate-900">{String(props.summary.latest_checkpoint.title || "阶段检查点")}</div>
-              <div className="mt-2 text-sm leading-6 text-slate-700">{String(props.summary.latest_checkpoint.summary || "暂无摘要")}</div>
-            </div>
-          ) : null}
-
-          {props.summary?.latest_report_excerpt ? (
-            <div className="rounded-2xl border border-violet-200 bg-violet-50 p-4">
-              <div className="text-xs font-semibold uppercase tracking-[0.16em] text-violet-500">阶段报告</div>
-              <MarkdownText className="prose prose-sm mt-2 max-w-none text-sm leading-6 text-slate-700 prose-p:my-2 prose-li:my-1" text={props.summary.latest_report_excerpt} />
-            </div>
-          ) : null}
-
-          {props.summary?.artifacts?.length ? (
-            <div className="rounded-2xl border border-slate-200 bg-slate-50 p-4">
-              <div className="text-xs font-semibold uppercase tracking-[0.16em] text-slate-400">Artifacts</div>
-              <div className="mt-3 space-y-2">
-                {props.summary.artifacts.map((artifact, index) => (
-                  <div key={`${artifact.path || artifact.kind || index}`} className="rounded-2xl border border-slate-200 bg-white p-3 text-sm text-slate-700">
-                    <div className="font-medium text-slate-900">{String(artifact.kind || "artifact")}</div>
-                    <div className="mt-1 break-all text-xs text-slate-500">{String(artifact.path || artifact.title || "未提供路径")}</div>
-                  </div>
-                ))}
-              </div>
-            </div>
-          ) : null}
-
-          {props.summary?.guidance_history?.length ? (
-            <div className="rounded-2xl border border-slate-200 bg-white p-4">
-              <div className="text-xs font-semibold uppercase tracking-[0.16em] text-slate-400">Guidance 历史</div>
-              <div className="mt-3 space-y-2">
-                {props.summary.guidance_history.map((item) => (
-                  <div key={item.seq} className="rounded-2xl border border-slate-200 bg-slate-50 p-3">
-                    <div className="text-xs text-slate-500">{formatDateTime(item.created_at)}</div>
-                    <div className="mt-1 text-sm text-slate-700">{item.text}</div>
-                  </div>
-                ))}
-              </div>
-            </div>
-          ) : null}
+      {props.mode === "openclaw_auto" && props.summary?.latest_checkpoint ? (
+        <div className="mt-4 rounded-2xl border border-blue-200 bg-blue-50 p-4">
+          <div className="text-xs font-semibold uppercase tracking-[0.16em] text-blue-500">Checkpoint</div>
+          <div className="mt-2 text-base font-semibold text-slate-900">{String(props.summary.latest_checkpoint.title || "阶段检查点")}</div>
+          <div className="mt-2 text-sm leading-6 text-slate-700">{String(props.summary.latest_checkpoint.summary || "暂无摘要")}</div>
         </div>
+      ) : null}
+
+      {props.mode === "openclaw_auto" && props.summary?.latest_report_excerpt ? (
+        <details className="mt-4 rounded-2xl border border-violet-200 bg-violet-50 p-4">
+          <summary className="cursor-pointer list-none text-xs font-semibold uppercase tracking-[0.16em] text-violet-500">阶段报告</summary>
+          <MarkdownText className="prose prose-sm mt-2 max-w-none text-sm leading-6 text-slate-700 prose-p:my-2 prose-li:my-1" text={props.summary.latest_report_excerpt} />
+        </details>
+      ) : null}
+
+      {providerItems.length ? (
+        <details className="mt-4 rounded-2xl border border-slate-200 bg-slate-50 p-3">
+          <summary className="cursor-pointer list-none text-xs font-semibold uppercase tracking-[0.16em] text-slate-400">Provider 摘要</summary>
+          <div className="mt-3 flex flex-wrap gap-2">
+            {providerItems.map((item) => (
+              <Badge key={`${item.role}-${item.key}`} tone={item.configured ? "green" : item.enabled ? "amber" : "slate"}>
+                {item.key} · {item.role}
+              </Badge>
+            ))}
+          </div>
+        </details>
+      ) : null}
+
+      {props.summary?.artifacts?.length ? (
+        <details className="mt-4 rounded-2xl border border-slate-200 bg-slate-50 p-4">
+          <summary className="cursor-pointer list-none text-xs font-semibold uppercase tracking-[0.16em] text-slate-400">Artifacts</summary>
+          <div className="mt-3 space-y-2">
+            {props.summary.artifacts.map((artifact, index) => (
+              <div key={`${artifact.path || artifact.kind || index}`} className="rounded-2xl border border-slate-200 bg-white p-3 text-sm text-slate-700">
+                <div className="font-medium text-slate-900">{String(artifact.kind || "artifact")}</div>
+                <div className="mt-1 break-all text-xs text-slate-500">{String(artifact.path || artifact.title || "未提供路径")}</div>
+              </div>
+            ))}
+          </div>
+        </details>
+      ) : null}
+
+      {props.summary?.guidance_history?.length ? (
+        <details className="mt-4 rounded-2xl border border-slate-200 bg-white p-4">
+          <summary className="cursor-pointer list-none text-xs font-semibold uppercase tracking-[0.16em] text-slate-400">Guidance 历史</summary>
+          <div className="mt-3 space-y-2">
+            {props.summary.guidance_history.map((item) => (
+              <div key={item.seq} className="rounded-2xl border border-slate-200 bg-slate-50 p-3">
+                <div className="text-xs text-slate-500">{formatDateTime(item.created_at)}</div>
+                <div className="mt-1 text-sm text-slate-700">{item.text}</div>
+              </div>
+            ))}
+          </div>
+        </details>
       ) : null}
 
       {props.mode === "gpt_step" && props.summary?.step_cards?.length ? (
-        <div className="mt-4 space-y-3">
-          {props.summary.step_cards.map((card) => (
-            <div key={`${card.key}-${card.seq}`} className="rounded-2xl border border-slate-200 bg-slate-50 p-4">
-              <div className="flex items-center justify-between gap-3">
-                <div className="text-sm font-medium text-slate-900">{formatStepCardTitle(card.key, card.title)}</div>
-                <div className="text-xs text-slate-500">#{card.seq}</div>
+        <details className="mt-4 rounded-2xl border border-slate-200 bg-slate-50 p-4">
+          <summary className="cursor-pointer list-none text-xs font-semibold uppercase tracking-[0.16em] text-slate-400">GPT Step 步骤记录</summary>
+          <div className="mt-3 space-y-3">
+            {props.summary.step_cards.map((card) => (
+              <div key={`${card.key}-${card.seq}`} className="rounded-2xl border border-slate-200 bg-white p-4">
+                <div className="flex items-center justify-between gap-3">
+                  <div className="text-sm font-medium text-slate-900">{formatStepCardTitle(card.key, card.title)}</div>
+                  <div className="text-xs text-slate-500">#{card.seq}</div>
+                </div>
+                {card.status ? <div className="mt-2 text-xs text-slate-500">状态：{card.status}</div> : null}
+                {Object.keys(card.details || {}).length ? <pre className="mt-3 overflow-auto rounded-2xl bg-slate-50 p-3 text-xs text-slate-600">{JSON.stringify(card.details, null, 2)}</pre> : null}
               </div>
-              {card.status ? <div className="mt-2 text-xs text-slate-500">状态：{card.status}</div> : null}
-              {Object.keys(card.details || {}).length ? <pre className="mt-3 overflow-auto rounded-2xl bg-white p-3 text-xs text-slate-600">{JSON.stringify(card.details, null, 2)}</pre> : null}
-            </div>
-          ))}
-        </div>
+            ))}
+          </div>
+        </details>
       ) : null}
 
-      <div className="mt-4 space-y-4">
+      <div className="mt-4 space-y-3">
         {groups.map((group) => (
-          <div key={group.key} className="rounded-2xl border border-slate-200 bg-slate-50 p-3">
-            <div className="flex items-center justify-between">
+          <details key={group.key} className="rounded-2xl border border-slate-200 bg-slate-50 p-3" open={group.items.some((item) => item.event_type === "error")}>
+            <summary className="flex cursor-pointer list-none items-center justify-between gap-3">
               <div className="text-sm font-medium text-slate-900">{group.label}</div>
               <div className="text-xs text-slate-400">
                 {group.items.length} 条 · #{group.items[0]?.seq} - #{group.items[group.items.length - 1]?.seq}
               </div>
-            </div>
+            </summary>
             <div className="mt-3 space-y-3">
               {group.items.map((event) => (
                 <div key={event.seq} className="rounded-2xl border border-slate-200 bg-white p-3">
@@ -157,11 +178,11 @@ export function RunTimeline(props: Props) {
                 </div>
               ))}
             </div>
-          </div>
+          </details>
         ))}
         {!groups.length ? (
           <div className="rounded-2xl bg-slate-50 p-3 text-sm text-slate-500">
-            {props.mode === "openclaw_auto" ? "启动自动研究后，这里会按阶段展示进度、checkpoint 和报告。" : "执行 GPT Step 动作后，这里会持续沉淀步骤记录。"}
+            {props.mode === "openclaw_auto" ? "启动自动研究后，这里会按阶段展示进度、checkpoint 和报告。" : "执行 GPT Step 动作后，这里会沉淀步骤摘要，原始日志默认折叠。"}
           </div>
         ) : null}
       </div>

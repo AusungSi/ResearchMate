@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, Request, UploadFile
-from fastapi.responses import FileResponse, HTMLResponse
+from fastapi.responses import FileResponse, HTMLResponse, StreamingResponse
+import orjson
 from pathlib import Path
 from sqlalchemy.orm import Session
 
@@ -24,6 +25,11 @@ from app.domain.schemas import (
     ResearchAutoRunResponse,
     ResearchCanvasRequest,
     ResearchCanvasResponse,
+    ResearchChatAttachmentListResponse,
+    ResearchChatMessageListResponse,
+    ResearchChatThreadCreateRequest,
+    ResearchChatThreadListResponse,
+    ResearchChatThreadResponse,
     ResearchExploreStartRequest,
     ResearchExploreStartResponse,
     ResearchExploreTreeResponse,
@@ -55,11 +61,13 @@ from app.domain.schemas import (
     ResearchProjectListResponse,
     ResearchProjectResponse,
     ResearchTaskCreateRequest,
+    ResearchTaskChatStreamRequest,
     ResearchTaskListResponse,
     ResearchTaskPlanResponse,
     ResearchTaskResponse,
     ResearchTaskSearchEnqueueResponse,
     ResearchTaskSearchRequest,
+    ResearchVenueMetricsResponse,
     ResearchWorkbenchConfigResponse,
     ResearchZoteroConfigResponse,
     ResearchZoteroImportRequest,
@@ -80,6 +88,10 @@ def _queue_feedback(queued: bool, *, submitted: str, noop_reason: str | None, no
     if queued:
         return None, submitted
     return noop_reason, noop_messages.get(noop_reason or "", "当前操作没有执行。")
+
+
+def _sse_event(event_type: str, payload: dict) -> bytes:
+    return f"event: {event_type}\ndata: {orjson.dumps(payload).decode('utf-8')}\n\n".encode("utf-8")
 
 
 @router.post("/tasks", response_model=ResearchTaskResponse)
@@ -824,6 +836,24 @@ def compare_task_papers(
     return ResearchCompareResponse(**data)
 
 
+@router.get("/tasks/{task_id}/venues/metrics", response_model=ResearchVenueMetricsResponse)
+def get_task_venue_metrics(
+    task_id: str,
+    user_id: int = Depends(get_current_user_id),
+    db: Session = Depends(get_db),
+    research_service: ResearchService = Depends(get_research_service),
+) -> ResearchVenueMetricsResponse:
+    try:
+        data = research_service.get_task_venue_metrics(
+            db,
+            user_id=user_id,
+            task_id=task_id,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return ResearchVenueMetricsResponse(**data)
+
+
 @router.get("/tasks/{task_id}/papers/{paper_id:path}/asset")
 def get_paper_asset(
     task_id: str,
@@ -933,6 +963,110 @@ def get_node_chat_history(
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     return ResearchNodeChatResponse(**data)
 
+
+@router.get("/tasks/{task_id}/chat/threads", response_model=ResearchChatThreadListResponse)
+def list_task_chat_threads(
+    task_id: str,
+    limit: int = Query(default=30, ge=1, le=100),
+    user_id: int = Depends(get_current_user_id),
+    db: Session = Depends(get_db),
+    research_service: ResearchService = Depends(get_research_service),
+) -> ResearchChatThreadListResponse:
+    try:
+        data = research_service.list_chat_threads(db, user_id=user_id, task_id=task_id, limit=limit)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return ResearchChatThreadListResponse(**data)
+
+
+@router.post("/tasks/{task_id}/chat/threads", response_model=ResearchChatThreadResponse)
+def create_task_chat_thread(
+    task_id: str,
+    payload: ResearchChatThreadCreateRequest,
+    user_id: int = Depends(get_current_user_id),
+    db: Session = Depends(get_db),
+    research_service: ResearchService = Depends(get_research_service),
+) -> ResearchChatThreadResponse:
+    try:
+        data = research_service.create_chat_thread(db, user_id=user_id, task_id=task_id, title=payload.title)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return ResearchChatThreadResponse(**data)
+
+
+@router.get("/tasks/{task_id}/chat/messages", response_model=ResearchChatMessageListResponse)
+def list_task_chat_messages(
+    task_id: str,
+    thread_id: str = Query(...),
+    limit: int = Query(default=100, ge=1, le=300),
+    user_id: int = Depends(get_current_user_id),
+    db: Session = Depends(get_db),
+    research_service: ResearchService = Depends(get_research_service),
+) -> ResearchChatMessageListResponse:
+    try:
+        data = research_service.list_chat_messages(db, user_id=user_id, task_id=task_id, thread_id=thread_id, limit=limit)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return ResearchChatMessageListResponse(**data)
+
+
+@router.post("/tasks/{task_id}/chat/attachments", response_model=ResearchChatAttachmentListResponse)
+def upload_task_chat_attachment(
+    task_id: str,
+    file: UploadFile = File(...),
+    user_id: int = Depends(get_current_user_id),
+    db: Session = Depends(get_db),
+    research_service: ResearchService = Depends(get_research_service),
+) -> ResearchChatAttachmentListResponse:
+    try:
+        data = research_service.upload_chat_attachment(
+            db,
+            user_id=user_id,
+            task_id=task_id,
+            filename=file.filename or "attachment",
+            content=file.file.read(),
+            mime_type=file.content_type,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return ResearchChatAttachmentListResponse(**data)
+
+
+@router.post("/tasks/{task_id}/chat/stream")
+def stream_task_chat(
+    task_id: str,
+    payload: ResearchTaskChatStreamRequest,
+    user_id: int = Depends(get_current_user_id),
+    db: Session = Depends(get_db),
+    research_service: ResearchService = Depends(get_research_service),
+) -> StreamingResponse:
+    try:
+        _task_id, _thread_id, build_events = research_service.stream_task_chat(
+            db,
+            user_id=user_id,
+            task_id=task_id,
+            thread_id=payload.thread_id,
+            message=payload.message,
+            context_node_ids=payload.context_node_ids,
+            attachment_ids=payload.attachment_ids,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    def event_stream():
+        for event in build_events():
+            event_type = str(event.get("type") or "message")
+            yield _sse_event(event_type, event)
+
+    return StreamingResponse(
+        event_stream(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
 
 @router.post("/tasks/{task_id}/nodes/{node_id:path}/chat", response_model=ResearchNodeChatResponse)
 def chat_with_node(
