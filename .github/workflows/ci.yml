@@ -32,13 +32,15 @@ jobs:
       - name: Run backend test suite
         env:
           APP_PROFILE: research_local
+          PYTHONPATH: .
+          PYTEST_DISABLE_PLUGIN_AUTOLOAD: "1"
           RESEARCH_ENABLED: "true"
           RESEARCH_QUEUE_MODE: inline
           DB_URL: sqlite:///./data/ci.db
           RESEARCH_ARTIFACT_DIR: ./artifacts/research
           RESEARCH_SAVE_BASE_DIR: ./artifacts/research/saved
         run: |
-          pytest tests/test_research_api.py tests/test_research_flow.py tests/test_research_local_mode.py tests/test_openclaw_client.py
+          python -m pytest tests/test_research_api.py tests/test_research_flow.py tests/test_research_local_mode.py tests/test_openclaw_client.py
 
   frontend-tests:
     name: Frontend tests and build
