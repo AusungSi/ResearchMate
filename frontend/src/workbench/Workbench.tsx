@@ -1,38 +1,39 @@
 ﻿import { useEffect, useMemo, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useEdgesState, useNodesState, type Connection, type Edge, type Node, type NodeChange, type ReactFlowInstance } from "@xyflow/react";
-import { apiFetch } from "../lib/api";
+import { apiFetch, apiPostSse } from "../lib/api";
 import { AppShell } from "./components/AppShell";
+import { CanvasActionBar } from "./components/CanvasActionBar";
 import { CollectionDetailPanel } from "./components/CollectionDetailPanel";
 import { ComparePanel } from "./components/ComparePanel";
 import { ContextChatPanel } from "./components/ContextChatPanel";
 import { DetailPanel } from "./components/DetailPanel";
-import { PdfPanel } from "./components/PdfPanel";
-import { ProjectSidebar } from "./components/ProjectSidebar";
-import { QuickActionBar } from "./components/QuickActionBar";
+import { ProjectSidebar, type SidebarEntry } from "./components/ProjectSidebar";
 import { ResearchCanvas, buildManualConnection } from "./components/ResearchCanvas";
 import { RunTimeline } from "./components/RunTimeline";
-import { TaskProgress } from "./components/TaskProgress";
 import { SectionTitle, SmallButton } from "./components/shared";
 import { edgeCountLabel } from "./display";
 import { useRunEvents } from "./hooks/useRunEvents";
-import { deriveTaskProgress } from "./progress";
 import type {
   ActionResponse,
   ActionStatus,
   Backend,
   CanvasResponse,
   CanvasUiState,
-  ChatItem,
-  ChatResponse,
+  ChatAttachment,
+  ChatAttachmentListResponse,
+  ChatMessage,
+  ChatMessageListResponse,
+  ChatThread,
+  ChatThreadListResponse,
   CollectionGraphResponse,
   CollectionSummary,
   CompareReport,
   ExportListResponse,
   ExportResponse,
   FlowNodeData,
-  FulltextStatusResponse,
   GraphResponse,
+  PaperAssetItem,
   PaperAssetResponse,
   PaperDetail,
   ProjectDashboard,
@@ -40,8 +41,6 @@ import type {
   RoundCandidate,
   TaskMode,
   TaskSummary,
-  TaskVenueMetricItem,
-  TaskVenueMetricsResponse,
   WorkbenchConfig,
   ZoteroConfig,
   ZoteroImportResponse,
@@ -51,18 +50,21 @@ import {
   canonicalGraphSignature,
   canvasPayloadSignature,
   defaultCanvasUi,
+  derivePaperPdfUrl,
   inferRoundId,
   isPaperNode,
   mergeCanvasWithGraph,
   reconcileFlowState,
   runAutoLayout,
-  selectedPaperNodes,
 } from "./utils";
 
 type ExportFormat = "md" | "bib" | "json" | "csljson";
 type WorkbenchActionResult = ActionResponse & { candidates?: RoundCandidate[] };
 type CanvasSavePayload = { taskId: string; payload: CanvasResponse };
 type DetailTab = "info" | "chat";
+type CenterSheetMode = SidebarEntry | null;
+type ManualCardType = "note" | "group" | "report";
+type AssetPreviewState = { title: string; kind: string; url: string; filename?: string | null } | null;
 
 type WorkbenchAction =
   | { type: "quick"; action: "plan" | "search_first" | "build_graph" | "build_fulltext" | "auto_start" }
@@ -78,15 +80,22 @@ type WorkbenchAction =
   | { type: "auto_continue" }
   | { type: "auto_cancel" };
 
-const MANUAL_NODE_LABELS: Record<"note" | "question" | "reference" | "group" | "report", string> = {
+const FIXED_LEFT_RAIL_WIDTH = 104;
+
+const MANUAL_NODE_LABELS: Record<ManualCardType, string> = {
   note: "新的笔记",
-  question: "新的问题",
-  reference: "新的参考",
   group: "新的分组",
   report: "新的报告",
 };
 
-const VENUE_METRICS_COLLAPSED_STORAGE_KEY = "research-workbench:venue-metrics-collapsed";
+function normalizeCanvasUi(ui?: Partial<CanvasUiState> | null): CanvasUiState {
+  return {
+    ...defaultCanvasUi(),
+    ...(ui || {}),
+    left_sidebar_collapsed: false,
+    left_sidebar_width: FIXED_LEFT_RAIL_WIDTH,
+  };
+}
 
 function isTransientCanvasSaveError(cause: unknown) {
   const message = cause instanceof Error ? cause.message.toLowerCase() : String(cause).toLowerCase();
@@ -108,11 +117,27 @@ export function Workbench() {
   const [detailTab, setDetailTab] = useState<DetailTab>("info");
   const [runId, setRunId] = useState("");
   const [viewport, setViewport] = useState({ x: 0, y: 0, zoom: 1 });
-  const [uiState, setUiState] = useState<CanvasUiState>(defaultCanvasUi());
-  const [pdfUrl, setPdfUrl] = useState("");
-  const [chatByNode, setChatByNode] = useState<Record<string, ChatItem[]>>({});
-  const [chatTargetNodeId, setChatTargetNodeId] = useState("");
+  const [uiState, setUiState] = useState<CanvasUiState>(normalizeCanvasUi(defaultCanvasUi()));
+  const [selectedNodeIds, setSelectedNodeIds] = useState<string[]>([]);
+  const [activeChatThreadId, setActiveChatThreadId] = useState("");
+  const [chatContextNodeIds, setChatContextNodeIds] = useState<string[]>([]);
+  const [chatAttachments, setChatAttachments] = useState<ChatAttachment[]>([]);
+  const [chatUploadingNames, setChatUploadingNames] = useState<string[]>([]);
   const [chatDraft, setChatDraft] = useState("");
+  const [chatStreamError, setChatStreamError] = useState("");
+  const [chatStreaming, setChatStreaming] = useState(false);
+  const [centerSheetMode, setCenterSheetMode] = useState<CenterSheetMode>(null);
+  const [projectDraft, setProjectDraft] = useState({ name: "", description: "" });
+  const [taskDraft, setTaskDraft] = useState({
+    topic: "",
+    mode: "gpt_step" as TaskMode,
+    llm_backend: "gpt" as Backend,
+    llm_model: "gpt-5.4",
+  });
+  const [collectionDraft, setCollectionDraft] = useState({ name: "", description: "" });
+  const [pendingCollectionPaperIds, setPendingCollectionPaperIds] = useState<string[]>([]);
+  const [importCollectionName, setImportCollectionName] = useState("");
+  const [importFile, setImportFile] = useState<File | null>(null);
   const [roundCandidates, setRoundCandidates] = useState<Record<number, RoundCandidate[]>>({});
   const [actionStatus, setActionStatus] = useState<ActionStatus | null>(null);
   const [compareReport, setCompareReport] = useState<CompareReport | null>(null);
@@ -120,31 +145,21 @@ export function Workbench() {
   const [collectionLimit, setCollectionLimit] = useState(50);
   const [selectedCollectionItemIds, setSelectedCollectionItemIds] = useState<number[]>([]);
   const [relayoutNonce, setRelayoutNonce] = useState(0);
-  const [miniMapBottomOffset, setMiniMapBottomOffset] = useState(108);
-  const [venueMetricsCollapsed, setVenueMetricsCollapsed] = useState(() => {
-    if (typeof window === "undefined") {
-      return false;
-    }
-    try {
-      return window.localStorage.getItem(VENUE_METRICS_COLLAPSED_STORAGE_KEY) === "true";
-    } catch {
-      return false;
-    }
-  });
+  const [cardMenuOpen, setCardMenuOpen] = useState(false);
+  const [assetPreviewState, setAssetPreviewState] = useState<AssetPreviewState>(null);
   const flowRef = useRef<ReactFlowInstance<Node<FlowNodeData>, Edge> | null>(null);
-  const zoteroFileInputRef = useRef<HTMLInputElement | null>(null);
   const persistTimer = useRef<number | null>(null);
   const suppressViewportPersistRef = useRef(false);
   const interactionLockRef = useRef(false);
   const lastSavedCanvasSignature = useRef("");
   const pendingCanvasSignature = useRef("");
   const canvasRetryCountRef = useRef<Record<string, number>>({});
-  const nodeChatRetryCountRef = useRef<Record<string, number>>({});
   const nodesRef = useRef<Array<Node<FlowNodeData>>>([]);
   const edgesRef = useRef<Array<Edge>>([]);
   const viewportRef = useRef(viewport);
   const layoutSignatureRef = useRef("");
   const lastTaskIdRef = useRef("");
+  const chatAbortRef = useRef<AbortController | null>(null);
 
   const configQuery = useQuery({
     queryKey: ["workbench-config"],
@@ -155,6 +170,25 @@ export function Workbench() {
     queryKey: ["zotero-config"],
     queryFn: () => apiFetch<ZoteroConfig>("/api/v1/research/integrations/zotero/config"),
   });
+
+  useEffect(() => {
+    if (!configQuery.data) return;
+    setTaskDraft((current) => {
+      const nextMode = current.topic.trim() ? current.mode : configQuery.data.default_mode;
+      const nextBackend = nextMode === "openclaw_auto" ? "openclaw" : current.topic.trim() ? current.llm_backend : configQuery.data.default_backend;
+      return {
+        ...current,
+        mode: nextMode,
+        llm_backend: nextBackend,
+        llm_model:
+          nextMode === "openclaw_auto"
+            ? configQuery.data.default_openclaw_model || "main"
+            : current.topic.trim()
+              ? current.llm_model
+              : configQuery.data.default_gpt_model || "gpt-5.4",
+      };
+    });
+  }, [configQuery.data]);
 
   const projectsQuery = useQuery({
     queryKey: ["projects"],
@@ -192,6 +226,10 @@ export function Workbench() {
     enabled: Boolean(activeProjectId),
     refetchInterval: 5000,
   });
+  const activeProject = useMemo(
+    () => projectsQuery.data?.items?.find((project) => project.project_id === activeProjectId) || null,
+    [activeProjectId, projectsQuery.data?.items],
+  );
 
   useEffect(() => {
     if (!activeProjectId) return;
@@ -218,17 +256,6 @@ export function Workbench() {
     setCollectionSearchText("");
     setSelectedCollectionItemIds([]);
   }, [activeCollectionId]);
-
-  useEffect(() => {
-    if (typeof window === "undefined") {
-      return;
-    }
-    try {
-      window.localStorage.setItem(VENUE_METRICS_COLLAPSED_STORAGE_KEY, venueMetricsCollapsed ? "true" : "false");
-    } catch {
-      // Ignore storage errors so the panel still works in restricted contexts.
-    }
-  }, [venueMetricsCollapsed]);
 
   const collectionDetailQuery = useQuery({
     queryKey: ["collection", activeCollectionId, collectionLimit],
@@ -258,7 +285,7 @@ export function Workbench() {
 
   const graphQuery = useQuery({
     queryKey: ["graph", activeTaskId],
-    queryFn: () => apiFetch<GraphResponse>(`/api/v1/research/tasks/${activeTaskId}/graph?view=tree&include_papers=true&paper_limit=24`),
+    queryFn: () => apiFetch<GraphResponse>(`/api/v1/research/tasks/${activeTaskId}/graph?view=tree&include_papers=true&paper_limit=50`),
     enabled: Boolean(activeTaskId),
     refetchInterval: 5000,
   });
@@ -269,46 +296,97 @@ export function Workbench() {
     enabled: Boolean(activeTaskId),
   });
 
-  const taskExportsQuery = useQuery({
-    queryKey: ["task-exports", activeTaskId],
-    queryFn: () => apiFetch<ExportListResponse>(`/api/v1/research/tasks/${activeTaskId}/exports`),
-    enabled: Boolean(activeTaskId),
-    refetchInterval: 5000,
-  });
-
-  const fulltextStatusQuery = useQuery({
-    queryKey: ["fulltext-status", activeTaskId],
-    queryFn: () => apiFetch<FulltextStatusResponse>(`/api/v1/research/tasks/${activeTaskId}/fulltext/status`),
-    enabled: Boolean(activeTaskId),
-    refetchInterval: 5000,
-  });
-
-  const venueMetricsQuery = useQuery({
-    queryKey: ["venue-metrics", activeTaskId],
-    queryFn: () => apiFetch<TaskVenueMetricsResponse>(`/api/v1/research/tasks/${activeTaskId}/venues/metrics`),
-    enabled: Boolean(activeTaskId),
-    refetchInterval: 30000,
-  });
-
   const activeTask = taskQuery.data || null;
+  const activeSheetEntry = centerSheetMode;
+
+  function closeCenterSheet() {
+    setCenterSheetMode(null);
+    setPendingCollectionPaperIds([]);
+  }
+
+  function openCenterSheet(mode: CenterSheetMode) {
+    setCenterSheetMode(mode);
+    if (mode !== "collection") {
+      setPendingCollectionPaperIds([]);
+    }
+  }
+
+  function selectProject(projectId: string) {
+    chatAbortRef.current?.abort();
+    setActiveProjectId(projectId);
+    setActiveTaskId("");
+    setRunId("");
+    setActiveCollectionId("");
+    setSelectedNodeId("");
+    setSelectedNodeIds([]);
+    setDetailTab("info");
+    setAssetPreviewState(null);
+    setActiveChatThreadId("");
+    setChatContextNodeIds([]);
+    setChatAttachments([]);
+    setChatDraft("");
+    setRoundCandidates({});
+    setCompareReport(null);
+    setCollectionSearchText("");
+    setCollectionLimit(50);
+    setSelectedCollectionItemIds([]);
+    setChatStreamError("");
+    setChatStreaming(false);
+    setPendingCollectionPaperIds([]);
+    layoutSignatureRef.current = "";
+    setActionStatus(null);
+    closeCenterSheet();
+  }
+
+  function selectTask(taskId: string) {
+    if (taskId === activeTaskId) {
+      setActiveCollectionId("");
+      setSelectedNodeId("");
+      setSelectedNodeIds([]);
+      setDetailTab("info");
+      setAssetPreviewState(null);
+      setActionStatus({ tone: "neutral", text: "已切回当前任务视图" });
+      closeCenterSheet();
+      return;
+    }
+    chatAbortRef.current?.abort();
+    setActiveTaskId(taskId);
+    setActiveCollectionId("");
+    setSelectedNodeId("");
+    setSelectedNodeIds([]);
+    setDetailTab("info");
+    setAssetPreviewState(null);
+    setActiveChatThreadId("");
+    setChatContextNodeIds([]);
+    setChatAttachments([]);
+    setChatDraft("");
+    setRoundCandidates({});
+    setCompareReport(null);
+    setCollectionSearchText("");
+    setCollectionLimit(50);
+    setSelectedCollectionItemIds([]);
+    setChatStreamError("");
+    setChatStreaming(false);
+    layoutSignatureRef.current = "";
+    setActionStatus(null);
+    closeCenterSheet();
+  }
+
+  function selectCollection(collectionId: string) {
+    setActiveCollectionId(collectionId);
+    setSelectedNodeId("");
+    setSelectedNodeIds([]);
+    closeCenterSheet();
+  }
   const eventsState = useRunEvents({
     taskId: activeTaskId,
     runId,
     enabled: Boolean(activeTaskId && runId),
     intervalMs: activeTask?.mode === "openclaw_auto" ? 3000 : 4000,
   });
-  const taskProgress = useMemo(() => deriveTaskProgress(activeTask, eventsState.summary, eventsState.items), [activeTask, eventsState.items, eventsState.summary]);
-
-  useEffect(() => {
-    if (!actionStatus) return;
-    const timer = window.setTimeout(() => {
-      setActionStatus(null);
-    }, 5000);
-    return () => window.clearTimeout(timer);
-  }, [actionStatus]);
 
   const merged = useMemo(
-    () => mergeCanvasWithGraph(graphQuery.data, canvasQuery.data, eventsState.items, configQuery.data?.default_canvas_ui || defaultCanvasUi()),
+    () => mergeCanvasWithGraph(graphQuery.data, canvasQuery.data, eventsState.items, normalizeCanvasUi(configQuery.data?.default_canvas_ui || defaultCanvasUi())),
     [graphQuery.data, canvasQuery.data, configQuery.data?.default_canvas_ui, eventsState.items],
   );
   const [nodes, setNodes, onNodesChangeBase] = useNodesState<Node<FlowNodeData>>([]);
@@ -326,7 +404,7 @@ export function Workbench() {
     if (pendingCanvasSignature.current === lastSavedCanvasSignature.current) {
       pendingCanvasSignature.current = "";
     }
-    setUiState({ ...defaultCanvasUi(), ...(canvasQuery.data.ui || {}) });
+    setUiState(normalizeCanvasUi(canvasQuery.data.ui));
     setViewport(canvasQuery.data.viewport);
   }, [canvasQuery.data]);
 
@@ -397,45 +475,47 @@ export function Workbench() {
   }, [nodes, selectedNodeId]);
 
   useEffect(() => {
-    if (chatTargetNodeId && !nodes.some((node) => node.id === chatTargetNodeId)) {
-      setChatTargetNodeId("");
-      setChatDraft("");
+    if (!chatContextNodeIds.length) return;
+    const nodeIds = new Set(nodes.map((node) => node.id));
+    const nextIds = chatContextNodeIds.filter((nodeId) => nodeIds.has(nodeId));
+    if (nextIds.length !== chatContextNodeIds.length) {
+      setChatContextNodeIds(nextIds);
     }
-  }, [chatTargetNodeId, nodes]);
+  }, [chatContextNodeIds, nodes]);
 
   useEffect(() => {
     if (activeTaskId === lastTaskIdRef.current) return;
     lastTaskIdRef.current = activeTaskId;
-    if (persistTimer.current) {
-      window.clearTimeout(persistTimer.current);
-      persistTimer.current = null;
-    }
-    interactionLockRef.current = false;
-    suppressViewportPersistRef.current = false;
+    chatAbortRef.current?.abort();
     setActiveCollectionId("");
     setSelectedNodeId("");
+    setSelectedNodeIds([]);
     setDetailTab("info");
-    setPdfUrl("");
-    setChatByNode({});
-    setChatTargetNodeId("");
+    setAssetPreviewState(null);
+    setActiveChatThreadId("");
+    setChatContextNodeIds([]);
+    setChatAttachments([]);
+    setChatUploadingNames([]);
     setChatDraft("");
+    setChatStreamError("");
+    setChatStreaming(false);
     setRoundCandidates({});
     setCompareReport(null);
+    setPendingCollectionPaperIds([]);
     setCollectionSearchText("");
     setCollectionLimit(50);
     setSelectedCollectionItemIds([]);
+    setImportFile(null);
+    setCardMenuOpen(false);
     layoutSignatureRef.current = "";
     lastSavedCanvasSignature.current = "";
     pendingCanvasSignature.current = "";
     canvasRetryCountRef.current = {};
-    nodeChatRetryCountRef.current = {};
-    setNodes([]);
-    setEdges([]);
-    setViewport({ x: 0, y: 0, zoom: 1 });
   }, [activeTaskId]);
 
   useEffect(() => {
     return () => {
+      chatAbortRef.current?.abort();
       if (persistTimer.current) {
         window.clearTimeout(persistTimer.current);
       }
@@ -443,22 +523,27 @@ export function Workbench() {
   }, []);
 
   const selectedNode = nodes.find((node) => node.id === selectedNodeId) || null;
-  const selectedPaperId = useMemo(() => {
-    if (!selectedNode?.id || !isPaperNode(selectedNode.id, selectedNode.data)) {
-      return "";
-    }
-    return String(selectedNode.data?.paper_id || selectedNode.id).trim();
-  }, [selectedNode]);
-  const selectedPaperCount = useMemo(() => selectedPaperNodes(nodes).length, [nodes]);
-  const hiddenNodeCount = useMemo(() => nodes.filter((node) => Boolean(node.hidden)).length, [nodes]);
-  const selectedFulltextItem = useMemo(
-    () => fulltextStatusQuery.data?.items.find((item) => item.paper_id === selectedPaperId) || null,
-    [fulltextStatusQuery.data?.items, selectedPaperId],
+  const selectedPaperId = selectedNode && isPaperNode(selectedNode) ? selectedNode.id : "";
+  const selectedPaperIds = useMemo(
+    () =>
+      selectedNodeIds.filter((nodeId) => {
+        const node = nodes.find((item) => item.id === nodeId);
+        return isPaperNode(node ? node : nodeId);
+      }),
+    [nodes, selectedNodeIds],
   );
+  const selectedPaperCount = selectedPaperIds.length;
 
   useEffect(() => {
-    setPdfUrl("");
+    setAssetPreviewState(null);
   }, [selectedPaperId]);
+
+  useEffect(() => {
+    if (detailTab !== "chat" || uiState.right_sidebar_collapsed || uiState.right_sidebar_width >= 560) return;
+    const next = normalizeCanvasUi({ ...uiState, right_sidebar_width: 560 });
+    setUiState(next);
+    queueSave(nodesRef.current, edgesRef.current, viewportRef.current, next);
+  }, [detailTab, uiState]);
 
   const paperDetailQuery = useQuery({
     queryKey: ["paper-detail", activeTaskId, selectedPaperId],
@@ -471,6 +556,9 @@ export function Workbench() {
     queryFn: () => apiFetch<PaperAssetResponse>(`/api/v1/research/tasks/${activeTaskId}/papers/${encodeURIComponent(selectedPaperId)}/asset/meta`),
     enabled: Boolean(activeTaskId && selectedPaperId),
   });
+  const resolvedPaperPdfUrl = derivePaperPdfUrl(paperAssetQuery.data, paperDetailQuery.data);
+  const resolvedPaperPdfFilename =
+    paperAssetQuery.data?.items.find((item) => item.kind === "pdf")?.filename || (selectedPaperId ? `${selectedPaperId}.pdf` : "paper.pdf");
 
   function resolveBrowserUrl(url?: string | null) {
     if (!url) return "";
@@ -500,24 +588,47 @@ export function Workbench() {
     return true;
   }
 
-  const chatHistoryQuery = useQuery({
-    queryKey: ["node-chat-history", activeTaskId, chatTargetNodeId],
-    queryFn: () => apiFetch<ChatResponse>(`/api/v1/research/tasks/${activeTaskId}/nodes/${encodeURIComponent(chatTargetNodeId)}/chat`),
-    enabled: Boolean(activeTaskId && chatTargetNodeId),
-    refetchOnWindowFocus: false,
+  const assetPreviewQuery = useQuery({
+    queryKey: ["asset-text-preview", assetPreviewState?.url],
+    queryFn: async () => {
+      const response = await fetch(resolveBrowserUrl(assetPreviewState?.url));
+      if (!response.ok) {
+        throw new Error((await response.text()) || `asset preview failed: ${response.status}`);
+      }
+      return response.text();
+    },
+    enabled: Boolean(assetPreviewState?.url),
+  });
+
+  const chatThreadsQuery = useQuery({
+    queryKey: ["task-chat-threads", activeTaskId],
+    queryFn: () => apiFetch<ChatThreadListResponse>(`/api/v1/research/tasks/${activeTaskId}/chat/threads`),
+    enabled: Boolean(activeTaskId),
+    refetchInterval: 5000,
   });
 
   useEffect(() => {
-    if (!chatTargetNodeId || !chatHistoryQuery.data) return;
-    setChatByNode((current) => {
-      const nextHistory = chatHistoryQuery.data?.history || [];
-      const existing = current[chatTargetNodeId] || [];
-      if (JSON.stringify(existing) === JSON.stringify(nextHistory)) {
-        return current;
+    const threads = chatThreadsQuery.data?.items || [];
+    if (!threads.length) {
+      if (activeChatThreadId) {
+        setActiveChatThreadId("");
       }
-      return { ...current, [chatTargetNodeId]: nextHistory };
-    });
-  }, [chatHistoryQuery.data, chatTargetNodeId]);
+      return;
+    }
+    if (!activeChatThreadId || !threads.some((item) => item.thread_id === activeChatThreadId)) {
+      setActiveChatThreadId(threads[0].thread_id);
+    }
+  }, [activeChatThreadId, chatThreadsQuery.data?.items]);
+
+  const chatMessagesQuery = useQuery({
+    queryKey: ["task-chat-messages", activeTaskId, activeChatThreadId],
+    queryFn: () =>
+      apiFetch<ChatMessageListResponse>(
+        `/api/v1/research/tasks/${activeTaskId}/chat/messages?thread_id=${encodeURIComponent(activeChatThreadId)}`,
+      ),
+    enabled: Boolean(activeTaskId && activeChatThreadId),
+    refetchOnWindowFocus: false,
+  });
 
   const saveCanvas = useMutation({
     mutationFn: ({ taskId, payload }: CanvasSavePayload) =>
@@ -559,7 +670,7 @@ export function Workbench() {
     nextUi = uiState,
   ) {
     if (!activeTaskId) return;
-    const payload = buildCanvasPayload(activeTaskId, nextNodes, nextEdges, nextViewport, nextUi) as CanvasResponse;
+    const payload = buildCanvasPayload(activeTaskId, nextNodes, nextEdges, nextViewport, normalizeCanvasUi(nextUi)) as CanvasResponse;
     const signature = canvasPayloadSignature(payload);
     if (signature === lastSavedCanvasSignature.current || signature === pendingCanvasSignature.current) {
       return;
@@ -569,7 +680,6 @@ export function Workbench() {
     }
     pendingCanvasSignature.current = signature;
     persistTimer.current = window.setTimeout(() => {
-      persistTimer.current = null;
       saveCanvas.mutate({ taskId: activeTaskId, payload });
     }, 450);
   }
@@ -579,6 +689,8 @@ export function Workbench() {
       apiFetch<ProjectSummary>("/api/v1/research/projects", { method: "POST", body: JSON.stringify(payload) }),
     onSuccess: (project) => {
       setActiveProjectId(project.project_id);
+      setProjectDraft({ name: "", description: "" });
+      closeCenterSheet();
       setActionStatus({ tone: "success", text: `已创建项目：${project.name}` });
       client.invalidateQueries({ queryKey: ["projects"] });
     },
@@ -614,11 +726,16 @@ export function Workbench() {
       setActiveProjectId(task.project_id || activeProjectId);
       setActiveTaskId(task.task_id);
       setSelectedNodeId("");
+      setSelectedNodeIds([]);
       setRunId(task.latest_run_id || "");
-      setPdfUrl("");
-      setChatByNode({});
+      setAssetPreviewState(null);
+      setActiveChatThreadId("");
+      setChatContextNodeIds([]);
+      setChatAttachments([]);
       setRoundCandidates({});
       setCompareReport(null);
+      closeCenterSheet();
+      setTaskDraft((current) => ({ ...current, topic: "" }));
       setActionStatus({ tone: "success", text: `已创建任务：${task.topic}` });
       client.invalidateQueries({ queryKey: ["tasks", activeProjectId] });
       client.invalidateQueries({ queryKey: ["projects"] });
@@ -757,6 +874,9 @@ export function Workbench() {
       const nextProjectId = data.project_id || activeProjectId;
       setActiveProjectId(nextProjectId);
       setActiveCollectionId(data.collection.collection_id);
+      closeCenterSheet();
+      setImportCollectionName("");
+      setImportFile(null);
       setActionStatus({
         tone: "success",
         text: `已导入 Zotero 文件：${data.collection.name}（导入 ${data.imported_items}，去重 ${data.deduped_items}）`,
@@ -793,26 +913,6 @@ export function Workbench() {
       setActionStatus({ tone: "success", text: `Collection ${payload.format.toUpperCase()} 导出已生成：${filename}。可在右侧导出历史中打开或下载。` });
       client.invalidateQueries({ queryKey: ["collection-exports", payload.collectionId] });
       client.invalidateQueries({ queryKey: ["project-dashboard", activeProjectId] });
-    },
-    onError: (cause) => {
-      setActionStatus({ tone: "danger", text: cause instanceof Error ? cause.message : String(cause) });
-    },
-  });
-
-  const uploadPdf = useMutation({
-    mutationFn: async (file: File) => {
-      const form = new FormData();
-      form.append("file", file);
-      return apiFetch(`/api/v1/research/tasks/${activeTaskId}/papers/${encodeURIComponent(selectedPaperId)}/pdf/upload`, {
-        method: "POST",
-        body: form,
-      });
-    },
-    onSuccess: () => {
-      setActionStatus({ tone: "success", text: "PDF 上传并解析完成" });
-      client.invalidateQueries({ queryKey: ["paper-assets", activeTaskId, selectedPaperId] });
-      client.invalidateQueries({ queryKey: ["paper-detail", activeTaskId, selectedPaperId] });
-      client.invalidateQueries({ queryKey: ["fulltext-status", activeTaskId] });
     },
     onError: (cause) => {
       setActionStatus({ tone: "danger", text: cause instanceof Error ? cause.message : String(cause) });
@@ -944,57 +1044,39 @@ export function Workbench() {
     },
   });
 
-  const nodeChat = useMutation({
-    mutationFn: (payload: { nodeId: string; question: string; threadId?: string }) =>
-      apiFetch<ChatResponse>(`/api/v1/research/tasks/${activeTaskId}/nodes/${encodeURIComponent(payload.nodeId)}/chat`, {
+  const createChatThread = useMutation({
+    mutationFn: async (title?: string) =>
+      apiFetch<ChatThread>(`/api/v1/research/tasks/${activeTaskId}/chat/threads`, {
         method: "POST",
-        body: JSON.stringify({ question: payload.question, thread_id: payload.threadId }),
+        body: JSON.stringify({ title: title || null }),
       }),
-    onSuccess: (data) => {
-      setChatByNode((current) => ({ ...current, [data.node_id]: data.history }));
-      const latest = data.history[data.history.length - 1] || data.item || null;
-      if (latest) {
-        delete nodeChatRetryCountRef.current[`${data.node_id}:${latest.question}:${latest.thread_id || ""}`];
-      }
-      const target = nodesRef.current.find((node) => node.id === data.node_id);
-      if (latest && target?.data?.isManual && target.data.type === "question") {
-        const nextNodes = nodesRef.current.map((node) =>
-          node.id === data.node_id
-            ? {
-                ...node,
-                data: {
-                  ...node.data,
-                  label: latest.question.slice(0, 28) || node.data.label,
-                  summary: `问题：${latest.question}\n\n回答：${latest.answer}`,
-                },
-              }
-            : node,
-        );
-        setNodes(nextNodes);
-        queueSave(nextNodes, edgesRef.current);
-      }
-      setActionStatus({ tone: "neutral", text: "节点问答已更新" });
-      client.invalidateQueries({ queryKey: ["node-chat-history", activeTaskId, data.node_id] });
+    onSuccess: (thread) => {
+      setActiveChatThreadId(thread.thread_id);
+      client.invalidateQueries({ queryKey: ["task-chat-threads", activeTaskId] });
     },
-    onError: (cause, variables) => {
-      if (isTransientCanvasSaveError(cause)) {
-        const key = `${variables.nodeId}:${variables.question}:${variables.threadId || ""}`;
-        const retryCount = nodeChatRetryCountRef.current[key] || 0;
-        if (retryCount < 2) {
-          nodeChatRetryCountRef.current[key] = retryCount + 1;
-          setActionStatus({ tone: "warning", text: "后台正在同步研究结果，节点问答会自动重试。" });
-          window.setTimeout(() => nodeChat.mutate(variables), 1200 * (retryCount + 1));
-        } else {
-          delete nodeChatRetryCountRef.current[key];
-          setActionStatus({ tone: "warning", text: "后台仍在同步，请稍后再问一次。" });
-        }
-        return;
-      }
+    onError: (cause) => {
       setActionStatus({ tone: "danger", text: cause instanceof Error ? cause.message : String(cause) });
     },
   });
 
-  function addManualNode(type: "note" | "question" | "reference" | "group" | "report", summary?: string, label?: string) {
+  const uploadChatAttachment = useMutation({
+    mutationFn: async (file: File) => {
+      const form = new FormData();
+      form.append("file", file);
+      return apiFetch<ChatAttachmentListResponse>(`/api/v1/research/tasks/${activeTaskId}/chat/attachments`, {
+        method: "POST",
+        body: form,
+      });
+    },
+    onSuccess: (data) => {
+      setChatAttachments((current) => [...current, ...data.items]);
+    },
+    onError: (cause) => {
+      setActionStatus({ tone: "danger", text: cause instanceof Error ? cause.message : String(cause) });
+    },
+  });
+
+  function addManualNode(type: ManualCardType, summary?: string, label?: string) {
     const id = `${type}:${Math.random().toString(16).slice(2, 10)}`;
     const nextNodes = [
       ...nodesRef.current,
@@ -1008,7 +1090,7 @@ export function Workbench() {
           id,
           type,
           label: label || MANUAL_NODE_LABELS[type],
-          summary: summary || "这是一个手工工作台节点，可用于整理思路、记录问题、沉淀阶段总结或挂接参考资料。",
+          summary: summary || "这是一个手工工作台节点，可用于整理思路、沉淀阶段总结、归纳结论或组织研究分组。",
           isManual: true,
         },
       } as Node<FlowNodeData>,
@@ -1049,6 +1131,7 @@ export function Workbench() {
       const nextNodes = nodesRef.current.map((node) => (node.id === selectedNodeId ? { ...node, hidden: true } : node));
       const nextEdges = applyHiddenEdgeVisibility(nextNodes, edgesRef.current);
       setSelectedNodeId("");
+      setSelectedNodeIds([]);
       setNodes(nextNodes);
       setEdges(nextEdges);
       queueSave(nextNodes, nextEdges);
@@ -1062,24 +1145,11 @@ export function Workbench() {
         edge.target !== selectedNodeId,
     );
     setSelectedNodeId("");
+    setSelectedNodeIds([]);
     setNodes(nextNodes);
     setEdges(nextEdges);
     queueSave(nextNodes, nextEdges);
     setActionStatus({ tone: "success", text: "已删除手工节点。" });
-  }
-
-  function restoreHiddenNodes() {
-    const hasHiddenNodes = nodesRef.current.some((node) => Boolean(node.hidden));
-    if (!hasHiddenNodes) {
-      setActionStatus({ tone: "neutral", text: "当前没有隐藏节点可恢复。" });
-      return;
-    }
-    const nextNodes = nodesRef.current.map((node) => (node.hidden ? { ...node, hidden: false } : node));
-    const nextEdges = applyHiddenEdgeVisibility(nextNodes, edgesRef.current);
-    setNodes(nextNodes);
-    setEdges(nextEdges);
-    queueSave(nextNodes, nextEdges);
-    setActionStatus({ tone: "success", text: "已恢复画布中的隐藏节点。" });
   }
 
   function handleNodesChange(changes: NodeChange<Node<FlowNodeData>>[]) {
@@ -1105,6 +1175,7 @@ export function Workbench() {
       edgesRef.current.filter((edge) => !manualIds.has(edge.source) && !manualIds.has(edge.target)),
     );
     setSelectedNodeId("");
+    setSelectedNodeIds([]);
     setNodes(nextNodes);
     setEdges(nextEdges);
     queueSave(nextNodes, nextEdges);
@@ -1117,16 +1188,21 @@ export function Workbench() {
     }
   }
 
-  function saveChatAnswerAsNode(kind: "note" | "question" | "reference" | "report", item: ChatItem) {
-    const label =
-      kind === "note"
-        ? "问答笔记"
-        : kind === "question"
-          ? "问答问题"
-          : kind === "reference"
-            ? "问答参考"
-            : "问答报告";
-    addManualNode(kind, item.answer, label);
+  function syncCanvasSelection(nodeIds: string[]) {
+    setSelectedNodeIds(nodeIds);
+    if (!nodeIds.length) {
+      setSelectedNodeId("");
+      return;
+    }
+    if (selectedNodeId && nodeIds.includes(selectedNodeId)) {
+      return;
+    }
+    setSelectedNodeId(nodeIds[nodeIds.length - 1] || nodeIds[0]);
+  }
+
+  function saveChatAnswerAsNode(kind: "note" | "report", item: ChatMessage) {
+    const label = kind === "note" ? "问答笔记" : "问答报告";
+    addManualNode(kind, item.content, label);
     setActionStatus({ tone: "success", text: `已将问答结果保存为${kind === "report" ? "报告" : "手工"}节点` });
   }
 
@@ -1140,48 +1216,201 @@ export function Workbench() {
     setActionStatus({ tone: "success", text: `已将 compare 结果保存为${kind === "report" ? "报告" : "笔记"}节点` });
   }
 
-  async function ensureCollectionForSelection() {
-    if (activeCollectionId) return activeCollectionId;
-    const created = await createCollection.mutateAsync({ name: `选中文献 ${new Date().toLocaleTimeString()}`, description: "" });
-    return created.collection_id;
+  function addNodesToChatContext(nodeIds: string[]) {
+    const nextIds = [...new Set([...chatContextNodeIds, ...nodeIds.filter(Boolean)])].slice(0, 8);
+    setChatContextNodeIds(nextIds);
+    setDetailTab("chat");
+  }
+
+  async function ensureActiveChatThread() {
+    if (activeChatThreadId) return activeChatThreadId;
+    const created = await createChatThread.mutateAsync("新对话");
+    return created.thread_id;
+  }
+
+  async function handleUploadChatFiles(files: FileList) {
+    if (!activeTaskId || !files.length) return;
+    const queue = Array.from(files);
+    setChatUploadingNames(queue.map((file) => file.name));
+    for (const file of queue) {
+      try {
+        await uploadChatAttachment.mutateAsync(file);
+      } finally {
+        setChatUploadingNames((current) => current.filter((name) => name !== file.name));
+      }
+    }
+  }
+
+  async function handleSendTaskChat() {
+    if (!activeTaskId || !chatDraft.trim() || chatStreaming) return;
+    const threadId = await ensureActiveChatThread();
+    const text = chatDraft.trim();
+    const contextIds = [...chatContextNodeIds];
+    const attachmentIds = chatAttachments.map((item) => item.attachment_id);
+
+    const userMessage: ChatMessage = {
+      id: Date.now(),
+      task_id: activeTaskId,
+      thread_id: threadId,
+      role: "user",
+      content: text,
+      context_node_ids: contextIds,
+      attachment_ids: attachmentIds,
+      provider: null,
+      model: null,
+      status: "done",
+      created_at: new Date().toISOString(),
+      updated_at: new Date().toISOString(),
+    };
+    const assistantMessage: ChatMessage = {
+      id: Date.now() + 1,
+      task_id: activeTaskId,
+      thread_id: threadId,
+      role: "assistant",
+      content: "",
+      context_node_ids: contextIds,
+      attachment_ids: attachmentIds,
+      provider: null,
+      model: null,
+      status: "streaming",
+      created_at: new Date().toISOString(),
+      updated_at: new Date().toISOString(),
+    };
+
+    setActiveChatThreadId(threadId);
+    setChatDraft("");
+    setChatStreamError("");
+    setChatStreaming(true);
+    setChatAttachments([]);
+    client.setQueryData<ChatMessageListResponse>(["task-chat-messages", activeTaskId, threadId], (current) => ({
+      task_id: activeTaskId,
+      thread_id: threadId,
+      items: [...(current?.items || []), userMessage, assistantMessage],
+    }));
+
+    chatAbortRef.current?.abort();
+    const controller = new AbortController();
+    chatAbortRef.current = controller;
+
+    try {
+      await apiPostSse(
+        `/api/v1/research/tasks/${activeTaskId}/chat/stream`,
+        {
+          thread_id: threadId,
+          message: text,
+          context_node_ids: contextIds,
+          attachment_ids: attachmentIds,
+        },
+        (eventType, payload) => {
+          if (eventType === "message_start") {
+            const nextThreadId = typeof payload.thread_id === "string" ? payload.thread_id : threadId;
+            if (nextThreadId && nextThreadId !== threadId) {
+              setActiveChatThreadId(nextThreadId);
+            }
+            return;
+          }
+
+          if (eventType === "message_delta") {
+            const delta = String(payload.delta || "");
+            if (!delta) return;
+            client.setQueryData<ChatMessageListResponse>(["task-chat-messages", activeTaskId, threadId], (current) => ({
+              task_id: activeTaskId,
+              thread_id: threadId,
+              items: (current?.items || []).map((item, index, items) =>
+                index === items.length - 1 && item.role === "assistant" ? { ...item, content: `${item.content}${delta}` } : item,
+              ),
+            }));
+            return;
+          }
+
+          if (eventType === "message_done") {
+            const finalMessage = payload.message as ChatMessage | undefined;
+            client.setQueryData<ChatMessageListResponse>(["task-chat-messages", activeTaskId, threadId], (current) => ({
+              task_id: activeTaskId,
+              thread_id: threadId,
+              items: (current?.items || []).map((item, index, items) =>
+                index === items.length - 1 && item.role === "assistant"
+                  ? {
+                      ...item,
+                      ...(finalMessage || {}),
+                      content: String(finalMessage?.content || item.content || ""),
+                      status: "done",
+                    }
+                  : item,
+              ),
+            }));
+            return;
+          }
+
+          if (eventType === "message_error") {
+            const errorText = String(payload.message || "聊天流返回失败");
+            setChatStreamError(errorText);
+            client.setQueryData<ChatMessageListResponse>(["task-chat-messages", activeTaskId, threadId], (current) => ({
+              task_id: activeTaskId,
+              thread_id: threadId,
+              items: (current?.items || []).map((item, index, items) =>
+                index === items.length - 1 && item.role === "assistant"
+                  ? {
+                      ...item,
+                      content: item.content || `本轮对话失败：${errorText}`,
+                      status: "failed",
+                    }
+                  : item,
+              ),
+            }));
+          }
+        },
+        controller.signal,
+      );
+      client.invalidateQueries({ queryKey: ["task-chat-threads", activeTaskId] });
+      client.invalidateQueries({ queryKey: ["task-chat-messages", activeTaskId, threadId] });
+    } catch (cause) {
+      const errorText = cause instanceof Error ? cause.message : String(cause);
+      setChatStreamError(errorText);
+      client.invalidateQueries({ queryKey: ["task-chat-messages", activeTaskId, threadId] });
+    } finally {
+      setChatStreaming(false);
+    }
+  }
+
+  async function handleCreateCollectionFromSheet() {
+    if (!activeProjectId || !collectionDraft.name.trim()) return;
+    const created = await createCollection.mutateAsync(collectionDraft);
+    if (pendingCollectionPaperIds.length && activeTaskId) {
+      await addItemsToCollection.mutateAsync({
+        collectionId: created.collection_id,
+        items: pendingCollectionPaperIds.map((paperId) => ({ task_id: activeTaskId, paper_id: paperId })),
+      });
+    }
+    setCollectionDraft({ name: "", description: "" });
+    closeCenterSheet();
   }
 
   async function handleAddSelectionToCollection() {
     if (!activeTaskId) return;
-    const selected = selectedPaperNodes(nodesRef.current);
-    if (!selected.length) {
+    if (!selectedPaperIds.length) {
       setActionStatus({ tone: "warning", text: "请先框选或多选论文节点，再加入 Collection。" });
       return;
     }
-    const collectionId = await ensureCollectionForSelection();
-    await addItemsToCollection.mutateAsync({
-      collectionId,
-      items: selected.map((node) => ({ task_id: activeTaskId, paper_id: node.id })),
-    });
+    setPendingCollectionPaperIds(selectedPaperIds);
+    openCenterSheet("collection");
   }
 
-  async function handleCreateStudyFromSelection() {
-    if (!activeTaskId) return;
-    const selected = selectedPaperNodes(nodesRef.current);
-    if (!selected.length) {
-      setActionStatus({ tone: "warning", text: "请先框选或多选论文节点，再派生研究任务。" });
-      return;
-    }
-    const collectionId = await ensureCollectionForSelection();
+  async function handleAttachSelectionToCollection(collectionId: string) {
+    if (!activeTaskId || !pendingCollectionPaperIds.length) return;
     await addItemsToCollection.mutateAsync({
       collectionId,
-      items: selected.map((node) => ({ task_id: activeTaskId, paper_id: node.id })),
+      items: pendingCollectionPaperIds.map((paperId) => ({ task_id: activeTaskId, paper_id: paperId })),
     });
-    await createStudyFromCollection.mutateAsync({ collectionId, topic: `${activeTask?.topic || "选中文献"} 派生研究` });
+    closeCenterSheet();
   }
 
   async function handleCompareSelection() {
-    const selected = selectedPaperNodes(nodesRef.current);
-    if (selected.length < 2) {
+    if (selectedPaperIds.length < 2) {
       setActionStatus({ tone: "warning", text: "请至少选中两篇论文再做对比" });
       return;
     }
-    await compareTaskPapers.mutateAsync({ paperIds: selected.map((node) => node.id) });
+    await compareTaskPapers.mutateAsync({ paperIds: selectedPaperIds });
   }
 
   const selectedRoundCandidates = useMemo(() => {
@@ -1190,15 +1419,8 @@ export function Workbench() {
   }, [roundCandidates, selectedNode?.data, selectedNode?.id]);
 
   const activeCollection = collectionDetailQuery.data || null;
-  const chatTargetNode = useMemo(
-    () => nodes.find((node) => node.id === chatTargetNodeId) || null,
-    [chatTargetNodeId, nodes],
-  );
-  const chatTargetHistory = useMemo(
-    () => (chatTargetNode ? chatByNode[chatTargetNode.id] || [] : []),
-    [chatByNode, chatTargetNode],
-  );
-  const chatTargetOptions = useMemo(
+  const chatMessages = chatMessagesQuery.data?.items || [];
+  const chatNodeOptions = useMemo(
     () =>
       nodes
         .filter((node) => !node.hidden)
@@ -1210,133 +1432,115 @@ export function Workbench() {
         .sort((left, right) => left.label.localeCompare(right.label, "zh-CN")),
     [nodes],
   );
+  const isResearchRunning =
+    activeTask?.mode === "openclaw_auto" ? activeTask.auto_status === "running" : ["planning", "searching"].includes(activeTask?.status || "");
+  const activeRunNodeIds = isResearchRunning ? eventsState.summary?.active_node_ids || [] : [];
+  const activeRunEdges = isResearchRunning ? eventsState.summary?.active_edges || [] : [];
+  const decoratedNodes = useMemo(
+    () =>
+      nodes.map((node) => ({
+        ...node,
+        data: {
+          ...node.data,
+          isActive: activeRunNodeIds.includes(node.id),
+        },
+      })),
+    [activeRunNodeIds, nodes],
+  );
+  const decoratedEdges = useMemo(
+    () =>
+      edges.map((edge) => {
+        const edgeKey = String(edge.id || "").startsWith("graph:")
+          ? String(edge.id).slice("graph:".length)
+          : `${edge.source}:${edge.target}:${String(edge.data && typeof edge.data === "object" && "type" in edge.data ? (edge.data as { type?: string }).type : edge.type || "default")}`;
+        const isActive = activeRunEdges.includes(edgeKey);
+        return isActive
+          ? {
+              ...edge,
+              animated: true,
+              style: { ...(edge.style || {}), stroke: "#10b981", strokeWidth: 3 },
+            }
+          : { ...edge, animated: false };
+      }),
+    [activeRunEdges, edges],
+  );
+  const toolbarButtonClass = "h-9 rounded-full px-3 text-xs";
+  const toolbarSelectClass = "h-9 rounded-full border border-slate-200 bg-white px-3 text-xs text-slate-600 outline-none";
 
   return (
     <>
-      <input
-        ref={zoteroFileInputRef}
-        type="file"
-        accept=".json,.csljson,.bib"
-        className="hidden"
-        onChange={(event) => {
-          const file = event.target.files?.[0];
-          event.currentTarget.value = "";
-          if (!file) return;
-          const baseName = file.name.replace(/\.[^.]+$/, "");
-          const customName = window.prompt("Collection 名称（可选，留空默认使用文件名）", baseName) || "";
-          importZoteroLocal.mutate({ file, collectionName: customName.trim() || undefined });
-        }}
-      />
       <AppShell
-      leftCollapsed={uiState.left_sidebar_collapsed}
-      rightCollapsed={uiState.right_sidebar_collapsed}
-      leftWidth={uiState.left_sidebar_width}
-      rightWidth={uiState.right_sidebar_width}
-      onToggleLeft={() => {
-        const next = { ...uiState, left_sidebar_collapsed: !uiState.left_sidebar_collapsed };
-        setUiState(next);
-        queueSave(nodesRef.current, edgesRef.current, viewportRef.current, next);
-      }}
-      onToggleRight={() => {
-        const next = { ...uiState, right_sidebar_collapsed: !uiState.right_sidebar_collapsed };
-        setUiState(next);
-        queueSave(nodesRef.current, edgesRef.current, viewportRef.current, next);
-      }}
-      onResizeLeft={(width) => {
-        const next = { ...uiState, left_sidebar_width: width };
-        setUiState(next);
-        queueSave(nodesRef.current, edgesRef.current, viewportRef.current, next);
-      }}
-      onResizeRight={(width) => {
-        const next = { ...uiState, right_sidebar_width: width };
-        setUiState(next);
-        queueSave(nodesRef.current, edgesRef.current, viewportRef.current, next);
-      }}
-      sidebar={
-        <ProjectSidebar
-          config={configQuery.data || null}
-          dashboard={dashboardQuery.data || null}
-          zoteroConfig={zoteroConfigQuery.data || null}
-          projects={projectsQuery.data?.items || []}
-          tasks={tasksQuery.data?.items || []}
-          collections={collectionsQuery.data?.items || []}
-          activeProjectId={activeProjectId}
-          activeTaskId={activeTaskId}
-          activeCollectionId={activeCollectionId}
-          activeTask={activeTask}
-          onSelectProject={(projectId) => {
-            setActiveProjectId(projectId);
-            setActiveTaskId("");
-            setRunId("");
-            setActiveCollectionId("");
-            setSelectedNodeId("");
-            setDetailTab("info");
-            setPdfUrl("");
-            setChatByNode({});
-            setChatTargetNodeId("");
-            setChatDraft("");
-            setRoundCandidates({});
-            setCompareReport(null);
-            setCollectionSearchText("");
-            setCollectionLimit(50);
-            setSelectedCollectionItemIds([]);
-            layoutSignatureRef.current = "";
-            setActionStatus(null);
-          }}
-          onSelectTask={(taskId) => {
-            if (taskId === activeTaskId) {
-              setActiveCollectionId("");
-              setSelectedNodeId("");
-              setDetailTab("info");
-              setPdfUrl("");
-              setActionStatus({ tone: "neutral", text: "已切回当前任务视图" });
-              return;
-            }
-            setActiveTaskId(taskId);
-            setActiveCollectionId("");
-            setSelectedNodeId("");
-            setDetailTab("info");
-            setPdfUrl("");
-            setChatByNode({});
-            setChatTargetNodeId("");
-            setChatDraft("");
-            setRoundCandidates({});
-            setCompareReport(null);
-            setCollectionSearchText("");
-            setCollectionLimit(50);
-            setSelectedCollectionItemIds([]);
-            layoutSignatureRef.current = "";
-            setActionStatus(null);
-          }}
-          onSelectCollection={(collectionId) => {
-            setActiveCollectionId(collectionId);
-            setSelectedNodeId("");
-          }}
-          onCreateProject={(payload) => createProject.mutate(payload)}
-          onCreateCollection={(payload) => createCollection.mutate(payload)}
-          onCreateTask={(payload) => createTask.mutate(payload)}
-          onQuickAction={(action) => workbenchAction.mutate({ type: "quick", action })}
-          onSearchDirection={(directionIndex) => workbenchAction.mutate({ type: "search_direction", directionIndex })}
-          onImportZoteroFile={() => zoteroFileInputRef.current?.click()}
-        />
-      }
+        leftCollapsed={false}
+        rightCollapsed={uiState.right_sidebar_collapsed}
+        leftWidth={FIXED_LEFT_RAIL_WIDTH}
+        rightWidth={uiState.right_sidebar_width}
+        onToggleLeft={() => undefined}
+        onToggleRight={() => {
+          const next = normalizeCanvasUi({ ...uiState, right_sidebar_collapsed: !uiState.right_sidebar_collapsed });
+          setUiState(next);
+          queueSave(nodesRef.current, edgesRef.current, viewportRef.current, next);
+        }}
+        onResizeLeft={() => undefined}
+        onResizeRight={(width) => {
+          const next = normalizeCanvasUi({ ...uiState, right_sidebar_width: width });
+          setUiState(next);
+          queueSave(nodesRef.current, edgesRef.current, viewportRef.current, next);
+        }}
+        sidebar={
+          <ProjectSidebar
+            activeEntry={activeSheetEntry}
+            projectCount={projectsQuery.data?.items?.length || 0}
+            taskCount={tasksQuery.data?.items?.length || 0}
+            collectionCount={collectionsQuery.data?.items?.length || 0}
+            onOpenEntry={openCenterSheet}
+          />
+        }
       canvas={
-        <main className="relative flex h-full flex-col overflow-hidden bg-[radial-gradient(circle_at_20%_20%,rgba(59,130,246,0.06),transparent_26%),radial-gradient(circle_at_80%_20%,rgba(16,185,129,0.05),transparent_20%),linear-gradient(to_bottom,white,white)]">
-          <div className="shrink-0 border-b border-slate-200 px-6 py-3">
-            <div className="flex flex-wrap items-end justify-between gap-x-4 gap-y-2">
-              <div className="min-w-0 flex-1">
+        <main className="relative h-full overflow-hidden bg-[radial-gradient(circle_at_20%_20%,rgba(59,130,246,0.06),transparent_26%),radial-gradient(circle_at_80%_20%,rgba(16,185,129,0.05),transparent_20%),linear-gradient(to_bottom,white,white)]">
+          <div className="border-b border-slate-200 px-6 py-4">
+            <div className="flex items-start justify-between gap-4">
+              <div>
                 <div className="text-xs font-semibold uppercase tracking-[0.18em] text-slate-400">Research Canvas</div>
                 <div className="mt-1 text-lg font-semibold text-slate-900">卡片式研究画布</div>
                 <div className="mt-1 text-sm text-slate-500">
                   {activeTask ? `${activeTask.topic} · ${merged.nodes.length} 个节点 / ${edgeCountLabel(merged.edges)}` : "请选择任务，或先在左侧创建一个新的研究任务。"}
                 </div>
-                {actionStatus ? <ActionBanner status={actionStatus} onDismiss={() => setActionStatus(null)} /> : null}
+                <div className="mt-1 text-xs text-slate-400">
+                  系统节点来自 canonical graph，手工节点与手工连线只写入 canvas state。多选论文卡片后可以直接加入 Collection 或做 Compare。
+                </div>
+                {actionStatus ? <ActionBanner status={actionStatus} /> : null}
               </div>
-              <div className="ml-auto flex max-w-full flex-wrap items-center justify-end gap-2">
+              <div className="flex items-center gap-2">
+                <div className="relative">
+                  <SmallButton
+                    tone="solid"
+                    className={toolbarButtonClass}
+                    onClick={() => setCardMenuOpen((current) => !current)}
+                  >
+                    添加卡片
+                  </SmallButton>
+                  {cardMenuOpen ? (
+                    <div className="absolute right-0 top-12 z-20 min-w-40 rounded-3xl border border-slate-200 bg-white p-2 shadow-[0_20px_44px_rgba(15,23,42,0.14)]">
+                      {(["note", "group", "report"] as ManualCardType[]).map((type) => (
+                        <button
+                          key={type}
+                          className="flex w-full items-center justify-between rounded-2xl px-3 py-2 text-left text-sm text-slate-700 transition hover:bg-slate-50"
+                          onClick={() => {
+                            addManualNode(type);
+                            setCardMenuOpen(false);
+                          }}
+                        >
+                          <span>{MANUAL_NODE_LABELS[type]}</span>
+                          <span className="text-xs text-slate-400">{type}</span>
+                        </button>
+                      ))}
+                    </div>
+                  ) : null}
+                </div>
                 <button
-                  className={`whitespace-nowrap rounded-full border px-3 py-1.5 text-xs ${uiState.show_minimap ? "border-slate-900 bg-slate-900 text-white" : "border-slate-200 bg-white text-slate-600"}`}
+                  className={`${toolbarButtonClass} border ${uiState.show_minimap ? "border-slate-900 bg-slate-900 text-white" : "border-slate-200 bg-white text-slate-600"}`}
                   onClick={() => {
-                    const next = { ...uiState, show_minimap: !uiState.show_minimap };
+                    const next = normalizeCanvasUi({ ...uiState, show_minimap: !uiState.show_minimap });
                     setUiState(next);
                     queueSave(nodesRef.current, edgesRef.current, viewportRef.current, next);
                   }}
@@ -1344,10 +1548,10 @@ export function Workbench() {
                   MiniMap
                 </button>
                 <select
-                  className="min-w-0 rounded-full border border-slate-200 bg-white px-3 py-1.5 text-xs text-slate-600"
+                  className={toolbarSelectClass}
                   value={uiState.layout_mode}
                   onChange={(event) => {
-                    const next = { ...uiState, layout_mode: event.target.value };
+                    const next = normalizeCanvasUi({ ...uiState, layout_mode: event.target.value });
                     setUiState(next);
                     layoutSignatureRef.current = "";
                     setRelayoutNonce((current) => current + 1);
@@ -1358,7 +1562,7 @@ export function Workbench() {
                   <option value="elk_stress">自由图谱</option>
                 </select>
                 <button
-                  className="whitespace-nowrap rounded-full border border-slate-200 bg-white px-3 py-1.5 text-xs text-slate-600"
+                  className={`${toolbarButtonClass} border border-slate-200 bg-white text-slate-600`}
                   onClick={() => {
                     layoutSignatureRef.current = "";
                     setRelayoutNonce((current) => current + 1);
@@ -1366,24 +1570,37 @@ export function Workbench() {
                 >
                   重新布局
                 </button>
-                <div className="whitespace-nowrap rounded-full border border-slate-200 bg-white px-3 py-1.5 text-xs text-slate-600">已选论文 {selectedPaperCount}</div>
+                <div className={`${toolbarButtonClass} inline-flex items-center rounded-full border border-slate-200 bg-white text-slate-600`}>已选论文 {selectedPaperCount}</div>
               </div>
             </div>
-          </div>
-
-          <div className="relative min-h-0 flex-1">
-            {taskProgress ? (
-              <div className="pointer-events-none absolute left-6 top-5 z-10 w-[min(37.333rem,calc(100%-3rem))]">
-                <div className="pointer-events-auto">
-                  <TaskProgress key={activeTask?.task_id || "task-progress"} progress={taskProgress} />
+            {eventsState.summary?.running_label ? (
+              <div className="mt-4 flex flex-wrap items-center gap-2">
+                <div
+                  className={`rounded-full border px-3 py-1 text-xs font-medium ${
+                    isResearchRunning ? "border-emerald-200 bg-emerald-50 text-emerald-700" : "border-slate-200 bg-white text-slate-500"
+                  }`}
+                >
+                  {isResearchRunning ? "正在执行" : "最近阶段"} · {eventsState.summary.running_label}
                 </div>
+                {isResearchRunning && activeRunNodeIds.length ? (
+                  <div className="rounded-full border border-slate-200 bg-white px-3 py-1 text-xs text-slate-500">
+                    活跃节点 {activeRunNodeIds.length}
+                  </div>
+                ) : null}
+                {isResearchRunning && activeRunEdges.length ? (
+                  <div className="rounded-full border border-slate-200 bg-white px-3 py-1 text-xs text-slate-500">
+                    活跃连线 {activeRunEdges.length}
+                  </div>
+                ) : null}
               </div>
             ) : null}
+          </div>
+
+          <div className="h-[calc(100%-86px)]">
             <ResearchCanvas
-              nodes={nodes}
-              edges={edges}
+              nodes={decoratedNodes}
+              edges={decoratedEdges}
               showMiniMap={uiState.show_minimap}
-              miniMapBottomOffset={miniMapBottomOffset}
               flowRef={flowRef}
               onNodesChange={handleNodesChange}
               onEdgesChange={onEdgesChange}
@@ -1393,15 +1610,17 @@ export function Workbench() {
                 queueSave(nodesRef.current, nextEdges);
               }}
               onNodeClick={(nodeId) => {
+                syncCanvasSelection([nodeId]);
                 setSelectedNodeId(nodeId);
                 setActiveCollectionId("");
                 setDetailTab("info");
-                setPdfUrl("");
-                if (!chatTargetNodeId) {
-                  setChatTargetNodeId(nodeId);
-                }
+                setAssetPreviewState(null);
+                setCardMenuOpen(false);
               }}
-              onPaneClick={() => setSelectedNodeId("")}
+              onPaneClick={() => {
+                syncCanvasSelection([]);
+                setCardMenuOpen(false);
+              }}
               onMoveStart={() => {
                 interactionLockRef.current = true;
               }}
@@ -1423,7 +1642,7 @@ export function Workbench() {
                 interactionLockRef.current = false;
                 queueSave(nodesRef.current, edgesRef.current);
               }}
-              onSelectionChange={() => undefined}
+              onSelectionChange={(selection) => syncCanvasSelection(selection.nodes.map((node) => node.id))}
               onNodesDelete={() => undefined}
               onEdgesDelete={(deleted) => {
                 const deletedIds = new Set(deleted.filter((edge) => !String(edge.id).startsWith("graph:")).map((edge) => edge.id));
@@ -1434,14 +1653,54 @@ export function Workbench() {
             />
           </div>
 
-          <QuickActionBar
-            selectedPaperCount={selectedPaperCount}
-            hiddenNodeCount={hiddenNodeCount}
-            onHeightChange={(height) => setMiniMapBottomOffset(Math.max(108, height + 32))}
-            onAddNote={() => addManualNode("note")}
-            onAddQuestion={() => addManualNode("question")}
-            onAddReference={() => addManualNode("reference")}
-            onAddGroup={() => addManualNode("group")}
+          <CanvasActionBar
+            selectionLabel={
+              selectedPaperCount > 1
+                ? `已选 ${selectedPaperCount} 篇论文`
+                : selectedNode
+                  ? `已选节点 · ${String(selectedNode.data?.label || selectedNode.id)}`
+                  : ""
+            }
+            multiPaper={selectedPaperCount > 1}
+            singleNodeType={selectedPaperCount > 1 ? null : String(selectedNode?.data?.type || "")}
+            canDeleteOrHide={Boolean(selectedNode)}
+            deleteOrHideLabel={selectedNode?.data?.isManual ? "删除节点" : "隐藏节点"}
+            onDeleteOrHide={deleteSelectedNode}
+            onReferenceToChat={() => {
+              const ids = selectedPaperCount > 1 ? selectedPaperIds : selectedNodeId ? [selectedNodeId] : [];
+              addNodesToChatContext(ids);
+            }}
+            onOpenPdf={() => {
+              if (!openExternalUrl(resolvedPaperPdfUrl)) {
+                setActionStatus({ tone: "warning", text: "当前论文还没有可打开的 PDF。" });
+              }
+            }}
+            onDownloadPdf={() => {
+              if (!downloadExternalUrl(resolvedPaperPdfUrl, resolvedPaperPdfFilename)) {
+                setActionStatus({ tone: "warning", text: "当前论文还没有可下载的 PDF。" });
+              }
+            }}
+            onSummarizePaper={() => selectedPaperId && workbenchAction.mutate({ type: "summarize_paper", paperId: selectedPaperId })}
+            onRebuildVisual={() => rebuildPaperVisual.mutate()}
+            onSearchDirection={() => selectedNode?.data?.direction_index && workbenchAction.mutate({ type: "search_direction", directionIndex: selectedNode.data.direction_index })}
+            onStartExplore={() => selectedNode?.data?.direction_index && workbenchAction.mutate({ type: "start_explore", directionIndex: selectedNode.data.direction_index })}
+            onBuildGraph={() =>
+              workbenchAction.mutate({
+                type: "build_graph",
+                directionIndex: typeof selectedNode?.data?.direction_index === "number" ? selectedNode.data.direction_index : undefined,
+                roundId: selectedNode ? inferRoundId(selectedNode.id, selectedNode.data) || undefined : undefined,
+              })
+            }
+            onProposeCandidates={() => {
+              const roundId = selectedNode ? inferRoundId(selectedNode.id, selectedNode.data) : null;
+              if (!roundId) return;
+              workbenchAction.mutate({ type: "propose", roundId, action: "expand", feedbackText: "" });
+            }}
+            onNextRound={() => {
+              const roundId = selectedNode ? inferRoundId(selectedNode.id, selectedNode.data) : null;
+              if (!roundId) return;
+              workbenchAction.mutate({ type: "next_round", roundId, intentText: "继续围绕当前轮次扩展高价值证据。" });
+            }}
             onAddToCollection={() => {
               handleAddSelectionToCollection().catch((cause) => {
                 setActionStatus({ tone: "danger", text: cause instanceof Error ? cause.message : String(cause) });
@@ -1452,28 +1711,25 @@ export function Workbench() {
                 setActionStatus({ tone: "danger", text: cause instanceof Error ? cause.message : String(cause) });
               });
             }}
-            onCreateStudyFromSelection={() => {
-              handleCreateStudyFromSelection().catch((cause) => {
-                setActionStatus({ tone: "danger", text: cause instanceof Error ? cause.message : String(cause) });
-              });
-            }}
-            onRestoreHiddenNodes={restoreHiddenNodes}
-            onSaveCanvas={() => queueSave(nodesRef.current, edgesRef.current)}
           />
         </main>
       }
       detail={
-        <aside className="flex h-full min-h-0 flex-col bg-slate-50/60 p-5">
-          <div className="rounded-3xl border border-slate-200 bg-white p-2 shadow-sm">
+        <aside className="flex h-full min-h-0 flex-col bg-[radial-gradient(circle_at_top,#f8fafc_0%,#eef2f7_100%)] p-5">
+          <div className="rounded-[28px] border border-slate-200/80 bg-white/85 p-2 shadow-[0_12px_36px_rgba(15,23,42,0.08)] backdrop-blur">
             <div className="flex gap-2">
               <button
-                className={`flex-1 rounded-2xl px-3 py-2 text-sm font-medium transition ${detailTab === "info" ? "bg-slate-900 text-white" : "bg-slate-50 text-slate-600 hover:bg-slate-100"}`}
+                className={`flex-1 rounded-2xl px-3 py-2 text-sm font-medium transition ${
+                  detailTab === "info" ? "bg-slate-900 text-white shadow-sm" : "bg-slate-50 text-slate-600 hover:bg-slate-100"
+                }`}
                 onClick={() => setDetailTab("info")}
               >
                 展示信息
               </button>
               <button
-                className={`flex-1 rounded-2xl px-3 py-2 text-sm font-medium transition ${detailTab === "chat" ? "bg-slate-900 text-white" : "bg-slate-50 text-slate-600 hover:bg-slate-100"}`}
+                className={`flex-1 rounded-2xl px-3 py-2 text-sm font-medium transition ${
+                  detailTab === "chat" ? "bg-slate-900 text-white shadow-sm" : "bg-slate-50 text-slate-600 hover:bg-slate-100"
+                }`}
                 onClick={() => setDetailTab("chat")}
               >
                 对话
@@ -1485,27 +1741,48 @@ export function Workbench() {
             {detailTab === "chat" ? (
               <ContextChatPanel
                 disabled={!activeTaskId}
-                nodeOptions={chatTargetOptions}
-                activeNodeId={chatTargetNodeId}
-                activeNodeLabel={chatTargetNode?.data?.label}
-                activeNodeType={chatTargetNode?.data?.type}
-                history={chatTargetHistory}
-                question={chatDraft}
-                busy={nodeChat.isPending}
-                onQuestionChange={setChatDraft}
-                onSelectNode={(nodeId) => setChatTargetNodeId(nodeId)}
-                onSend={(question, threadId) => chatTargetNodeId && nodeChat.mutate({ nodeId: chatTargetNodeId, question, threadId })}
+                taskTitle={activeTask?.topic || ""}
+                threads={chatThreadsQuery.data?.items || []}
+                activeThreadId={activeChatThreadId}
+                messages={chatMessages}
+                nodeOptions={chatNodeOptions}
+                contextNodeIds={chatContextNodeIds}
+                attachments={chatAttachments}
+                uploadingNames={chatUploadingNames}
+                draft={chatDraft}
+                busy={chatStreaming || createChatThread.isPending}
+                streaming={chatStreaming}
+                error={chatStreamError}
+                onDraftChange={setChatDraft}
+                onSelectThread={setActiveChatThreadId}
+                onNewThread={() => {
+                  createChatThread.mutate("新对话");
+                  setChatContextNodeIds([]);
+                  setChatAttachments([]);
+                  setChatDraft("");
+                  setChatStreamError("");
+                }}
+                onSend={() => {
+                  handleSendTaskChat().catch((cause) => {
+                    setChatStreamError(cause instanceof Error ? cause.message : String(cause));
+                  });
+                }}
+                onUploadFiles={(files) => {
+                  handleUploadChatFiles(files).catch((cause) => {
+                    setActionStatus({ tone: "danger", text: cause instanceof Error ? cause.message : String(cause) });
+                  });
+                }}
+                onRemoveAttachment={(attachmentId) => setChatAttachments((current) => current.filter((item) => item.attachment_id !== attachmentId))}
+                onAddContextNode={(nodeId) => setChatContextNodeIds((current) => [...new Set([...current, nodeId])].slice(0, 8))}
+                onRemoveContextNode={(nodeId) => setChatContextNodeIds((current) => current.filter((item) => item !== nodeId))}
+                onUseSuggestion={setChatDraft}
                 onSaveAnswer={saveChatAnswerAsNode}
               />
             ) : (
               <div className="space-y-4">
-                <div className="rounded-3xl border border-slate-200 bg-white p-4 shadow-sm">
-                  <SectionTitle
-                    eyebrow="Task Overview"
-                    title={activeTask?.topic || "当前任务"}
-                    description={activeTask ? `${activeTask.mode === "openclaw_auto" ? "OpenClaw Auto" : "GPT Step"} · ${activeTask.status}` : "选中任务后，这里会显示导出、全文和运行概况。"}
-                  />
-                  <div className="mt-3 flex flex-wrap gap-2">
+                <div className="rounded-3xl border border-slate-200 bg-white p-3 shadow-sm">
+                  <div className="flex flex-wrap items-center gap-2">
+                    <div className="mr-auto px-1 text-xs font-semibold uppercase tracking-[0.16em] text-slate-400">Task Export</div>
                     <SmallButton disabled={!activeTask} onClick={() => exportTask.mutate("md")}>
                       导出 MD
                     </SmallButton>
@@ -1519,92 +1796,39 @@ export function Workbench() {
                       导出 JSON
                     </SmallButton>
                   </div>
-                  {taskExportsQuery.data?.items?.length ? (
-                    <div className="mt-3 space-y-2">
-                      {taskExportsQuery.data.items.slice(0, 3).map((item) => (
-                        <div key={item.id} className="rounded-2xl border border-slate-200 bg-slate-50 p-3 text-xs text-slate-600">
-                          <div className="font-medium text-slate-900">
-                            {item.format.toUpperCase()} · {item.status}
-                          </div>
-                          {item.filename ? <div className="mt-1 text-slate-500">{item.filename}</div> : null}
-                          {item.output_path ? <div className="mt-1 break-all">{item.output_path}</div> : null}
-                          <div className="mt-2 flex flex-wrap gap-2">
-                            {item.download_url ? (
-                              <SmallButton onClick={() => downloadExternalUrl(item.download_url, item.filename)}>打开 / 下载</SmallButton>
-                            ) : null}
-                          </div>
-                        </div>
-                      ))}
-                    </div>
-                  ) : null}
-                  {venueMetricsQuery.data?.items?.length ? (
-                    <div className="mt-4 rounded-2xl border border-slate-200 bg-slate-50 p-3">
-                      <div className="flex items-center justify-between gap-3">
-                        <div className="text-xs font-semibold uppercase tracking-[0.16em] text-slate-400">Venue Metrics</div>
-                        <button
-                          type="button"
-                          className="rounded-full border border-slate-200 px-2 py-1 text-xs text-slate-500 transition hover:border-slate-300 hover:bg-white"
-                          aria-expanded={!venueMetricsCollapsed}
-                          aria-label={venueMetricsCollapsed ? "展开 Venue Metrics" : "折叠 Venue Metrics"}
-                          onClick={() => setVenueMetricsCollapsed((current) => !current)}
-                        >
-                          {venueMetricsCollapsed ? "展开" : "折叠"}
-                        </button>
-                      </div>
-                      <div
-                        className={`grid transition-all duration-300 ease-out ${venueMetricsCollapsed ? "grid-rows-[0fr] opacity-0" : "mt-3 grid-rows-[1fr] opacity-100"}`}
-                      >
-                        <div className="overflow-hidden">
-                          <div className="space-y-2">
-                            {venueMetricsQuery.data.items.slice(0, 8).map((item) => (
-                              <div key={item.venue_key} className="rounded-2xl border border-slate-200 bg-white p-3 text-sm">
-                                <div className="flex items-start justify-between gap-3">
-                                  <div>
-                                    <div className="font-medium text-slate-900">{item.venue}</div>
-                                    <div className="mt-1 text-xs text-slate-500">
-                                      {item.source_type || "类型未知"} · {item.paper_count} 篇论文
-                                    </div>
-                                  </div>
-                                  <div className="text-right text-xs text-slate-500">{formatVenueMetricSummary(item) || "暂无分级数据"}</div>
-                                </div>
-                              </div>
-                            ))}
-                          </div>
-                        </div>
-                      </div>
-                    </div>
-                  ) : null}
                 </div>
 
                 <ComparePanel report={compareReport} onSaveAsNote={() => saveCompareAsNode("note")} onSaveAsReport={() => saveCompareAsNode("report")} onClose={() => setCompareReport(null)} />
 
-                <CollectionDetailPanel
-                  collection={activeCollection}
-                  exportHistory={collectionExportsQuery.data?.items || []}
-                  searchText={collectionSearchText}
-                  selectedItemIds={selectedCollectionItemIds}
-                  onSearchTextChange={setCollectionSearchText}
-                  onToggleItem={(itemId) =>
-                    setSelectedCollectionItemIds((current) => (current.includes(itemId) ? current.filter((value) => value !== itemId) : [...current, itemId]))
-                  }
-                  onToggleAllVisible={(itemIds) =>
-                    setSelectedCollectionItemIds((current) => {
-                      const allSelected = itemIds.every((itemId) => current.includes(itemId));
-                      if (allSelected) {
-                        return current.filter((value) => !itemIds.includes(value));
-                      }
-                      return [...new Set([...current, ...itemIds])];
-                    })
-                  }
-                  onSummarize={() => activeCollectionId && summarizeCollection.mutate(activeCollectionId)}
-                  onCreateStudy={() => activeCollectionId && createStudyFromCollection.mutate({ collectionId: activeCollectionId })}
-                  onBuildGraph={() => activeCollectionId && buildCollectionGraph.mutate(activeCollectionId)}
-                  onCompare={() => activeCollectionId && compareCollection.mutate({ collectionId: activeCollectionId })}
-                  onRemoveSelected={() => activeCollectionId && selectedCollectionItemIds.length && removeCollectionItems.mutate({ collectionId: activeCollectionId, itemIds: selectedCollectionItemIds })}
-                  onExportBib={() => activeCollectionId && exportCollection.mutate({ collectionId: activeCollectionId, format: "bib" })}
-                  onExportCslJson={() => activeCollectionId && exportCollection.mutate({ collectionId: activeCollectionId, format: "csljson" })}
-                  onLoadMore={() => setCollectionLimit((current) => current + 50)}
-                />
+                {activeCollection ? (
+                  <CollectionDetailPanel
+                    collection={activeCollection}
+                    exportHistory={collectionExportsQuery.data?.items || []}
+                    searchText={collectionSearchText}
+                    selectedItemIds={selectedCollectionItemIds}
+                    onSearchTextChange={setCollectionSearchText}
+                    onToggleItem={(itemId) =>
+                      setSelectedCollectionItemIds((current) => (current.includes(itemId) ? current.filter((value) => value !== itemId) : [...current, itemId]))
+                    }
+                    onToggleAllVisible={(itemIds) =>
+                      setSelectedCollectionItemIds((current) => {
+                        const allSelected = itemIds.every((itemId) => current.includes(itemId));
+                        if (allSelected) {
+                          return current.filter((value) => !itemIds.includes(value));
+                        }
+                        return [...new Set([...current, ...itemIds])];
+                      })
+                    }
+                    onSummarize={() => activeCollectionId && summarizeCollection.mutate(activeCollectionId)}
+                    onCreateStudy={() => activeCollectionId && createStudyFromCollection.mutate({ collectionId: activeCollectionId })}
+                    onBuildGraph={() => activeCollectionId && buildCollectionGraph.mutate(activeCollectionId)}
+                    onCompare={() => activeCollectionId && compareCollection.mutate({ collectionId: activeCollectionId })}
+                    onRemoveSelected={() => activeCollectionId && selectedCollectionItemIds.length && removeCollectionItems.mutate({ collectionId: activeCollectionId, itemIds: selectedCollectionItemIds })}
+                    onExportBib={() => activeCollectionId && exportCollection.mutate({ collectionId: activeCollectionId, format: "bib" })}
+                    onExportCslJson={() => activeCollectionId && exportCollection.mutate({ collectionId: activeCollectionId, format: "csljson" })}
+                    onLoadMore={() => setCollectionLimit((current) => current + 50)}
+                  />
+                ) : null}
 
                 <DetailPanel
                   mode={activeTask?.mode || "gpt_step"}
@@ -1616,20 +1840,18 @@ export function Workbench() {
                   onToggleHidden={toggleSelectedHidden}
                   onDeleteNode={deleteSelectedNode}
                   onOpenPdf={() => {
-                    const pdf = paperAssetQuery.data?.items.find((item) => item.kind === "pdf" && item.status === "available");
-                    if (!pdf?.open_url && !pdf?.download_url) {
+                    if (!resolvedPaperPdfUrl) {
                       setActionStatus({ tone: "warning", text: "当前论文还没有可打开的 PDF。" });
                       return;
                     }
-                    openExternalUrl(pdf?.open_url || pdf?.download_url);
+                    openExternalUrl(resolvedPaperPdfUrl);
                   }}
                   onDownloadPdf={() => {
-                    const pdf = paperAssetQuery.data?.items.find((item) => item.kind === "pdf" && item.status === "available");
-                    if (!pdf?.download_url && !pdf?.open_url) {
+                    if (!resolvedPaperPdfUrl) {
                       setActionStatus({ tone: "warning", text: "当前论文还没有可下载的 PDF。" });
                       return;
                     }
-                    downloadExternalUrl(pdf?.download_url || pdf?.open_url, pdf?.filename || "paper.pdf");
+                    downloadExternalUrl(resolvedPaperPdfUrl, resolvedPaperPdfFilename);
                   }}
                   onOpenAsset={(url) => {
                     if (!openExternalUrl(url)) {
@@ -1640,6 +1862,19 @@ export function Workbench() {
                     if (!downloadExternalUrl(url, filename)) {
                       setActionStatus({ tone: "warning", text: "当前资产还不能下载。" });
                     }
+                  }}
+                  onPreviewTextAsset={(item: PaperAssetItem) => {
+                    const url = item.open_url || item.download_url;
+                    if (!url) {
+                      setActionStatus({ tone: "warning", text: "当前文本资产还不能预览。" });
+                      return;
+                    }
+                    setAssetPreviewState({
+                      title: item.kind === "txt" ? "论文文本" : item.kind === "md" ? "Markdown" : item.kind === "bib" ? "BibTeX" : item.kind,
+                      kind: item.kind,
+                      url,
+                      filename: item.filename,
+                    });
                   }}
                   onSavePaper={() => selectedPaperId && workbenchAction.mutate({ type: "save_paper", paperId: selectedPaperId })}
                   onSummarizePaper={() => selectedPaperId && workbenchAction.mutate({ type: "summarize_paper", paperId: selectedPaperId })}
@@ -1653,7 +1888,7 @@ export function Workbench() {
                   onAskPreset={(question) => {
                     setDetailTab("chat");
                     if (selectedNode?.id) {
-                      setChatTargetNodeId(selectedNode.id);
+                      addNodesToChatContext([selectedNode.id]);
                     }
                     setChatDraft(question);
                   }}
@@ -1665,56 +1900,405 @@ export function Workbench() {
                   runId={runId}
                   events={eventsState.items}
                   summary={eventsState.summary}
+                  providerStatus={configQuery.data?.provider_status || []}
                   error={eventsState.error}
+                  onStart={() => workbenchAction.mutate({ type: "quick", action: "auto_start" })}
                   onGuidance={(text) => workbenchAction.mutate({ type: "guidance", text })}
                   onContinue={() => workbenchAction.mutate({ type: "auto_continue" })}
                   onCancel={() => workbenchAction.mutate({ type: "auto_cancel" })}
                 />
-
-                {selectedNode && isPaperNode(selectedNode.id) ? (
-                  <PdfPanel
-                    taskId={activeTaskId}
-                    paperId={selectedPaperId}
-                    previewUrl={pdfUrl}
-                    assets={paperAssetQuery.data || null}
-                    fulltextItem={selectedFulltextItem}
-                    fulltextSummary={fulltextStatusQuery.data?.summary || null}
-                    busy={uploadPdf.isPending || workbenchAction.isPending || rebuildPaperVisual.isPending}
-                    onClose={() => setPdfUrl("")}
-                    onPreviewPdf={(url) => setPdfUrl(resolveBrowserUrl(url))}
-                    onOpenAsset={(url) => {
-                      if (!openExternalUrl(url)) {
-                        setActionStatus({ tone: "warning", text: "当前资产还不能打开。" });
-                      }
-                    }}
-                    onDownloadAsset={(url, filename) => {
-                      if (!downloadExternalUrl(url, filename)) {
-                        setActionStatus({ tone: "warning", text: "当前资产还不能下载。" });
-                      }
-                    }}
-                    onBuildFulltext={() => workbenchAction.mutate({ type: "quick", action: "build_fulltext" })}
-                    onRetryFulltext={() =>
-                      apiFetch(`/api/v1/research/tasks/${activeTaskId}/fulltext/retry?paper_ids=${encodeURIComponent(selectedPaperId)}`, {
-                        method: "POST",
-                      })
-                        .then(() => {
-                          setActionStatus({ tone: "success", text: "已提交全文重试请求" });
-                          client.invalidateQueries({ queryKey: ["fulltext-status", activeTaskId] });
-                        })
-                        .catch((cause) => {
-                          setActionStatus({ tone: "danger", text: cause instanceof Error ? cause.message : String(cause) });
-                        })
-                    }
-                    onUploadPdf={(file) => uploadPdf.mutate(file)}
-                    onRebuildVisual={() => rebuildPaperVisual.mutate()}
-                  />
-                ) : null}
               </div>
             )}
           </div>
         </aside>
       }
       />
+      {assetPreviewState ? (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/30 px-6 py-10 backdrop-blur-sm">
+          <div className="flex max-h-[82vh] w-full max-w-4xl flex-col overflow-hidden rounded-[32px] border border-white/70 bg-white shadow-[0_24px_80px_rgba(15,23,42,0.22)]">
+            <div className="flex items-start justify-between gap-4 border-b border-slate-200 px-6 py-5">
+              <div className="min-w-0">
+                <div className="text-[11px] font-semibold uppercase tracking-[0.18em] text-slate-400">Asset Preview</div>
+                <div className="mt-1 truncate text-xl font-semibold text-slate-900">{assetPreviewState.title}</div>
+                {assetPreviewState.filename ? <div className="mt-1 truncate text-xs text-slate-500">{assetPreviewState.filename}</div> : null}
+              </div>
+              <SmallButton onClick={() => setAssetPreviewState(null)}>关闭</SmallButton>
+            </div>
+            <div className="min-h-0 flex-1 overflow-auto bg-slate-50 p-6">
+              {assetPreviewQuery.isLoading ? <div className="rounded-2xl bg-white p-4 text-sm text-slate-500">正在加载文本资产...</div> : null}
+              {assetPreviewQuery.error ? (
+                <div className="rounded-2xl border border-rose-200 bg-rose-50 p-4 text-sm text-rose-700">
+                  {assetPreviewQuery.error instanceof Error ? assetPreviewQuery.error.message : "文本资产加载失败"}
+                </div>
+              ) : null}
+              {assetPreviewQuery.data ? (
+                <pre className="whitespace-pre-wrap break-words rounded-3xl border border-slate-200 bg-white p-5 text-sm leading-7 text-slate-700">
+                  {assetPreviewQuery.data}
+                </pre>
+              ) : null}
+            </div>
+          </div>
+        </div>
+      ) : null}
+      {centerSheetMode ? (
+        <div className="fixed inset-0 z-40 flex items-center justify-center bg-slate-950/30 px-6 py-10 backdrop-blur-sm">
+          <div className="w-full max-w-5xl overflow-hidden rounded-[32px] border border-white/70 bg-white shadow-[0_24px_80px_rgba(15,23,42,0.22)]">
+            <div className="flex items-start justify-between border-b border-slate-200 px-6 py-5">
+              <div>
+                <div className="text-[11px] font-semibold uppercase tracking-[0.18em] text-slate-400">Workspace Sheet</div>
+                <div className="mt-1 text-xl font-semibold text-slate-900">
+                  {centerSheetMode === "overview"
+                    ? "工作台总览"
+                    : centerSheetMode === "project"
+                      ? "项目面板"
+                      : centerSheetMode === "task"
+                        ? "任务面板"
+                        : centerSheetMode === "collection"
+                          ? "Collection 面板"
+                          : "导入文献"}
+                </div>
+                <div className="mt-1 text-sm text-slate-500">
+                  {centerSheetMode === "overview"
+                    ? "从这里查看当前项目概览、最近任务，并跳转到对应配置面板。"
+                    : centerSheetMode === "project"
+                      ? "左侧只保留项目入口，具体的选择与新建在中央完成。"
+                      : centerSheetMode === "task"
+                        ? "在当前项目内切换任务，或创建新的研究任务。"
+                        : centerSheetMode === "collection"
+                          ? pendingCollectionPaperIds.length
+                            ? `将 ${pendingCollectionPaperIds.length} 篇已选论文加入已有 Collection，或先新建 Collection。`
+                            : "在当前项目内选择 Collection，或创建新的可复用论文集合。"
+                          : "推荐导入 Zotero Desktop 导出的 CSL JSON 或 BibTeX 文件。"}
+                </div>
+              </div>
+              <SmallButton onClick={closeCenterSheet}>关闭</SmallButton>
+            </div>
+
+            {centerSheetMode === "overview" ? (
+              <div className="grid gap-6 px-6 py-6 md:grid-cols-[1.05fr,0.95fr]">
+                <div className="space-y-4">
+                  <div className="grid grid-cols-2 gap-3">
+                    <MetricPanel label="项目" value={String(projectsQuery.data?.items?.length || 0)} />
+                    <MetricPanel label="任务" value={String(tasksQuery.data?.items?.length || 0)} />
+                    <MetricPanel label="Collection" value={String(collectionsQuery.data?.items?.length || 0)} />
+                    <MetricPanel label="论文" value={String(dashboardQuery.data?.paper_count || 0)} />
+                  </div>
+                  <div className="rounded-[28px] border border-slate-200 bg-slate-50 p-5">
+                    <div className="text-sm font-semibold text-slate-900">当前项目</div>
+                    <div className="mt-3 text-lg font-semibold text-slate-900">{activeProject?.name || "未选择项目"}</div>
+                    <div className="mt-2 text-sm leading-6 text-slate-600">
+                      {activeProject?.description || "项目用于组织长期主题，任务承载具体研究流程，Collection 用来沉淀可复用的论文集合。"}
+                    </div>
+                    {activeTask ? (
+                      <div className="mt-4 rounded-2xl border border-slate-200 bg-white p-4">
+                        <div className="text-xs font-semibold uppercase tracking-[0.16em] text-slate-400">当前任务</div>
+                        <div className="mt-2 text-sm font-medium text-slate-900">{activeTask.topic}</div>
+                        <div className="mt-1 text-xs text-slate-500">
+                          {activeTask.mode === "openclaw_auto" ? "OpenClaw Auto" : "GPT Step"} · {activeTask.status}
+                        </div>
+                      </div>
+                    ) : null}
+                  </div>
+                </div>
+                <div className="rounded-[28px] border border-slate-200 bg-white p-5">
+                  <div className="text-sm font-semibold text-slate-900">快捷入口</div>
+                  <div className="mt-4 grid gap-3">
+                    <SmallButton tone="solid" onClick={() => openCenterSheet("project")}>
+                      打开项目面板
+                    </SmallButton>
+                    <SmallButton onClick={() => openCenterSheet("task")}>打开任务面板</SmallButton>
+                    <SmallButton onClick={() => openCenterSheet("collection")}>打开 Collection 面板</SmallButton>
+                    <SmallButton onClick={() => openCenterSheet("import")}>导入文献</SmallButton>
+                  </div>
+                  <div className="mt-4 rounded-2xl border border-slate-200 bg-slate-50 p-4 text-sm leading-6 text-slate-600">
+                    当前左侧栏只保留入口按钮，所有详细配置、列表切换和导入动作都统一收口到这里。
+                  </div>
+                </div>
+              </div>
+            ) : null}
+
+            {centerSheetMode === "project" ? (
+              <div className="grid gap-6 px-6 py-6 md:grid-cols-[1.1fr,0.9fr]">
+                <div className="rounded-[28px] border border-slate-200 bg-white p-5">
+                  <div className="text-sm font-semibold text-slate-900">项目列表</div>
+                  <div className="mt-4 space-y-3">
+                    {(projectsQuery.data?.items || []).map((project) => (
+                      <button
+                        key={project.project_id}
+                        className={`w-full rounded-3xl border px-4 py-4 text-left transition ${
+                          project.project_id === activeProjectId ? "border-slate-900 bg-slate-900 text-white" : "border-slate-200 bg-slate-50 hover:border-slate-300"
+                        }`}
+                        onClick={() => selectProject(project.project_id)}
+                      >
+                        <div className="flex items-center justify-between gap-3">
+                          <div className="line-clamp-1 text-sm font-medium">{project.name}</div>
+                          <div className={`text-[11px] ${project.project_id === activeProjectId ? "text-slate-300" : "text-slate-400"}`}>
+                            任务 {project.task_count} · Collection {project.collection_count}
+                          </div>
+                        </div>
+                      </button>
+                    ))}
+                  </div>
+                </div>
+                <div className="rounded-[28px] border border-slate-200 bg-slate-50 p-5">
+                  <div className="text-sm font-semibold text-slate-900">新建项目</div>
+                  <div className="mt-4 space-y-4">
+                    <label className="block">
+                      <div className="text-sm font-medium text-slate-900">项目名称</div>
+                      <input
+                        className="mt-2 w-full rounded-2xl border border-slate-200 bg-white px-3 py-2 text-sm outline-none"
+                        value={projectDraft.name}
+                        onChange={(event) => setProjectDraft((current) => ({ ...current, name: event.target.value }))}
+                        placeholder="例如：Embodied AI Long-term Study"
+                      />
+                    </label>
+                    <label className="block">
+                      <div className="text-sm font-medium text-slate-900">说明</div>
+                      <textarea
+                        className="mt-2 h-28 w-full rounded-3xl border border-slate-200 bg-white px-4 py-4 text-sm outline-none"
+                        value={projectDraft.description}
+                        onChange={(event) => setProjectDraft((current) => ({ ...current, description: event.target.value }))}
+                        placeholder="可选，记录这个项目希望长期追踪的问题与范围。"
+                      />
+                    </label>
+                    <SmallButton
+                      className="w-full"
+                      tone="solid"
+                      disabled={!projectDraft.name.trim() || createProject.isPending}
+                      onClick={() => createProject.mutate(projectDraft)}
+                    >
+                      {createProject.isPending ? "创建中..." : "创建项目"}
+                    </SmallButton>
+                  </div>
+                </div>
+              </div>
+            ) : null}
+
+            {centerSheetMode === "task" ? (
+              <div className="grid gap-6 px-6 py-6 md:grid-cols-[0.95fr,1.05fr]">
+                <div className="rounded-[28px] border border-slate-200 bg-white p-5">
+                  <div className="flex items-center justify-between gap-3">
+                    <div className="text-sm font-semibold text-slate-900">当前项目任务</div>
+                    <div className="text-xs text-slate-500">{activeProject?.name || "未选择项目"}</div>
+                  </div>
+                  {!activeProjectId ? (
+                    <div className="mt-4 rounded-2xl border border-amber-200 bg-amber-50 p-4 text-sm text-amber-700">请先在“项目面板”里选择一个项目。</div>
+                  ) : (
+                    <div className="mt-4 space-y-3">
+                      {(tasksQuery.data?.items || []).map((task) => (
+                        <button
+                          key={task.task_id}
+                          className={`w-full rounded-3xl border px-4 py-4 text-left transition ${
+                            task.task_id === activeTaskId ? "border-slate-900 bg-slate-900 text-white" : "border-slate-200 bg-slate-50 hover:border-slate-300"
+                          }`}
+                          onClick={() => selectTask(task.task_id)}
+                        >
+                          <div className="line-clamp-2 text-sm font-medium">{task.topic}</div>
+                          <div className={`mt-2 text-xs ${task.task_id === activeTaskId ? "text-slate-300" : "text-slate-500"}`}>
+                            {task.mode === "openclaw_auto" ? "OpenClaw Auto" : "GPT Step"} · {task.status}
+                          </div>
+                        </button>
+                      ))}
+                      {!tasksQuery.data?.items?.length ? <div className="rounded-2xl bg-slate-50 p-4 text-sm text-slate-500">当前项目还没有研究任务。</div> : null}
+                    </div>
+                  )}
+                </div>
+                <div className="rounded-[28px] border border-slate-200 bg-slate-50 p-5">
+                  <div className="text-sm font-semibold text-slate-900">新建研究任务</div>
+                  <div className="mt-4 space-y-4">
+                    <label className="block">
+                      <div className="text-sm font-medium text-slate-900">研究主题</div>
+                      <textarea
+                        className="mt-2 h-32 w-full rounded-3xl border border-slate-200 bg-white px-4 py-4 text-sm outline-none"
+                        value={taskDraft.topic}
+                        onChange={(event) => setTaskDraft((current) => ({ ...current, topic: event.target.value }))}
+                        placeholder="例如：围绕具身智能中的世界模型、VLA 与数据效率做一轮可继续迭代的研究。"
+                      />
+                    </label>
+                    <div className="grid gap-4 md:grid-cols-2">
+                      <label className="block">
+                        <div className="text-sm font-medium text-slate-900">模式</div>
+                        <select
+                          className="mt-2 w-full rounded-2xl border border-slate-200 bg-white px-3 py-2 text-sm"
+                          value={taskDraft.mode}
+                          onChange={(event) =>
+                            setTaskDraft((current) => ({
+                              ...current,
+                              mode: event.target.value as TaskMode,
+                              llm_backend: event.target.value === "openclaw_auto" ? "openclaw" : current.llm_backend === "openclaw" ? "gpt" : current.llm_backend,
+                              llm_model:
+                                event.target.value === "openclaw_auto"
+                                  ? configQuery.data?.default_openclaw_model || "main"
+                                  : configQuery.data?.default_gpt_model || "gpt-5.4",
+                            }))
+                          }
+                        >
+                          <option value="gpt_step">GPT Step</option>
+                          <option value="openclaw_auto">OpenClaw Auto</option>
+                        </select>
+                      </label>
+                      <label className="block">
+                        <div className="text-sm font-medium text-slate-900">Backend</div>
+                        <select
+                          className="mt-2 w-full rounded-2xl border border-slate-200 bg-white px-3 py-2 text-sm"
+                          value={taskDraft.llm_backend}
+                          disabled={taskDraft.mode === "openclaw_auto"}
+                          onChange={(event) => setTaskDraft((current) => ({ ...current, llm_backend: event.target.value as Backend }))}
+                        >
+                          <option value="gpt">GPT API</option>
+                          <option value="openclaw">OpenClaw</option>
+                        </select>
+                      </label>
+                    </div>
+                    <label className="block">
+                      <div className="text-sm font-medium text-slate-900">模型</div>
+                      <input
+                        className="mt-2 w-full rounded-2xl border border-slate-200 bg-white px-3 py-2 text-sm outline-none"
+                        value={taskDraft.llm_model}
+                        onChange={(event) => setTaskDraft((current) => ({ ...current, llm_model: event.target.value }))}
+                        placeholder="例如 gpt-5.4 / main"
+                      />
+                    </label>
+                    <SmallButton
+                      className="w-full"
+                      tone="solid"
+                      disabled={!activeProjectId || !taskDraft.topic.trim() || createTask.isPending}
+                      onClick={() => createTask.mutate(taskDraft)}
+                    >
+                      {createTask.isPending ? "创建中..." : "创建研究任务"}
+                    </SmallButton>
+                  </div>
+                </div>
+              </div>
+            ) : null}
+
+            {centerSheetMode === "collection" ? (
+              <div className="grid gap-6 px-6 py-6 md:grid-cols-[1.05fr,0.95fr]">
+                <div className="rounded-[28px] border border-slate-200 bg-white p-5">
+                  <div className="flex items-center justify-between gap-3">
+                    <div className="text-sm font-semibold text-slate-900">当前项目 Collections</div>
+                    <div className="text-xs text-slate-500">{activeProject?.name || "未选择项目"}</div>
+                  </div>
+                  {pendingCollectionPaperIds.length ? (
+                    <div className="mt-4 rounded-2xl border border-blue-200 bg-blue-50 p-4 text-sm text-blue-700">
+                      当前待加入 {pendingCollectionPaperIds.length} 篇论文。选择已有 Collection 后会直接加入。
+                    </div>
+                  ) : null}
+                  {!activeProjectId ? (
+                    <div className="mt-4 rounded-2xl border border-amber-200 bg-amber-50 p-4 text-sm text-amber-700">请先在“项目面板”里选择一个项目。</div>
+                  ) : (
+                    <div className="mt-4 space-y-3">
+                      {(collectionsQuery.data?.items || []).map((collection) => (
+                        <div key={collection.collection_id} className={`rounded-3xl border px-4 py-4 ${collection.collection_id === activeCollectionId ? "border-blue-300 bg-blue-50" : "border-slate-200 bg-slate-50"}`}>
+                          <div className="flex items-start justify-between gap-3">
+                            <div className="min-w-0">
+                              <div className="line-clamp-1 text-sm font-medium text-slate-900">{collection.name}</div>
+                              <div className="mt-1 text-xs text-slate-500">
+                                {collection.item_count} 项 · {collection.source_type}
+                              </div>
+                            </div>
+                            <SmallButton
+                              tone={pendingCollectionPaperIds.length ? "solid" : "slate"}
+                              disabled={addItemsToCollection.isPending}
+                              onClick={() => {
+                                if (pendingCollectionPaperIds.length) {
+                                  handleAttachSelectionToCollection(collection.collection_id).catch((cause) => {
+                                    setActionStatus({ tone: "danger", text: cause instanceof Error ? cause.message : String(cause) });
+                                  });
+                                  return;
+                                }
+                                selectCollection(collection.collection_id);
+                              }}
+                            >
+                              {pendingCollectionPaperIds.length ? "加入所选论文" : "查看详情"}
+                            </SmallButton>
+                          </div>
+                        </div>
+                      ))}
+                      {!collectionsQuery.data?.items?.length ? <div className="rounded-2xl bg-slate-50 p-4 text-sm text-slate-500">当前项目还没有 Collection。</div> : null}
+                    </div>
+                  )}
+                </div>
+                <div className="rounded-[28px] border border-slate-200 bg-slate-50 p-5">
+                  <div className="text-sm font-semibold text-slate-900">{pendingCollectionPaperIds.length ? "新建 Collection 并加入所选论文" : "新建 Collection"}</div>
+                  <div className="mt-4 space-y-4">
+                    <label className="block">
+                      <div className="text-sm font-medium text-slate-900">Collection 名称</div>
+                      <input
+                        className="mt-2 w-full rounded-2xl border border-slate-200 bg-white px-3 py-2 text-sm outline-none"
+                        value={collectionDraft.name}
+                        onChange={(event) => setCollectionDraft((current) => ({ ...current, name: event.target.value }))}
+                        placeholder="例如：Embodied AI Core Papers"
+                      />
+                    </label>
+                    <label className="block">
+                      <div className="text-sm font-medium text-slate-900">说明</div>
+                      <textarea
+                        className="mt-2 h-32 w-full rounded-3xl border border-slate-200 bg-white px-4 py-4 text-sm outline-none"
+                        value={collectionDraft.description}
+                        onChange={(event) => setCollectionDraft((current) => ({ ...current, description: event.target.value }))}
+                        placeholder="记录这个 Collection 的来源、用途或准备支持的研究问题。"
+                      />
+                    </label>
+                    <SmallButton
+                      className="w-full"
+                      tone="solid"
+                      disabled={!activeProjectId || !collectionDraft.name.trim() || createCollection.isPending || addItemsToCollection.isPending}
+                      onClick={() => {
+                        handleCreateCollectionFromSheet().catch((cause) => {
+                          setActionStatus({ tone: "danger", text: cause instanceof Error ? cause.message : String(cause) });
+                        });
+                      }}
+                    >
+                      {createCollection.isPending || addItemsToCollection.isPending ? "处理中..." : pendingCollectionPaperIds.length ? "创建并加入论文" : "创建 Collection"}
+                    </SmallButton>
+                  </div>
+                </div>
+              </div>
+            ) : null}
+
+            {centerSheetMode === "import" ? (
+              <div className="grid gap-6 px-6 py-6 md:grid-cols-[1.1fr,0.9fr]">
+                <div className="space-y-4">
+                  <label className="block">
+                    <div className="text-sm font-medium text-slate-900">选择文件</div>
+                    <input
+                      className="mt-2 block w-full rounded-2xl border border-slate-200 bg-white px-3 py-2 text-sm"
+                      type="file"
+                      accept=".json,.csljson,.bib"
+                      onChange={(event) => setImportFile(event.target.files?.[0] || null)}
+                    />
+                  </label>
+                  <label className="block">
+                    <div className="text-sm font-medium text-slate-900">Collection 名称</div>
+                    <input
+                      className="mt-2 w-full rounded-2xl border border-slate-200 bg-white px-3 py-2 text-sm outline-none"
+                      value={importCollectionName}
+                      onChange={(event) => setImportCollectionName(event.target.value)}
+                      placeholder="留空时默认使用文件名"
+                    />
+                  </label>
+                </div>
+                <div className="rounded-[28px] border border-slate-200 bg-slate-50 p-5">
+                  <div className="text-sm font-semibold text-slate-900">导入说明</div>
+                  <div className="mt-3 text-sm leading-6 text-slate-600">
+                    默认走本地导入主路径，不需要配置 Zotero API Key。导入结果会落到当前项目下的新 Collection。
+                  </div>
+                  <div className="mt-3 text-xs text-slate-500">支持格式：{zoteroConfigQuery.data?.import_formats?.join(" / ") || "csljson / bib"}</div>
+                  <SmallButton
+                    className="mt-5 w-full"
+                    tone="solid"
+                    disabled={!importFile || importZoteroLocal.isPending}
+                    onClick={() => importFile && importZoteroLocal.mutate({ file: importFile, collectionName: importCollectionName || undefined })}
+                  >
+                    {importZoteroLocal.isPending ? "导入中..." : "开始导入"}
+                  </SmallButton>
+                </div>
+              </div>
+            ) : null}
+          </div>
+        </div>
+      ) : null}
     </>
   );
 
@@ -1794,7 +2378,7 @@ function isMissingPrerequisite(noopReason: string) {
   return noopReason.includes("missing") || noopReason.startsWith("no_") || noopReason === "paper_missing";
 }
 
-function ActionBanner(props: { status: ActionStatus; onDismiss: () => void }) {
+function ActionBanner(props: { status: ActionStatus }) {
   const className =
     props.status.tone === "success"
       ? "border-emerald-200 bg-emerald-50 text-emerald-700"
@@ -1804,34 +2388,16 @@ function ActionBanner(props: { status: ActionStatus; onDismiss: () => void }) {
           ? "border-rose-200 bg-rose-50 text-rose-700"
           : "border-slate-200 bg-slate-50 text-slate-600";
 
-  return (
-    <div className={`mt-3 flex items-center justify-between gap-3 rounded-2xl border px-3 py-2 text-sm ${className}`}>
-      <div className="min-w-0 flex-1">{props.status.text}</div>
-      <button
-        type="button"
-        className="inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-full border border-current/15 bg-white/50 text-current transition hover:bg-white/80"
-        aria-label="关闭提示"
-        onClick={props.onDismiss}
-      >
-        <svg viewBox="0 0 16 16" className="h-3.5 w-3.5" aria-hidden="true" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round">
-          <path d="M4 4l8 8" />
-          <path d="M12 4l-8 8" />
-        </svg>
-      </button>
-    </div>
-  );
+  return <div className={`mt-3 rounded-2xl border px-3 py-2 text-sm ${className}`}>{props.status.text}</div>;
 }
 
-function formatVenueMetricSummary(item: TaskVenueMetricItem) {
-  const metrics = item.metrics;
-  const parts = [];
-  if (metrics.ccf?.rank) parts.push(`CCF ${metrics.ccf.rank}`);
-  if (metrics.jcr?.quartile) parts.push(`JCR ${metrics.jcr.quartile}`);
-  if (metrics.cas?.quartile) parts.push(`中科院 ${metrics.cas.quartile}`);
-  if (metrics.ei?.indexed === true) parts.push("EI");
-  if (typeof metrics.impact_factor?.value === "number") parts.push(`IF ${metrics.impact_factor.value}`);
-  if (typeof metrics.venue_citation_count === "number") parts.push(`引用 ${metrics.venue_citation_count.toLocaleString("zh-CN")}`);
-  return parts.join(" · ");
+function MetricPanel(props: { label: string; value: string }) {
+  return (
+    <div className="rounded-[24px] border border-slate-200 bg-white p-4 shadow-sm">
+      <div className="text-[11px] font-semibold uppercase tracking-[0.16em] text-slate-400">{props.label}</div>
+      <div className="mt-2 text-2xl font-semibold text-slate-900">{props.value}</div>
+    </div>
+  );
 }
 
 function isSameViewport(
@@ -1840,3 +2406,4 @@ function isSameViewport(
 ) {
   return Math.abs(left.x - right.x) < 0.5 && Math.abs(left.y - right.y) < 0.5 && Math.abs(left.zoom - right.zoom) < 0.01;
 }
+

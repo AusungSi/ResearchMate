@@ -1,0 +1,71 @@
+name: CI
+
+on:
+  pull_request:
+    branches:
+      - main
+  push:
+    branches:
+      - main
+      - YuntaoLu
+
+jobs:
+  backend-tests:
+    name: Backend tests
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install backend dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements-research-local.txt
+          pip install pytest
+
+      - name: Run backend test suite
+        env:
+          APP_PROFILE: research_local
+          PYTHONPATH: .
+          PYTEST_DISABLE_PLUGIN_AUTOLOAD: "1"
+          RESEARCH_ENABLED: "true"
+          RESEARCH_QUEUE_MODE: inline
+          DB_URL: sqlite:///./data/ci.db
+          RESEARCH_ARTIFACT_DIR: ./artifacts/research
+          RESEARCH_SAVE_BASE_DIR: ./artifacts/research/saved
+        run: |
+          python -m pytest tests/test_research_api.py tests/test_research_flow.py tests/test_research_local_mode.py tests/test_openclaw_client.py
+
+  frontend-tests:
+    name: Frontend tests and build
+    runs-on: ubuntu-latest
+
+    defaults:
+      run:
+        working-directory: frontend
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install frontend dependencies
+        run: npm ci
+
+      - name: Run frontend tests
+        run: npm test
+
+      - name: Build frontend
+        run: npm run build

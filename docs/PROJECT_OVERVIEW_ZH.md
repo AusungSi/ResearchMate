@@ -1,4 +1,4 @@
-# OpenClaw for Paper Research 项目说明文档
+# ResearchMate 项目说明文档
 
 生成时间：2026-04-19  
 文档状态：已同步到当前 `research_local` + `project / collection / Zotero v1` 进度

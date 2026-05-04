@@ -22,7 +22,7 @@ type Props = {
 };
 
 const ASSET_KIND_LABELS: Record<string, string> = {
-  overall: "Overall 图",
+  overall: "概览图",
   figure: "主图",
   visual: "展示图",
   pdf: "PDF",
@@ -32,17 +32,17 @@ const ASSET_KIND_LABELS: Record<string, string> = {
 };
 
 const ASSET_STATUS_LABELS: Record<string, string> = {
-  available: "可访问",
-  not_started: "未处理",
+  available: "可用",
+  not_started: "未开始",
   fetching: "抓取中",
-  fetched: "已下载",
+  fetched: "待解析",
   parsing: "解析中",
   parsed: "已解析",
   need_upload: "需上传 PDF",
   failed: "处理失败",
-  needs_pdf: "需先获取 PDF",
   not_extracted: "未提取到",
   not_built: "未生成",
+  needs_pdf: "缺少 PDF",
   missing: "缺失",
 };
 
@@ -55,7 +55,8 @@ function assetPreviewUrl(item: PaperAssetItem | null) {
 }
 
 function assetStatusLabel(status?: string | null) {
-  return ASSET_STATUS_LABELS[String(status || "")] || String(status || "缺失");
+  if (!status) return "缺失";
+  return ASSET_STATUS_LABELS[status] || status;
 }
 
 export function PdfPanel(props: Props) {
@@ -117,27 +118,9 @@ export function PdfPanel(props: Props) {
           <div className="rounded-2xl border border-slate-200 bg-slate-50 p-4">
             <div className="text-xs font-semibold uppercase tracking-[0.16em] text-slate-400">Paper Visual</div>
             <div className="mt-3 grid gap-3 md:grid-cols-3">
-              <div className="rounded-2xl border border-slate-200 bg-white p-3">
-                <div className="text-sm font-medium text-slate-900">Overall Figure</div>
-                <div className="mt-1 text-xs text-slate-500">{assetStatusLabel(overallAsset?.status || "missing")}</div>
-                {overallAsset?.download_url ? (
-                  <img src={overallAsset.download_url} alt="overall figure" className="mt-3 h-40 w-full rounded-xl border border-slate-200 bg-slate-50 object-contain" />
-                ) : null}
-              </div>
-              <div className="rounded-2xl border border-slate-200 bg-white p-3">
-                <div className="text-sm font-medium text-slate-900">Main Figure</div>
-                <div className="mt-1 text-xs text-slate-500">{assetStatusLabel(figureAsset?.status || "missing")}</div>
-                {figureAsset?.download_url ? (
-                  <img src={figureAsset.download_url} alt="main figure" className="mt-3 h-40 w-full rounded-xl border border-slate-200 bg-slate-50 object-contain" />
-                ) : null}
-              </div>
-              <div className="rounded-2xl border border-slate-200 bg-white p-3">
-                <div className="text-sm font-medium text-slate-900">Paper Visual</div>
-                <div className="mt-1 text-xs text-slate-500">{assetStatusLabel(visualAsset?.status || "missing")}</div>
-                {visualAsset?.download_url ? (
-                  <img src={visualAsset.download_url} alt="paper visual" className="mt-3 h-40 w-full rounded-xl border border-slate-200 bg-slate-50 object-contain" />
-                ) : null}
-              </div>
+              <PreviewCard title="Overall Preview" item={overallAsset} />
+              <PreviewCard title="Main Figure" item={figureAsset} />
+              <PreviewCard title="Paper Visual" item={visualAsset} />
             </div>
           </div>
         </div>

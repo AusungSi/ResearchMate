@@ -1,8 +1,41 @@
 import ELK from "elkjs/lib/elk.bundled.js";
 import { MarkerType, Position, type Edge, type Node } from "@xyflow/react";
-import type { Backend, CanvasResponse, CanvasUiState, FlowNodeData, GraphEdge, GraphNode, GraphResponse, RunEvent, RunSummary, TaskMode } from "./types";
+import type {
+  Backend,
+  CanvasNode,
+  CanvasResponse,
+  CanvasUiState,
+  FlowNodeData,
+  GraphEdge,
+  GraphNode,
+  GraphResponse,
+  PaperAssetResponse,
+  PaperDetail,
+  RunEvent,
+  RunSummary,
+  TaskMode,
+} from "./types";
 
 const elk = new ELK();
+const MANUAL_NODE_TYPES = new Set(["note", "question", "reference", "group"]);
+const SYSTEM_STRING_FIELDS = [
+  "summary",
+  "card_summary",
+  "method_summary",
+  "abstract",
+  "summary_source",
+  "summary_status",
+  "preview_kind",
+  "preview_url",
+  "visual_status",
+  "status",
+  "source",
+  "venue",
+  "feedback_text",
+  "action",
+  "userNote",
+] as const;
+const SYSTEM_NUMBER_FIELDS = ["year", "direction_index", "papers_count", "depth"] as const;
 
 export const edgeVisual = {
   type: "step" as const,
@@ -63,7 +96,7 @@ export function stepLabel(step?: string) {
     next_round_created: "继续下一轮",
     graph_queued: "图谱构建已排队",
     tree_graph_completed: "树状图谱完成",
-    citation_graph_completed: "引文图谱完成",
+    citation_graph_completed: "引用图谱完成",
     fulltext_queued: "全文处理已排队",
     fulltext_completed: "全文处理完成",
     paper_saved: "论文已保存",
@@ -92,6 +125,24 @@ export function modeLabel(mode: TaskMode) {
 
 export function backendLabel(backend: Backend) {
   return backend === "openclaw" ? "OpenClaw" : "GPT API";
+}
+
+export function derivePaperPdfUrl(paperAssets?: PaperAssetResponse | null, paperDetail?: Pick<PaperDetail, "url"> | null) {
+  const asset = paperAssets?.items.find((item) => item.kind === "pdf" && (item.open_url || item.download_url));
+  if (asset?.open_url || asset?.download_url) {
+    return String(asset.open_url || asset.download_url || "");
+  }
+  const rawUrl = String(paperDetail?.url || "").trim();
+  if (!rawUrl) return "";
+  const normalized = rawUrl.replace(/^http:\/\/arxiv\.org\//i, "https://arxiv.org/");
+  if (/arxiv\.org\/abs\//i.test(normalized)) {
+    const pdfUrl = normalized.replace(/\/abs\//i, "/pdf/");
+    return pdfUrl.toLowerCase().endsWith(".pdf") ? pdfUrl : `${pdfUrl}.pdf`;
+  }
+  if (/arxiv\.org\/pdf\//i.test(normalized) && !normalized.toLowerCase().endsWith(".pdf")) {
+    return `${normalized}.pdf`;
+  }
+  return normalized.toLowerCase().endsWith(".pdf") ? normalized : "";
 }
 
 export function autoStatusLabel(status: string) {
@@ -290,6 +341,14 @@ function buildEventGraph(taskId: string, events: RunEvent[]) {
         type: String(payload.type || "note"),
         label: String(payload.label || payload.title || id),
         summary: stringifyBest(payload.summary, payload.content, payload.abstract),
+        card_summary: asOptionalString(payload.card_summary),
+        method_summary: asOptionalString(payload.method_summary),
+        abstract: asOptionalString(payload.abstract),
+        preview_kind: asOptionalString(payload.preview_kind),
+        preview_url: asOptionalString(payload.preview_url),
+        visual_status: asOptionalString(payload.visual_status),
+        summary_source: asOptionalString(payload.summary_source),
+        summary_status: asOptionalString(payload.summary_status),
         status: asOptionalString(payload.status),
         year: asOptionalNumber(payload.year),
         source: asOptionalString(payload.source),
@@ -358,19 +417,15 @@ export function mergeCanvasWithGraph(graph?: GraphResponse, canvas?: CanvasRespo
   const canonicalNodes = new Map<string, GraphNode>();
   const canonicalEdges = new Map<string, GraphEdge>();
   const savedNodes = new Map((canvas?.nodes || []).map((node) => [node.id, node]));
-  const allowEventOnlyGraph = !(graph?.nodes?.length || canvas?.nodes?.length);
 
   for (const node of graph?.nodes || []) canonicalNodes.set(node.id, node);
   for (const node of eventGraph.nodes) {
-    if (!allowEventOnlyGraph && !canonicalNodes.has(node.id) && !savedNodes.has(node.id)) continue;
     canonicalNodes.set(node.id, { ...(canonicalNodes.get(node.id) || {}), ...node });
   }
 
   for (const edge of graph?.edges || []) canonicalEdges.set(`${edge.source}:${edge.target}:${edge.type}`, edge);
   for (const edge of eventGraph.edges) {
-    if (!allowEventOnlyGraph && (!canonicalNodes.has(edge.source) || !canonicalNodes.has(edge.target)) && (!savedNodes.has(edge.source) || !savedNodes.has(edge.target))) {
-      continue;
-    }
+    if (!canonicalNodes.has(edge.source) || !canonicalNodes.has(edge.target)) continue;
     canonicalEdges.set(`${edge.source}:${edge.target}:${edge.type}`, edge);
   }
 
@@ -389,6 +444,7 @@ export function mergeCanvasWithGraph(graph?: GraphResponse, canvas?: CanvasRespo
       sourcePosition: Position.Right,
       targetPosition: Position.Left,
       data: {
+        ...systemNodeSnapshotFromCanvas(cached),
         ...node,
         userNote: typeof cached?.data?.userNote === "string" ? cached.data.userNote : undefined,
       },
@@ -397,8 +453,19 @@ export function mergeCanvasWithGraph(graph?: GraphResponse, canvas?: CanvasRespo
 
   for (const node of canvas?.nodes || []) {
     if (canonicalNodes.has(node.id)) continue;
-    const manual = isPersistedManualNode(node);
-    if (!manual && !hasPersistedSystemSnapshot(node)) continue;
+    if (!isManualCanvasNode(node)) {
+      const snapshot = systemNodeSnapshotFromCanvas(node);
+      nodes.push({
+        id: node.id,
+        type: "cardNode",
+        position: node.position,
+        hidden: node.hidden,
+        sourcePosition: Position.Right,
+        targetPosition: Position.Left,
+        data: snapshot,
+      });
+      continue;
+    }
     nodes.push({
       id: node.id,
       type: "cardNode",
@@ -411,7 +478,7 @@ export function mergeCanvasWithGraph(graph?: GraphResponse, canvas?: CanvasRespo
         id: node.id,
         type: node.type,
         label: String(node.data?.label || node.id),
-        ...(manual ? { isManual: true } : {}),
+        isManual: true,
       } as FlowNodeData,
     });
   }
@@ -457,16 +524,6 @@ export function mergeCanvasWithGraph(graph?: GraphResponse, canvas?: CanvasRespo
     viewport: canvas?.viewport || { x: 0, y: 0, zoom: 1 },
     ui: { ...fallbackUi, ...(canvas?.ui || {}) },
   };
-}
-
-function isPersistedManualNode(node: CanvasResponse["nodes"][number]) {
-  return Boolean((node.data as Record<string, unknown> | undefined)?.isManual) || /^(note|question|reference|group|report|checkpoint):/.test(node.id);
-}
-
-function hasPersistedSystemSnapshot(node: CanvasResponse["nodes"][number]) {
-  const data = node.data;
-  if (!data || typeof data !== "object" || Array.isArray(data)) return false;
-  return Object.keys(data).some((key) => key !== "userNote");
 }
 
 export async function runAutoLayout(nodes: Array<Node<FlowNodeData>>, edges: Array<Edge>, mode = "elk_layered") {
@@ -553,9 +610,7 @@ export function buildCanvasPayload(taskId: string, nodes: Array<Node<FlowNodeDat
               userNote: typeof node.data?.userNote === "string" ? node.data.userNote : "",
               isManual: true,
             }
-          : {
-              userNote: typeof node.data?.userNote === "string" ? node.data.userNote : "",
-            },
+          : systemNodeSnapshotForPayload(node),
         hidden: node.hidden,
       };
     }),
@@ -612,16 +667,28 @@ export function inferRoundId(nodeId: string, data?: Partial<FlowNodeData> | null
   return null;
 }
 
-export function isPaperNode(nodeId?: string, data?: Partial<FlowNodeData> | null) {
-  return Boolean(data?.type === "paper" || (nodeId && nodeId.startsWith("paper:")));
+export function isPaperNode(nodeOrId?: string | { id?: string; type?: string | null; data?: { type?: string | null } | null } | null) {
+  if (!nodeOrId) return false;
+  if (typeof nodeOrId === "string") {
+    const raw = nodeOrId.trim();
+    if (!raw) return false;
+    if (raw.startsWith("paper:")) return true;
+    if (/^(topic|direction|round|checkpoint|report|note|question|reference|group):/i.test(raw)) return false;
+    if (/^\d{4}\.\d{4,5}(v\d+)?$/i.test(raw)) return true;
+    if (/^10\.\d{4,9}\//i.test(raw)) return true;
+    return false;
+  }
+  const explicitType = String(nodeOrId.data?.type || nodeOrId.type || "").trim().toLowerCase();
+  if (explicitType) return explicitType === "paper";
+  return String(nodeOrId.id || "").startsWith("paper:");
 }
 
 export function isManualNode(node: Node<FlowNodeData>) {
-  return Boolean(node.data?.isManual) || /^(note|question|reference|group|report|checkpoint):/.test(node.id);
+  return isManualCanvasNode({ id: node.id, type: String(node.data?.type || ""), data: node.data, position: node.position });
 }
 
 export function selectedPaperNodes(nodes: Array<Node<FlowNodeData>>) {
-  return nodes.filter((node) => Boolean(node.selected) && isPaperNode(node.id, node.data));
+  return nodes.filter((node) => Boolean(node.selected) && isPaperNode(node));
 }
 
 export function formatDateTime(value?: string | null) {
@@ -629,6 +696,67 @@ export function formatDateTime(value?: string | null) {
   const date = new Date(value);
   if (Number.isNaN(date.getTime())) return value;
   return date.toLocaleString("zh-CN", { hour12: false });
+}
+
+function isManualCanvasNode(node?: Pick<CanvasNode, "id" | "type" | "data" | "position"> | null) {
+  if (!node) return false;
+  if (isRecord(node.data) && node.data.isManual === true) return true;
+  const type = String((isRecord(node.data) && node.data.type) || node.type || inferTypeFromId(node.id));
+  return MANUAL_NODE_TYPES.has(type) || /^(note|question|reference|group):/.test(node.id);
+}
+
+function systemNodeSnapshotFromCanvas(node?: Pick<CanvasNode, "id" | "type" | "data" | "position"> | null): FlowNodeData {
+  const data = isRecord(node?.data) ? node?.data || {} : {};
+  const type = String(data.type || node?.type || inferTypeFromId(node?.id || "") || "note");
+  const snapshot: Record<string, unknown> = {
+    id: String(data.id || node?.id || ""),
+    type,
+    label: String(data.label || node?.id || "节点"),
+  };
+
+  for (const key of SYSTEM_STRING_FIELDS) {
+    const value = data[key];
+    if (typeof value === "string" && value.trim()) {
+      snapshot[key] = value;
+    }
+  }
+  for (const key of SYSTEM_NUMBER_FIELDS) {
+    const value = asOptionalNumber(data[key]);
+    if (typeof value === "number") {
+      snapshot[key] = value;
+    }
+  }
+
+  return snapshot as FlowNodeData;
+}
+
+function systemNodeSnapshotForPayload(node: Node<FlowNodeData>) {
+  const data = node.data || ({} as FlowNodeData);
+  const snapshot: Record<string, unknown> = {
+    id: node.id,
+    type: String(data.type || inferTypeFromId(node.id) || "note"),
+    label: String(data.label || node.id),
+  };
+
+  for (const key of SYSTEM_STRING_FIELDS) {
+    const value = data[key];
+    if (typeof value === "string" && value.trim()) {
+      snapshot[key] = value;
+    }
+  }
+  for (const key of SYSTEM_NUMBER_FIELDS) {
+    const value = asOptionalNumber(data[key]);
+    if (typeof value === "number") {
+      snapshot[key] = value;
+    }
+  }
+
+  return snapshot;
+}
+
+function inferTypeFromId(id: string) {
+  const type = id.split(":")[0];
+  return type || "";
 }
 
 function stringifyBest(...values: Array<unknown>) {
@@ -662,4 +790,8 @@ function sanitizeEdgeData(data: Record<string, unknown>) {
   if (typeof data.kind === "string" && data.kind.trim()) next.kind = data.kind;
   if (typeof data.label === "string" && data.label.trim()) next.label = data.label;
   return next;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null;
 }

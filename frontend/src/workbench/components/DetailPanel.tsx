@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useMemo } from "react";
 import type { Node } from "@xyflow/react";
 import type { FlowNodeData, PaperAssetItem, PaperAssetResponse, PaperDetail, RoundCandidate, TaskMode, VenueMetrics } from "../types";
 import { inferRoundId, isPaperNode, tone } from "../utils";
@@ -17,6 +17,7 @@ type Props = {
   onDownloadPdf?: () => void;
   onOpenAsset?: (url: string) => void;
   onDownloadAsset?: (url: string, filename?: string | null) => void;
+  onPreviewTextAsset?: (item: PaperAssetItem) => void;
   onSavePaper: () => void;
   onSummarizePaper: () => void;
   onRebuildVisual: () => void;
@@ -28,13 +29,6 @@ type Props = {
   onNextRound: (roundId: number, intentText: string) => void;
   onAskPreset: (question: string) => void;
 };
-
-const ACTION_OPTIONS = [
-  { value: "expand", label: "扩展邻近方向" },
-  { value: "deepen", label: "深入当前方向" },
-  { value: "pivot", label: "切换研究视角" },
-  { value: "converge", label: "收敛核心问题" },
-];
 
 const NODE_TYPE_LABELS: Record<string, string> = {
   topic: "主题",
@@ -60,185 +54,78 @@ const SUMMARY_STATUS_LABELS: Record<string, string> = {
   done: "已生成",
   running: "生成中",
   queued: "已排队",
-  fallback: "回退摘要",
+  fallback: "摘要回退",
   none: "暂无摘要",
   failed: "生成失败",
 };
 
 const ASSET_KIND_LABELS: Record<string, string> = {
-  overall: "Overall 图",
-  pdf: "PDF",
   txt: "TXT",
   md: "Markdown",
   bib: "BibTeX",
-  figure: "主图",
-  visual: "展示图",
-};
-
-const ASSET_STATUS_LABELS: Record<string, string> = {
-  available: "可访问",
-  not_started: "未处理",
-  fetching: "抓取中",
-  fetched: "已下载",
-  parsing: "解析中",
-  parsed: "已解析",
-  need_upload: "需上传 PDF",
-  failed: "处理失败",
-  needs_pdf: "需先获取 PDF",
-  not_extracted: "未提取到",
-  not_built: "未生成",
-  missing: "缺失",
 };
 
 function assetByKind(assets: PaperAssetResponse | null, kind: string) {
   return assets?.items.find((item) => item.kind === kind) || null;
 }
 
-function previewKindLabel(kind?: string | null) {
-  if (kind === "overall") return "Overall 图预览";
+function firstText(...values: Array<unknown>) {
+  for (const value of values) {
+    if (typeof value === "string" && value.trim()) return value.trim();
+  }
+  return "";
+}
+
+function previewLabel(kind?: string | null) {
+  if (kind === "overall") return "概览图预览";
   if (kind === "figure") return "主图预览";
-  return "展示图预览";
+  if (kind === "visual") return "展示图预览";
+  return kind || "";
 }
 
-function assetStatusLabel(status?: string | null) {
-  return ASSET_STATUS_LABELS[String(status || "")] || String(status || "缺失");
+function textAssetLabel(kind: string) {
+  return ASSET_KIND_LABELS[kind] || kind.toUpperCase();
 }
 
-function PreviewBox(props: { title: string; url?: string | null; emptyText: string }) {
-  if (!props.url) {
-    return <div className="rounded-2xl border border-dashed border-slate-200 bg-slate-50 p-4 text-sm text-slate-500">{props.emptyText}</div>;
-  }
-  return (
-    <div className="overflow-hidden rounded-2xl border border-slate-200 bg-slate-50">
-      <img src={props.url} alt={props.title} className="h-48 w-full object-contain bg-white" />
-    </div>
-  );
-}
-
-function AssetActionButtons(props: {
-  item: PaperAssetItem;
-  onOpenAsset?: (url: string) => void;
-  onDownloadAsset?: (url: string, filename?: string | null) => void;
-}) {
-  return (
-    <div className="mt-2 flex flex-wrap gap-2">
-      {props.item.open_url ? (
-        <SmallButton onClick={() => props.onOpenAsset?.(props.item.open_url || "")} disabled={!props.onOpenAsset}>
-          打开
-        </SmallButton>
-      ) : null}
-      {props.item.download_url ? (
-        <SmallButton onClick={() => props.onDownloadAsset?.(props.item.download_url || "", props.item.filename)} disabled={!props.onDownloadAsset}>
-          下载
-        </SmallButton>
-      ) : null}
-    </div>
-  );
-}
-
-function yesNo(value?: boolean | null) {
-  if (value === true) return "是";
-  if (value === false) return "否";
-  return "-";
-}
-
-function formatMetricNumber(value?: number | null) {
-  if (typeof value !== "number" || Number.isNaN(value)) return "-";
-  return value.toLocaleString("zh-CN");
-}
-
-function formatImpactFactor(metrics?: VenueMetrics | null) {
-  const value = metrics?.impact_factor?.value;
-  if (typeof value !== "number" || Number.isNaN(value)) return "-";
-  const year = metrics?.impact_factor?.year;
-  return year ? `${value} (${year})` : String(value);
-}
-
-function hasVenueMetrics(metrics?: VenueMetrics | null) {
-  if (!metrics) return false;
-  return Boolean(
-    metrics.ccf?.rank ||
-      metrics.jcr?.quartile ||
-      metrics.cas?.quartile ||
-      metrics.impact_factor?.value != null ||
-      metrics.ei?.indexed != null ||
-      metrics.sci?.indexed != null ||
-      metrics.venue_citation_count != null ||
-      metrics.paper_citation_count != null,
-  );
-}
-
-function VenueMetricsPanel(props: { metrics?: VenueMetrics | null }) {
-  if (!hasVenueMetrics(props.metrics)) {
-    return (
-      <div className="mt-4 rounded-2xl border border-slate-200 bg-slate-50 p-3 text-sm text-slate-500">
-        当前还没有可用的 venue 分级或指标。可在 `data/venue_rankings/venue_catalog.csv` 提供 CCF/JCR/中科院/EI/IF 对照表，系统会自动匹配；公开可查的引用指标会优先使用 OpenAlex。
-      </div>
-    );
-  }
-  return (
-    <div className="mt-4 rounded-2xl border border-slate-200 bg-slate-50 p-3">
-      <div className="text-xs font-semibold uppercase tracking-[0.16em] text-slate-400">Venue Metrics</div>
-      <div className="mt-3 grid gap-2 text-sm text-slate-700 md:grid-cols-2">
-        <MetricItem label="CCF" value={props.metrics?.ccf?.rank ? `${props.metrics.ccf.rank}${props.metrics.ccf.category ? ` · ${props.metrics.ccf.category}` : ""}` : "-"} />
-        <MetricItem label="JCR" value={props.metrics?.jcr?.quartile ? `${props.metrics.jcr.quartile}${props.metrics.jcr.year ? ` · ${props.metrics.jcr.year}` : ""}` : "-"} />
-        <MetricItem label="中科院" value={props.metrics?.cas?.quartile ? `${props.metrics.cas.quartile}${props.metrics.cas.top ? ` · ${props.metrics.cas.top}` : ""}` : "-"} />
-        <MetricItem label="SCI" value={yesNo(props.metrics?.sci?.indexed)} />
-        <MetricItem label="EI" value={yesNo(props.metrics?.ei?.indexed)} />
-        <MetricItem label="IF" value={formatImpactFactor(props.metrics)} />
-        <MetricItem label="Venue 引用数" value={formatMetricNumber(props.metrics?.venue_citation_count)} />
-        <MetricItem label="Venue 收录论文数" value={formatMetricNumber(props.metrics?.venue_works_count)} />
-        <MetricItem label="Venue H-index" value={formatMetricNumber(props.metrics?.h_index)} />
-        <MetricItem label="论文引用数" value={formatMetricNumber(props.metrics?.paper_citation_count)} />
-      </div>
-    </div>
-  );
-}
-
-function MetricItem(props: { label: string; value: string }) {
-  return (
-    <div className="rounded-xl border border-slate-200 bg-white px-3 py-2">
-      <div className="text-[11px] uppercase tracking-wide text-slate-400">{props.label}</div>
-      <div className="mt-1 font-medium text-slate-900">{props.value}</div>
-    </div>
-  );
+function textAssetTitle(item: PaperAssetItem) {
+  if (item.kind === "txt") return "论文文本";
+  if (item.kind === "md") return "Markdown 摘要";
+  if (item.kind === "bib") return "BibTeX 引用";
+  return textAssetLabel(item.kind);
 }
 
 export function DetailPanel(props: Props) {
-  const [feedback, setFeedback] = useState("");
-  const [nextIntent, setNextIntent] = useState("");
-  const [candidateAction, setCandidateAction] = useState("expand");
   const node = props.node;
   const nodeData = node?.data || null;
   const directionIndex = typeof nodeData?.direction_index === "number" ? nodeData.direction_index : null;
   const roundId = inferRoundId(node?.id || "", nodeData || undefined);
-  const isPaper = isPaperNode(node?.id, nodeData || undefined);
-  const pdfAsset = useMemo(() => assetByKind(props.paperAssets, "pdf"), [props.paperAssets]);
-  const overallAsset = useMemo(() => assetByKind(props.paperAssets, "overall"), [props.paperAssets]);
-  const figureAsset = useMemo(() => assetByKind(props.paperAssets, "figure"), [props.paperAssets]);
-  const visualAsset = useMemo(() => assetByKind(props.paperAssets, "visual"), [props.paperAssets]);
+  const isPaper = isPaperNode(node ? { id: node.id, type: node.type, data: node.data } : null);
+
   const txtAsset = useMemo(() => assetByKind(props.paperAssets, "txt"), [props.paperAssets]);
   const mdAsset = useMemo(() => assetByKind(props.paperAssets, "md"), [props.paperAssets]);
   const bibAsset = useMemo(() => assetByKind(props.paperAssets, "bib"), [props.paperAssets]);
-  const preferredPreviewUrl =
-    overallAsset?.open_url ||
-    overallAsset?.download_url ||
-    figureAsset?.open_url ||
-    figureAsset?.download_url ||
-    visualAsset?.open_url ||
-    visualAsset?.download_url ||
-    props.paperDetail?.preview_url ||
-    null;
+  const overallAsset = useMemo(() => assetByKind(props.paperAssets, "overall"), [props.paperAssets]);
+  const figureAsset = useMemo(() => assetByKind(props.paperAssets, "figure"), [props.paperAssets]);
+  const visualAsset = useMemo(() => assetByKind(props.paperAssets, "visual"), [props.paperAssets]);
+
+  const preferredPreview =
+    overallAsset?.open_url
+      ? { url: overallAsset.open_url, kind: "overall" }
+      : figureAsset?.open_url
+        ? { url: figureAsset.open_url, kind: "figure" }
+        : visualAsset?.open_url
+          ? { url: visualAsset.open_url, kind: "visual" }
+          : props.paperDetail?.preview_url
+            ? { url: props.paperDetail.preview_url, kind: props.paperDetail.preview_kind || "visual" }
+            : null;
+
   const summarySource = props.paperDetail?.summary_source || nodeData?.summary_source || null;
   const summaryStatus = props.paperDetail?.summary_status || nodeData?.summary_status || null;
-  const displaySummary =
-    props.paperDetail?.card_summary || nodeData?.card_summary || nodeData?.summary || nodeData?.method_summary || nodeData?.abstract || nodeData?.feedback_text || "当前还没有可展示的摘要。";
-
-  useEffect(() => {
-    setFeedback("");
-    setNextIntent("");
-    setCandidateAction("expand");
-  }, [node?.id]);
+  const baseSummary =
+    firstText(props.paperDetail?.card_summary, nodeData?.card_summary, nodeData?.summary, nodeData?.method_summary, nodeData?.abstract, nodeData?.feedback_text) ||
+    "当前还没有可展示的摘要。";
+  const mergedSummary = [baseSummary, props.paperDetail?.key_points ? `补充要点\n\n${props.paperDetail.key_points}` : ""].filter(Boolean).join("\n\n");
+  const textAssets = [txtAsset, mdAsset, bibAsset].filter((item): item is PaperAssetItem => Boolean(item && item.status === "available"));
 
   if (!node) {
     return (
@@ -246,7 +133,7 @@ export function DetailPanel(props: Props) {
         <SectionTitle
           eyebrow="节点信息"
           title="请选择一个节点"
-          description="选中主题、方向、轮次、论文或手工节点后，这里会显示对应的摘要、动作、资产和整理入口。"
+          description="右侧只展示当前节点的解释、摘要和必要元数据；主要操作已收口到画布中间快捷栏。"
         />
       </div>
     );
@@ -257,7 +144,7 @@ export function DetailPanel(props: Props) {
       <SectionTitle
         eyebrow="节点信息"
         title={nodeData?.label || "未命名节点"}
-        description="这里聚合当前节点的解读、动作、论文资产和手工整理入口。"
+        description="这里保留说明性内容和结果展示，打开 PDF、删除/隐藏、构建图谱等操作请使用画布快捷栏。"
       />
 
       <div className="mt-3 flex flex-wrap gap-2">
@@ -266,16 +153,48 @@ export function DetailPanel(props: Props) {
         {directionIndex ? <Badge tone="green">{`方向 ${directionIndex}`}</Badge> : null}
         {isPaper && props.paperDetail?.year ? <Badge tone="amber">{String(props.paperDetail.year)}</Badge> : null}
         {props.paperDetail?.venue ? <Badge tone="blue">{props.paperDetail.venue}</Badge> : null}
+        {props.paperDetail?.source ? <Badge tone="slate">{props.paperDetail.source}</Badge> : null}
         {summarySource ? <Badge tone="slate">{SUMMARY_SOURCE_LABELS[summarySource] || summarySource}</Badge> : null}
         {summaryStatus ? <Badge tone="violet">{SUMMARY_STATUS_LABELS[summaryStatus] || summaryStatus}</Badge> : null}
-        {props.paperDetail?.preview_kind ? <Badge tone="amber">{previewKindLabel(props.paperDetail.preview_kind)}</Badge> : null}
+        {preferredPreview?.kind ? <Badge tone="amber">{previewLabel(preferredPreview.kind)}</Badge> : null}
         {nodeData?.isManual ? <Badge tone="amber">手工节点</Badge> : null}
+        {props.paperDetail?.venue_metrics ? <VenueMetricBadges metrics={props.paperDetail.venue_metrics} /> : null}
       </div>
+
+      {isPaper && preferredPreview?.url ? (
+        <div className="mt-4 overflow-hidden rounded-2xl border border-slate-200 bg-slate-50">
+          <img src={preferredPreview.url} alt={props.paperDetail?.title || "paper preview"} className="h-44 w-full object-contain bg-white" />
+        </div>
+      ) : null}
 
       <div className="mt-4 rounded-2xl border border-slate-200 bg-slate-50 p-3">
         <div className="text-[11px] font-medium uppercase tracking-wide text-slate-500">Card Summary</div>
-        <div className="mt-2 whitespace-pre-line text-sm leading-6 text-slate-700">{displaySummary}</div>
+        <MarkdownText
+          className="prose prose-sm mt-2 max-w-none text-sm leading-6 text-slate-700 prose-headings:mb-2 prose-headings:mt-3 prose-headings:text-slate-900 prose-p:my-2 prose-li:my-1"
+          text={mergedSummary}
+        />
       </div>
+
+      {props.paperDetail?.doi || textAssets.length ? (
+        <div className="mt-4 rounded-2xl border border-slate-200 bg-white p-3">
+          <div className="text-xs font-semibold uppercase tracking-[0.16em] text-slate-400">文本与引用</div>
+          {props.paperDetail?.doi ? <div className="mt-2 break-all text-xs text-slate-500">DOI: {props.paperDetail.doi}</div> : null}
+          {textAssets.length ? (
+            <div className="mt-3 flex flex-wrap gap-2">
+              {textAssets.map((item) => (
+                <SmallButton
+                  key={item.kind}
+                  className="rounded-full"
+                  onClick={() => props.onPreviewTextAsset?.({ ...item, filename: item.filename || textAssetTitle(item) })}
+                  disabled={!props.onPreviewTextAsset}
+                >
+                  {textAssetLabel(item.kind)}
+                </SmallButton>
+              ))}
+            </div>
+          ) : null}
+        </div>
+      ) : null}
 
       <div className="mt-4">
         <div className="text-xs font-semibold uppercase tracking-[0.16em] text-slate-400">整理与备注</div>
@@ -283,205 +202,64 @@ export function DetailPanel(props: Props) {
           className="mt-2 h-24 w-full rounded-2xl border border-slate-200 bg-slate-50 px-3 py-3 text-sm outline-none"
           value={String(nodeData?.userNote || "")}
           onChange={(event) => props.onUpdateNote(event.target.value)}
-          placeholder="补充你的判断、标签、下一步计划，或者记录这个节点为什么值得保留。"
+          placeholder="补充你的判断、标签、下一步计划，或记录这个节点为什么值得保留。"
         />
         <div className="mt-3 flex flex-wrap gap-2">
           <SmallButton tone="solid" onClick={() => props.onAskPreset(buildPresetQuestion(nodeData?.type))}>
             去聊天里提问
           </SmallButton>
-          <SmallButton onClick={props.onToggleHidden}>{node?.hidden ? "恢复显示" : "隐藏节点"}</SmallButton>
-          <SmallButton onClick={props.onDeleteNode}>删除节点</SmallButton>
-        </div>
-        <div className="mt-2 text-xs leading-5 text-slate-500">
-          {nodeData?.isManual
-            ? "手工节点会被真实删除，相关手工连线也会一起移除。"
-            : "系统节点会从画布中隐藏，不会删除研究主数据；与它相连的展示连线也会一起隐藏。"}
         </div>
       </div>
 
       {directionIndex ? (
-        <div className="mt-4 rounded-2xl border border-slate-200 bg-white p-3">
-          <div className="text-xs font-semibold uppercase tracking-[0.16em] text-slate-400">方向动作</div>
-          <div className="mt-3 flex flex-wrap gap-2">
-            <SmallButton tone="solid" onClick={() => props.onSearchDirection(directionIndex)}>
-              检索方向
-            </SmallButton>
-            <SmallButton onClick={() => props.onStartExplore(directionIndex)}>继续探索</SmallButton>
-            <SmallButton onClick={() => props.onBuildGraph(directionIndex, undefined)}>构建图谱</SmallButton>
-          </div>
+        <div className="mt-4 rounded-2xl border border-slate-200 bg-slate-50 p-3 text-sm leading-6 text-slate-600">
+          当前节点代表一个研究方向。检索方向、继续探索和构建图谱已放到画布快捷栏；这里仅保留方向解释与沉淀内容。
         </div>
       ) : null}
 
       {roundId ? (
-        <div className="mt-4 rounded-2xl border border-slate-200 bg-white p-3">
-          <div className="text-xs font-semibold uppercase tracking-[0.16em] text-slate-400">轮次动作</div>
-          <select
-            className="mt-3 w-full rounded-2xl border border-slate-200 bg-slate-50 px-3 py-2 text-sm"
-            value={candidateAction}
-            onChange={(event) => setCandidateAction(event.target.value)}
-          >
-            {ACTION_OPTIONS.map((option) => (
-              <option key={option.value} value={option.value}>
-                {option.label}
-              </option>
-            ))}
-          </select>
-          <textarea
-            className="mt-2 h-20 w-full rounded-2xl border border-slate-200 bg-slate-50 px-3 py-3 text-sm outline-none"
-            value={feedback}
-            onChange={(event) => setFeedback(event.target.value)}
-            placeholder="补充这一轮的目标、限制条件，或者你希望扩展的分支。"
-          />
-          <div className="mt-3 flex flex-wrap gap-2">
-            <SmallButton tone="solid" onClick={() => props.onProposeCandidates(roundId, candidateAction, feedback)}>
-              生成候选方向
-            </SmallButton>
-            <SmallButton onClick={() => props.onBuildGraph(undefined, roundId)}>构建图谱</SmallButton>
-          </div>
+        <div className="mt-4 rounded-2xl border border-slate-200 bg-slate-50 p-3">
+          <div className="text-xs font-semibold uppercase tracking-[0.16em] text-slate-400">轮次摘要</div>
+          <div className="mt-2 text-sm leading-6 text-slate-600">这一轮的候选方向和阶段结果会显示在这里；继续推进轮次的动作已放到画布快捷栏。</div>
 
           {props.roundCandidates.length ? (
             <div className="mt-3 space-y-2">
               {props.roundCandidates.map((candidate) => (
-                <div key={candidate.candidate_id} className="rounded-2xl border border-slate-200 bg-slate-50 p-3">
+                <div key={candidate.candidate_id} className="rounded-2xl border border-slate-200 bg-white p-3">
                   <div className="text-sm font-medium text-slate-900">{candidate.name}</div>
                   {candidate.reason ? <div className="mt-1 text-xs leading-5 text-slate-500">{candidate.reason}</div> : null}
                   {candidate.queries?.length ? <div className="mt-2 text-xs text-slate-500">{candidate.queries.join(" | ")}</div> : null}
-                  <div className="mt-3">
-                    <SmallButton tone="solid" onClick={() => props.onSelectCandidate(roundId, candidate.candidate_id)}>
-                      选择这个候选
-                    </SmallButton>
-                  </div>
                 </div>
               ))}
             </div>
           ) : null}
-
-          <textarea
-            className="mt-3 h-20 w-full rounded-2xl border border-slate-200 bg-slate-50 px-3 py-3 text-sm outline-none"
-            value={nextIntent}
-            onChange={(event) => setNextIntent(event.target.value)}
-            placeholder="或者直接输入下一轮探索意图，例如：更聚焦 citation graph 与高质量全文证据。"
-          />
-          <div className="mt-3">
-            <SmallButton tone="solid" disabled={!nextIntent.trim()} onClick={() => props.onNextRound(roundId, nextIntent)}>
-              继续下一轮
-            </SmallButton>
-          </div>
-        </div>
-      ) : null}
-
-      {isPaper ? (
-        <div className="mt-4 rounded-2xl border border-slate-200 bg-white p-3">
-          <div className="text-xs font-semibold uppercase tracking-[0.16em] text-slate-400">论文动作</div>
-          <div className="mt-3 flex flex-wrap gap-2">
-            <SmallButton tone="solid" disabled={pdfAsset?.status !== "available"} onClick={props.onOpenPdf}>
-              打开 PDF
-            </SmallButton>
-            <SmallButton disabled={pdfAsset?.status !== "available" || !props.onDownloadPdf} onClick={props.onDownloadPdf}>
-              下载 PDF
-            </SmallButton>
-            <SmallButton onClick={() => props.onAskPreset("这篇论文解决什么问题？核心方法、关键证据和局限分别是什么？")}>去聊天里分析</SmallButton>
-            <SmallButton onClick={props.onSavePaper}>保存论文</SmallButton>
-            <SmallButton onClick={props.onSummarizePaper}>生成结构化摘要</SmallButton>
-            <SmallButton onClick={props.onRebuildVisual}>重建展示图</SmallButton>
-          </div>
-
-          <div className="mt-4">
-            <div className="text-xs font-semibold uppercase tracking-[0.16em] text-slate-400">Paper Visual</div>
-            <div className="mt-3 space-y-3">
-              <PreviewBox
-                title={props.paperDetail?.title || "paper preview"}
-                url={preferredPreviewUrl}
-                emptyText="当前还没有可展示图片。若论文已有 PDF，可以点击“重建展示图”尝试生成 overall 图、主图或模板图。"
-              />
-              <div className="grid gap-3 md:grid-cols-3">
-                <AssetStatusCard title="Overall Figure" item={overallAsset} />
-                <AssetStatusCard title="Main Figure" item={figureAsset} />
-                <AssetStatusCard title="Paper Visual" item={visualAsset} />
-              </div>
-            </div>
-          </div>
-
-          <div className="mt-4 space-y-2 text-sm text-slate-600">
-            {props.paperDetail?.doi ? <div>DOI: {props.paperDetail.doi}</div> : null}
-            {props.paperDetail?.url ? (
-              <a className="text-blue-600 underline underline-offset-2" href={props.paperDetail.url} rel="noreferrer" target="_blank">
-                打开论文原始链接
-              </a>
-            ) : null}
-          </div>
-
-          <VenueMetricsPanel metrics={props.paperDetail?.venue_metrics} />
-
-          <div className="mt-4 rounded-2xl border border-slate-200 bg-slate-50 p-3">
-            <div className="text-xs font-semibold uppercase tracking-[0.16em] text-slate-400">完整结构化摘要</div>
-            <div className="mt-2 flex flex-wrap gap-2">
-              {summarySource ? <Badge tone="slate">{SUMMARY_SOURCE_LABELS[summarySource] || summarySource}</Badge> : null}
-              {summaryStatus ? <Badge tone="violet">{SUMMARY_STATUS_LABELS[summaryStatus] || summaryStatus}</Badge> : null}
-            </div>
-            <MarkdownText
-              className="prose prose-sm mt-3 max-w-none text-sm leading-6 text-slate-700 prose-headings:mb-2 prose-headings:mt-3 prose-headings:text-slate-900 prose-p:my-2 prose-li:my-1 prose-code:rounded prose-code:bg-slate-100 prose-code:px-1 prose-code:py-0.5"
-              text={props.paperDetail?.key_points || "当前还没有完整结构化摘要。可以先点击“生成结构化摘要”，系统会优先基于全文，不足时回退到摘要。"}
-            />
-          </div>
-
-          {props.paperAssets?.items?.length ? (
-            <div className="mt-4 rounded-2xl border border-slate-200 bg-slate-50 p-3">
-              <div className="text-xs font-medium uppercase tracking-wide text-slate-500">资产</div>
-              <div className="mt-2 grid gap-2 text-xs text-slate-600 md:grid-cols-2">
-                {props.paperAssets.items.map((item) => (
-                  <div key={item.kind} className="rounded-xl border border-slate-200 bg-white px-3 py-2">
-                    <div className="font-medium text-slate-900">{ASSET_KIND_LABELS[item.kind] || item.kind}</div>
-                    <div className="mt-1">{assetStatusLabel(item.status)}</div>
-                    <AssetActionButtons item={item} onOpenAsset={props.onOpenAsset} onDownloadAsset={props.onDownloadAsset} />
-                  </div>
-                ))}
-              </div>
-            </div>
-          ) : null}
-
-          {[txtAsset, mdAsset, bibAsset].some(Boolean) ? (
-            <div className="mt-4 rounded-2xl border border-slate-200 bg-white p-3">
-              <div className="text-xs font-semibold uppercase tracking-[0.16em] text-slate-400">文本与引用</div>
-              <div className="mt-3 flex flex-wrap gap-2">
-                {[txtAsset, mdAsset, bibAsset].filter(Boolean).map((item) => (
-                  <SmallButton
-                    key={item?.kind}
-                    onClick={() => {
-                      if (!item?.open_url && !item?.download_url) return;
-                      if (item?.open_url && props.onOpenAsset) {
-                        props.onOpenAsset(item.open_url);
-                        return;
-                      }
-                      if (item?.download_url && props.onDownloadAsset) {
-                        props.onDownloadAsset(item.download_url, item.filename);
-                      }
-                    }}
-                  >
-                    {ASSET_KIND_LABELS[item?.kind || ""] || item?.kind}
-                  </SmallButton>
-                ))}
-              </div>
-            </div>
-          ) : null}
-        </div>
-      ) : null}
-
-      {node && props.mode === "openclaw_auto" ? (
-        <div className="mt-4 rounded-2xl border border-slate-200 bg-slate-50 p-3 text-sm text-slate-600">
-          OpenClaw Auto 模式下，节点信息面板只负责解释当前节点；完整的自动研究推进和 checkpoint 引导仍在运行日志区域处理。
         </div>
       ) : null}
     </div>
   );
 }
 
-function AssetStatusCard(props: { title: string; item: { status: string } | null }) {
+function VenueMetricBadges(props: { metrics: VenueMetrics }) {
+  const metrics = props.metrics;
+  const badges: Array<{ label: string; tone: "slate" | "blue" | "green" | "violet" | "amber" }> = [];
+  if (metrics.source_type) badges.push({ label: metrics.source_type, tone: "blue" });
+  if (metrics.ccf?.rank) badges.push({ label: `CCF ${metrics.ccf.rank}`, tone: "violet" });
+  if (metrics.jcr?.quartile) badges.push({ label: `JCR ${metrics.jcr.quartile}`, tone: "green" });
+  if (metrics.cas?.quartile) badges.push({ label: `中科院 ${metrics.cas.quartile}`, tone: "amber" });
+  if (metrics.sci?.indexed) badges.push({ label: "SCI", tone: "slate" });
+  if (metrics.ei?.indexed) badges.push({ label: "EI", tone: "slate" });
+  if (typeof metrics.impact_factor?.value === "number") badges.push({ label: `IF ${metrics.impact_factor.value}`, tone: "amber" });
+  if (typeof metrics.paper_citation_count === "number") badges.push({ label: `引用 ${metrics.paper_citation_count}`, tone: "slate" });
+  if (typeof metrics.h_index === "number") badges.push({ label: `H-index ${metrics.h_index}`, tone: "slate" });
+
   return (
-    <div className="rounded-2xl border border-slate-200 bg-slate-50 p-3">
-      <div className="text-sm font-medium text-slate-900">{props.title}</div>
-      <div className="mt-1 text-xs text-slate-500">{assetStatusLabel(props.item?.status || "missing")}</div>
-    </div>
+    <>
+      {badges.map((badge) => (
+        <Badge key={badge.label} tone={badge.tone}>
+          {badge.label}
+        </Badge>
+      ))}
+    </>
   );
 }
 

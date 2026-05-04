@@ -35,24 +35,10 @@ class VenueMetricsService:
             return {}
 
         local_entry = self._lookup_local_catalog(venue_text)
-        if local_entry:
-            venue_key = _normalize_venue_key(venue_text)
-            cached = self._read_cache(venue_key)
-            if cached:
-                return dict(cached)
-            metrics = self._build_metrics(
-                venue=venue_text,
-                resolved_venue=venue_text,
-                venue_key=venue_key,
-                local_entry=local_entry,
-                source_meta={},
-            )
-            self._write_cache(venue_key, metrics)
-            return metrics
-
         work_meta = self._lookup_openalex_work(doi=doi, title=title, year=year)
         resolved_venue = str(
             work_meta.get("source_display_name")
+            or (local_entry or {}).get("venue")
             or work_meta.get("source", {}).get("display_name")
             or venue_text
         ).strip() or venue_text
@@ -368,7 +354,7 @@ class VenueMetricsService:
             data_sources.append(str(local_entry.get("source") or "local_catalog"))
         if source_meta:
             data_sources.append("openalex_source")
-        metrics = {
+        return {
             "venue": venue,
             "venue_key": venue_key,
             "matched_venue": str(source_meta.get("display_name") or local_entry.get("venue") or resolved_venue or venue).strip() or venue,
@@ -412,7 +398,6 @@ class VenueMetricsService:
             "host_organization_name": source_meta.get("host_organization_name"),
             "data_sources": data_sources,
         }
-        return metrics
 
 
 def _normalize_venue_key(value: object) -> str:

@@ -434,7 +434,7 @@ class ResearchCommandService:
                 if value:
                     extras[key] = value
         if not topic:
-            return "主题不能为空。请使用：调研 主题：{topic} 年份：2021-2026 数量：20 来源：semantic_scholar|openalex|arxiv"
+            return "主题不能为空。请使用：调研 主题：{topic} 年份：2021-2026 数量：20 来源：arxiv"
         constraints: dict[str, object] = {}
         year_value = extras.get("年份")
         if year_value:
@@ -456,7 +456,7 @@ class ResearchCommandService:
         if sources_value:
             raw_sources = re.split(r"[|,，/\s]+", sources_value)
             sources = [item.strip().lower() for item in raw_sources if item and item.strip()]
-            allowed = {"semantic_scholar", "arxiv", "openalex"}
+            allowed = {"semantic_scholar", "openalex", "arxiv"}
             filtered = [src for src in sources if src in allowed]
             if not filtered:
                 return "来源仅支持 semantic_scholar、openalex 或 arxiv（可用 | 分隔）。"
@@ -469,7 +469,7 @@ class ResearchCommandService:
     @staticmethod
     def _render_constraints(constraints: dict) -> str:
         if not constraints:
-            return "约束：默认（来源=semantic_scholar,openalex,arxiv；数量=系统默认）"
+            return "约束：默认（来源=semantic_scholar,arxiv；数量=系统默认）"
         parts: list[str] = []
         if constraints.get("year_from"):
             y_from = constraints.get("year_from")

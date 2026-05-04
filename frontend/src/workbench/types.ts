@@ -89,8 +89,20 @@ export type CompareReport = {
   common_points: string[];
   differences: string[];
   recommended_next_steps: string[];
-  items: Array<Record<string, unknown>>;
+  items: CompareItem[];
   created_at: string;
+};
+
+export type CompareItem = {
+  paper_id?: string | null;
+  title?: string | null;
+  year?: number | null;
+  venue?: string | null;
+  source?: string | null;
+  doi?: string | null;
+  url?: string | null;
+  abstract?: string | null;
+  method_summary?: string | null;
 };
 
 export type ProjectDashboard = {
@@ -163,7 +175,6 @@ export type GraphNode = {
   id: string;
   type: string;
   label: string;
-  paper_id?: string | null;
   year?: number | null;
   source?: string | null;
   venue?: string | null;
@@ -273,6 +284,9 @@ export type RunSummary = {
   guidance_history: RunGuidanceItem[];
   step_cards: RunStepCard[];
   artifacts: Array<Record<string, unknown>>;
+  active_node_ids: string[];
+  active_edges: string[];
+  running_label?: string | null;
 };
 
 export type RunEventsResponse = {
@@ -300,6 +314,71 @@ export type ChatResponse = {
   thread_id?: string | null;
   item?: ChatItem | null;
   history: ChatItem[];
+};
+
+export type ChatThread = {
+  thread_id: string;
+  task_id: string;
+  title: string;
+  message_count: number;
+  latest_preview?: string | null;
+  created_at: string;
+  updated_at: string;
+};
+
+export type ChatThreadListResponse = {
+  task_id: string;
+  items: ChatThread[];
+};
+
+export type ChatMessage = {
+  id: number;
+  task_id: string;
+  thread_id: string;
+  role: "user" | "assistant";
+  content: string;
+  context_node_ids: string[];
+  attachment_ids: string[];
+  provider?: string | null;
+  model?: string | null;
+  status: string;
+  created_at: string;
+  updated_at: string;
+};
+
+export type ChatMessageListResponse = {
+  task_id: string;
+  thread_id: string;
+  items: ChatMessage[];
+};
+
+export type ChatAttachment = {
+  attachment_id: string;
+  task_id: string;
+  filename: string;
+  mime_type?: string | null;
+  file_ext?: string | null;
+  size_bytes: number;
+  text_preview?: string | null;
+  created_at: string;
+  updated_at: string;
+};
+
+export type ChatAttachmentListResponse = {
+  task_id: string;
+  items: ChatAttachment[];
+};
+
+export type RunActiveState = {
+  activeNodeIds: string[];
+  activeEdges: string[];
+  runningLabel?: string | null;
+};
+
+export type SelectedCanvasState = {
+  nodeIds: string[];
+  paperIds: string[];
+  primaryNodeId: string;
 };
 
 export type RoundCandidate = {
@@ -341,44 +420,6 @@ export type PaperDetail = {
   venue_metrics?: VenueMetrics | null;
 };
 
-export type VenueMetrics = {
-  venue?: string;
-  venue_key?: string;
-  matched_venue?: string | null;
-  source_type?: string | null;
-  ccf?: { rank?: string | null; category?: string | null; source?: string | null } | null;
-  jcr?: { quartile?: string | null; year?: number | null; source?: string | null } | null;
-  cas?: { quartile?: string | null; top?: string | null; source?: string | null } | null;
-  ei?: { indexed?: boolean | null; source?: string | null } | null;
-  sci?: { indexed?: boolean | null; source?: string | null } | null;
-  impact_factor?: { value?: number | null; year?: number | null; source?: string | null } | null;
-  venue_citation_count?: number | null;
-  venue_works_count?: number | null;
-  h_index?: number | null;
-  i10_index?: number | null;
-  paper_citation_count?: number | null;
-  issn_l?: string | null;
-  issn?: string[];
-  openalex_id?: string | null;
-  homepage_url?: string | null;
-  host_organization_name?: string | null;
-  data_sources?: string[];
-};
-
-export type TaskVenueMetricItem = {
-  venue: string;
-  venue_key: string;
-  source_type?: string | null;
-  paper_count: number;
-  paper_ids: string[];
-  metrics: VenueMetrics;
-};
-
-export type TaskVenueMetricsResponse = {
-  task_id: string;
-  items: TaskVenueMetricItem[];
-};
-
 export type PaperAssetItem = {
   kind: string;
   status: string;
@@ -397,6 +438,63 @@ export type PaperAssetResponse = {
   paper_id: string;
   primary_kind?: string | null;
   items: PaperAssetItem[];
+};
+
+export type VenueMetrics = {
+  venue?: string | null;
+  venue_key?: string | null;
+  matched_venue?: string | null;
+  source_type?: string | null;
+  ccf?: {
+    rank?: string | null;
+    category?: string | null;
+    source?: string | null;
+  } | null;
+  jcr?: {
+    quartile?: string | null;
+    year?: number | null;
+    source?: string | null;
+  } | null;
+  cas?: {
+    quartile?: string | null;
+    top?: string | null;
+    source?: string | null;
+  } | null;
+  sci?: {
+    indexed?: boolean | null;
+    source?: string | null;
+  } | null;
+  ei?: {
+    indexed?: boolean | null;
+    source?: string | null;
+  } | null;
+  impact_factor?: {
+    value?: number | null;
+    year?: number | null;
+    source?: string | null;
+  } | null;
+  paper_citation_count?: number | null;
+  venue_citation_count?: number | null;
+  venue_works_count?: number | null;
+  h_index?: number | null;
+  i10_index?: number | null;
+  homepage_url?: string | null;
+  host_organization_name?: string | null;
+  data_sources?: string[];
+};
+
+export type TaskVenueMetricItem = {
+  venue: string;
+  venue_key: string;
+  source_type?: string | null;
+  paper_count: number;
+  paper_ids: string[];
+  metrics: VenueMetrics;
+};
+
+export type TaskVenueMetricsResponse = {
+  task_id: string;
+  items: TaskVenueMetricItem[];
 };
 
 export type ActionResponse = {
@@ -433,6 +531,7 @@ export type FlowNodeData = GraphNode & {
   hiddenByUser?: boolean;
   assetHint?: string;
   collectionId?: string;
+  isActive?: boolean;
 };
 
 export type ActionStatus = {

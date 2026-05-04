@@ -30,13 +30,12 @@ vi.mock("@xyflow/react", () => ({
 }));
 
 describe("ResearchCanvas", () => {
-  it("uses drag-to-pan and keeps box selection behind Shift", () => {
+  it("uses the current canvas interaction defaults", () => {
     render(
       <ResearchCanvas
         nodes={[]}
         edges={[]}
         showMiniMap
-        miniMapBottomOffset={124}
         flowRef={{ current: null }}
         onNodesChange={vi.fn()}
         onEdgesChange={vi.fn()}
@@ -54,9 +53,9 @@ describe("ResearchCanvas", () => {
     );
 
     const props = reactFlowSpy.mock.calls.at(-1)?.[0] as ReactFlowProps<Node<FlowNodeData>, Edge>;
-    expect(props.panOnDrag).toBe(true);
-    expect(props.selectionOnDrag).toBe(false);
-    expect(props.selectionKeyCode).toEqual(["Shift"]);
-    expect(miniMapSpy.mock.calls.at(-1)?.[0]).toMatchObject({ style: { bottom: 124, right: 24 } });
+    expect(props.panOnDrag).toEqual([1, 2]);
+    expect(props.selectionOnDrag).toBe(true);
+    expect(props.multiSelectionKeyCode).toEqual(["Meta", "Control", "Shift"]);
+    expect(miniMapSpy.mock.calls.at(-1)?.[0]).toMatchObject({ style: { bottom: 24, right: 24 } });
   });
 });

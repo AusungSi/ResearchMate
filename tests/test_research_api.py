@@ -175,6 +175,52 @@ def test_fulltext_build_status_and_upload_endpoint():
         db_session.close()
 
 
+def test_paper_asset_meta_exposes_remote_arxiv_pdf_without_local_fulltext():
+    client, service, user, db_session = _build_test_client()
+    try:
+        task = service.create_task(
+            db_session,
+            user_id=user.id,
+            topic="api arxiv pdf topic",
+            constraints={"top_n": 5},
+        )
+        service.process_one_job(db_session)
+
+        service._search_semantic_scholar = lambda query, *, top_n, constraints: ([], "ok_empty", None)  # noqa: E731
+        service._search_arxiv = lambda query, *, top_n, constraints: (  # noqa: E731
+            [
+                {
+                    "paper_id": "2602.02454v1",
+                    "title": "World-Gymnast",
+                    "title_norm": "world gymnast",
+                    "authors": ["A"],
+                    "year": 2026,
+                    "venue": "arXiv",
+                    "doi": None,
+                    "url": "http://arxiv.org/abs/2602.02454v1",
+                    "abstract": "abstract",
+                    "source": "arxiv",
+                    "relevance_score": None,
+                }
+            ],
+            "ok",
+            None,
+        )
+        service.enqueue_search(db_session, user_id=user.id, direction_index=1)
+        service.process_one_job(db_session)
+
+        resp = client.get(f"/api/v1/research/tasks/{task.task_id}/papers/2602.02454v1/asset/meta")
+        assert resp.status_code == 200
+        by_kind = {item["kind"]: item for item in resp.json()["items"]}
+        assert by_kind["pdf"]["status"] == "available"
+        assert by_kind["pdf"]["open_url"] == "https://arxiv.org/pdf/2602.02454v1.pdf"
+        assert by_kind["pdf"]["download_url"] == "https://arxiv.org/pdf/2602.02454v1.pdf"
+        assert by_kind["pdf"]["source"] == "paper_url"
+    finally:
+        client.close()
+        db_session.close()
+
+
 def test_graph_build_and_view_endpoint():
     client, service, user, db_session = _build_test_client()
     try:
@@ -513,6 +559,195 @@ def test_paper_save_and_summarize_endpoints():
         assert detail["saved"] is True
         assert detail["key_points_status"] == "done"
         assert detail["key_points_source"] in {"abstract", "fulltext"}
+    finally:
+        client.close()
+        db_session.close()
+
+
+def test_compare_task_papers_endpoint_returns_structured_items():
+    client, service, user, db_session = _build_test_client()
+    try:
+        task = service.create_task(
+            db_session,
+            user_id=user.id,
+            topic="api compare topic",
+            constraints={"top_n": 5},
+        )
+        service._build_seed_corpus_for_task = lambda db, task, constraints: []  # noqa: E731
+        service._plan_directions = lambda _topic, _constraints: [  # noqa: E731
+            {"name": "方向A", "queries": ["compare query"], "exclude_terms": []},
+        ]
+        service.process_one_job(db_session)
+        service._search_semantic_scholar = lambda query, *, top_n, constraints: (  # noqa: E731
+            [
+                {
+                    "paper_id": "cmp-1",
+                    "title": "Compare Paper One",
+                    "title_norm": "compare paper one",
+                    "authors": ["A"],
+                    "year": 2024,
+                    "venue": "ACL",
+                    "doi": "10.1000/cmp-1",
+                    "url": "https://example.org/cmp-1",
+                    "abstract": "abstract one",
+                    "source": "semantic_scholar",
+                    "relevance_score": None,
+                },
+                {
+                    "paper_id": "cmp-2",
+                    "title": "Compare Paper Two",
+                    "title_norm": "compare paper two",
+                    "authors": ["B"],
+                    "year": 2025,
+                    "venue": "NeurIPS",
+                    "doi": "10.1000/cmp-2",
+                    "url": "https://example.org/cmp-2",
+                    "abstract": "abstract two",
+                    "source": "semantic_scholar",
+                    "relevance_score": None,
+                },
+            ],
+            "ok",
+            None,
+        )
+        service._search_arxiv = lambda query, *, top_n, constraints: ([], "ok_empty", None)  # noqa: E731
+
+        service.enqueue_search(db_session, user_id=user.id, direction_index=1)
+        service.process_one_job(db_session)
+
+        resp = client.post(
+            f"/api/v1/research/tasks/{task.task_id}/papers/compare",
+            json={"paper_ids": ["cmp-1", "cmp-2"], "focus": "differences"},
+        )
+        assert resp.status_code == 200
+        body = resp.json()
+        assert len(body["items"]) == 2
+        assert body["items"][0]["paper_id"]
+        assert body["items"][0]["title"]
+    finally:
+        client.close()
+        db_session.close()
+
+
+def test_task_chat_thread_attachment_and_stream_endpoints():
+    client, service, user, db_session = _build_test_client()
+    try:
+        create_resp = client.post(
+            "/api/v1/research/tasks",
+            json={"topic": "chat api topic", "mode": "gpt_step", "llm_backend": "gpt", "llm_model": "gpt-test"},
+        )
+        assert create_resp.status_code == 200
+        task = create_resp.json()
+        service.process_one_job(db_session)
+
+        service.llm_gateway.chat_text_stream = lambda **_kwargs: iter(["第一段回答。", "第二段回答。"])  # noqa: E731
+
+        thread_resp = client.post(
+            f"/api/v1/research/tasks/{task['task_id']}/chat/threads",
+            json={"title": "论文阅读"},
+        )
+        assert thread_resp.status_code == 200
+        thread = thread_resp.json()
+        assert thread["title"] == "论文阅读"
+
+        attachment_resp = client.post(
+            f"/api/v1/research/tasks/{task['task_id']}/chat/attachments",
+            files={"file": ("notes.md", b"# Notes\nworld model evidence", "text/markdown")},
+        )
+        assert attachment_resp.status_code == 200
+        attachment = attachment_resp.json()["items"][0]
+        assert attachment["filename"] == "notes.md"
+
+        stream_resp = client.post(
+            f"/api/v1/research/tasks/{task['task_id']}/chat/stream",
+            json={
+                "thread_id": thread["thread_id"],
+                "message": "请总结当前任务的重点。",
+                "context_node_ids": [f"topic:{task['task_id']}", f"direction:{task['task_id']}:1"],
+                "attachment_ids": [attachment["attachment_id"]],
+            },
+        )
+        assert stream_resp.status_code == 200
+        stream_text = stream_resp.text
+        assert "event: message_start" in stream_text
+        assert "event: message_delta" in stream_text
+        assert "event: message_done" in stream_text
+        assert "第一段回答。" in stream_text
+        assert "第二段回答。" in stream_text
+
+        messages_resp = client.get(
+            f"/api/v1/research/tasks/{task['task_id']}/chat/messages?thread_id={quote(thread['thread_id'])}"
+        )
+        assert messages_resp.status_code == 200
+        messages = messages_resp.json()["items"]
+        assert len(messages) == 2
+        assert messages[0]["role"] == "user"
+        assert messages[0]["context_node_ids"] == [f"topic:{task['task_id']}", f"direction:{task['task_id']}:1"]
+        assert messages[0]["attachment_ids"] == [attachment["attachment_id"]]
+        assert messages[1]["role"] == "assistant"
+        assert "第一段回答。第二段回答。" == messages[1]["content"]
+
+        threads_resp = client.get(f"/api/v1/research/tasks/{task['task_id']}/chat/threads")
+        assert threads_resp.status_code == 200
+        threads = threads_resp.json()["items"]
+        assert len(threads) == 1
+        assert threads[0]["thread_id"] == thread["thread_id"]
+        assert threads[0]["message_count"] == 2
+    finally:
+        client.close()
+        db_session.close()
+
+
+def test_task_chat_stream_returns_message_error_event():
+    client, service, user, db_session = _build_test_client()
+    try:
+        create_resp = client.post(
+            "/api/v1/research/tasks",
+            json={"topic": "chat error topic", "mode": "gpt_step", "llm_backend": "gpt", "llm_model": "gpt-test"},
+        )
+        assert create_resp.status_code == 200
+        task = create_resp.json()
+
+        def broken_stream(**_kwargs):
+            raise RuntimeError("stream boom")
+            yield ""
+
+        service.llm_gateway.chat_text_stream = broken_stream
+
+        stream_resp = client.post(
+            f"/api/v1/research/tasks/{task['task_id']}/chat/stream",
+            json={"message": "不选节点也聊一下。", "context_node_ids": [], "attachment_ids": []},
+        )
+        assert stream_resp.status_code == 200
+        assert "event: message_error" in stream_resp.text
+        assert "stream boom" in stream_resp.text
+    finally:
+        client.close()
+        db_session.close()
+
+
+def test_run_events_summary_includes_active_branch_fields():
+    client, service, user, db_session = _build_test_client()
+    try:
+        create_resp = client.post(
+            "/api/v1/research/tasks",
+            json={"topic": "active branch topic", "mode": "openclaw_auto", "llm_backend": "openclaw", "llm_model": "openclaw"},
+        )
+        assert create_resp.status_code == 200
+        task = create_resp.json()
+
+        start_resp = client.post(f"/api/v1/research/tasks/{task['task_id']}/auto/start")
+        assert start_resp.status_code == 200
+        run_id = start_resp.json()["run_id"]
+
+        service.process_one_job(db_session)
+
+        events_resp = client.get(f"/api/v1/research/tasks/{task['task_id']}/runs/{run_id}/events")
+        assert events_resp.status_code == 200
+        summary = events_resp.json()["summary"]
+        assert summary["running_label"]
+        assert f"topic:{task['task_id']}" in summary["active_node_ids"]
+        assert any(edge.endswith(":topic_checkpoint") for edge in summary["active_edges"])
     finally:
         client.close()
         db_session.close()

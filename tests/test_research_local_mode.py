@@ -1,8 +1,8 @@
 from __future__ import annotations
 
 from pathlib import Path
-import struct
 from types import SimpleNamespace
+import struct
 import zlib
 
 import fitz
@@ -30,10 +30,13 @@ from app.infra.repos import (
     UserRepo,
 )
 from app.llm.openclaw_client import LLMCallResult, LLMTaskType
-from app.services.research_service import ResearchService
+from app.services.research_service import ResearchService, SearchFetchResult
 
 
 class FakeOpenClawClient:
+    def healthcheck(self):
+        return True, None
+
     def chat_completion(self, *, task_type, prompt, system_prompt=None, user=None, temperature=0.0, max_tokens=0):
         if task_type == LLMTaskType.RESEARCH_PLAN:
             if "阶段报告" in prompt or "stage report" in prompt.lower():
@@ -166,14 +169,20 @@ def _pdf_with_vector_overall_figure_bytes() -> bytes:
     page.draw_rect(fitz.Rect(412, 90, 548, 170), color=(0.15, 0.34, 0.78), fill=(0.87, 0.92, 1.0), width=1.4)
     page.draw_line(fitz.Point(228, 130), fitz.Point(252, 130), color=(0.15, 0.34, 0.78), width=2.0)
     page.draw_line(fitz.Point(388, 130), fitz.Point(412, 130), color=(0.15, 0.34, 0.78), width=2.0)
-    page.insert_text((122, 132), "Stage A", fontsize=13)
-    page.insert_text((282, 132), "Stage B", fontsize=13)
-    page.insert_text((442, 132), "Stage C", fontsize=13)
-    page.draw_rect(fitz.Rect(120, 192, 520, 258), color=(0.06, 0.53, 0.43), fill=(0.86, 0.98, 0.94), width=1.2)
     page.insert_textbox(
-        fitz.Rect(136, 208, 500, 248),
-        "Vector-rendered workflow region that should be captured by the caption clip fallback.",
-        fontsize=11,
+        fitz.Rect(108, 116, 212, 146),
+        "Encoder",
+        fontsize=13,
+    )
+    page.insert_textbox(
+        fitz.Rect(270, 116, 372, 146),
+        "Planner",
+        fontsize=13,
+    )
+    page.insert_textbox(
+        fitz.Rect(434, 116, 532, 146),
+        "Policy",
+        fontsize=13,
     )
     page.insert_textbox(
         fitz.Rect(84, 272, 540, 316),
@@ -269,6 +278,31 @@ def test_openclaw_auto_run_generates_checkpoint_and_report_events():
         )
         assert guidance_resp.status_code == 200
 
+        def fake_search_with_cache(**kwargs):
+            source = kwargs["source"]
+            query = kwargs["query"]
+            title = f"{source} paper for {query}"
+            return SearchFetchResult(
+                papers=[
+                    {
+                        "paper_id": f"paper:{source}:auto",
+                        "title": title,
+                        "title_norm": title.lower(),
+                        "authors": ["Ada"],
+                        "year": 2026,
+                        "venue": "OpenClaw Test",
+                        "doi": None,
+                        "url": f"https://example.com/{source}",
+                        "abstract": "A test paper discovered during OpenClaw auto continuation.",
+                        "source": source,
+                        "relevance_score": 0.9,
+                    }
+                ],
+                status="ok",
+            )
+
+        service._search_with_cache = fake_search_with_cache
+
         continue_resp = client.post(f"/api/v1/research/tasks/{task['task_id']}/runs/{run_id}/continue")
         assert continue_resp.status_code == 200
 
@@ -276,9 +310,58 @@ def test_openclaw_auto_run_generates_checkpoint_and_report_events():
 
         final_events_resp = client.get(f"/api/v1/research/tasks/{task['task_id']}/runs/{run_id}/events")
         assert final_events_resp.status_code == 200
-        final_types = [item["event_type"] for item in final_events_resp.json()["items"]]
+        final_items = final_events_resp.json()["items"]
+        final_types = [item["event_type"] for item in final_items]
+        assert "paper_upsert" in final_types
+        assert "edge_upsert" in final_types
         assert "report_chunk" in final_types
         assert "artifact" in final_types
+        report_event = next(item for item in final_items if item["event_type"] == "report_chunk")
+        assert report_event["payload"]["retrieval"]["paper_count"] >= 1
+
+        graph_resp = client.get(f"/api/v1/research/tasks/{task['task_id']}/graph?view=tree&include_papers=true")
+        assert graph_resp.status_code == 200
+        assert any(node["type"] == "paper" for node in graph_resp.json()["nodes"])
+    finally:
+        client.close()
+        db_session.close()
+        settings.app_profile = original_profile
+
+
+def test_openclaw_auto_rejects_invalid_or_out_of_order_controls():
+    settings = get_settings()
+    original_profile = settings.app_profile
+    settings.app_profile = "research_local"
+    client, db_session, _service = build_client()
+    try:
+        create_resp = client.post(
+            "/api/v1/research/tasks",
+            json={"topic": "auto control topic", "mode": "openclaw_auto", "llm_backend": "openclaw", "llm_model": "openclaw"},
+        )
+        assert create_resp.status_code == 200
+        task = create_resp.json()
+
+        start_resp = client.post(f"/api/v1/research/tasks/{task['task_id']}/auto/start")
+        assert start_resp.status_code == 200
+        run_id = start_resp.json()["run_id"]
+
+        repeated_start = client.post(f"/api/v1/research/tasks/{task['task_id']}/auto/start")
+        assert repeated_start.status_code == 400
+
+        guidance_before_checkpoint = client.post(
+            f"/api/v1/research/tasks/{task['task_id']}/runs/{run_id}/guidance",
+            json={"text": "continue this branch"},
+        )
+        assert guidance_before_checkpoint.status_code == 400
+
+        continue_before_checkpoint = client.post(f"/api/v1/research/tasks/{task['task_id']}/runs/{run_id}/continue")
+        assert continue_before_checkpoint.status_code == 400
+
+        invalid_run_guidance = client.post(
+            f"/api/v1/research/tasks/{task['task_id']}/runs/run-missing/guidance",
+            json={"text": "continue this branch"},
+        )
+        assert invalid_run_guidance.status_code == 400
     finally:
         client.close()
         db_session.close()
@@ -348,6 +431,7 @@ def test_workbench_config_and_gpt_step_events_are_available():
         config = config_resp.json()
         assert config["default_mode"] == "gpt_step"
         assert "gpt" in config["available_backends"]
+        assert any(item["key"] == "openclaw" and item["role"] == "agent" for item in config["provider_status"])
 
         create_resp = client.post(
             "/api/v1/research/tasks",
@@ -990,6 +1074,90 @@ def test_paper_visual_extracts_primary_figure_and_exposes_graph_preview(tmp_path
         settings.research_artifact_dir = original_artifact_dir
 
 
+def test_paper_visual_falls_back_to_template_and_manual_rebuild_is_idempotent(tmp_path):
+    settings = get_settings()
+    original_profile = settings.app_profile
+    original_artifact_dir = settings.research_artifact_dir
+    settings.app_profile = "research_local"
+    settings.research_artifact_dir = str(tmp_path / "artifacts")
+    client, db_session, _service = build_client()
+    try:
+        create_resp = client.post(
+            "/api/v1/research/tasks",
+            json={"topic": "visual fallback task", "mode": "gpt_step", "llm_backend": "gpt", "llm_model": "gpt-test"},
+        )
+        assert create_resp.status_code == 200
+        task_json = create_resp.json()
+        task_row = ResearchTaskRepo(db_session).get_by_task_id(task_json["task_id"], user_id=1)
+        assert task_row is not None
+
+        direction = ResearchDirectionRepo(db_session).replace_for_task(
+            task_row,
+            [{"name": "Direction A", "queries": ["fallback"], "exclude_terms": []}],
+        )[0]
+        paper = ResearchPaperRepo(db_session).replace_direction_papers(
+            direction,
+            [
+                {
+                    "paper_id": "paper:visual-fallback",
+                    "title": "Text Only Paper",
+                    "title_norm": "text only paper",
+                    "authors": ["Bob"],
+                    "year": 2024,
+                    "venue": "ACL",
+                    "doi": "10.1000/text-only",
+                    "url": "https://example.com/text-only",
+                    "abstract": "paper without image",
+                    "method_summary": "method",
+                    "source": "arxiv",
+                }
+            ],
+        )[0]
+        round_row = ResearchRoundRepo(db_session).create(
+            task_id=task_row.id,
+            direction_index=direction.direction_index,
+            parent_round_id=None,
+            depth=1,
+            action="expand",
+            feedback_text="fallback preview",
+            query_terms=["text only paper"],
+            status="done",
+        )
+        ResearchRoundPaperRepo(db_session).replace_for_round(round_id=round_row.id, rows=[paper], role="seed")
+
+        upload_resp = client.post(
+            f"/api/v1/research/tasks/{task_json['task_id']}/papers/{paper.paper_id}/pdf/upload",
+            files={"file": ("text-only.pdf", _pdf_without_image_bytes(), "application/pdf")},
+        )
+        assert upload_resp.status_code == 200
+
+        asset_resp = client.get(f"/api/v1/research/tasks/{task_json['task_id']}/papers/{paper.paper_id}/asset/meta")
+        assert asset_resp.status_code == 200
+        by_kind = {item["kind"]: item for item in asset_resp.json()["items"]}
+        assert by_kind["figure"]["status"] == "not_extracted"
+        assert by_kind["visual"]["status"] == "available"
+        assert by_kind["visual"]["mime_type"] == "image/svg+xml"
+
+        rebuild_one = client.post(f"/api/v1/research/tasks/{task_json['task_id']}/papers/{paper.paper_id}/visual/build")
+        rebuild_two = client.post(f"/api/v1/research/tasks/{task_json['task_id']}/papers/{paper.paper_id}/visual/build")
+        assert rebuild_one.status_code == 200
+        assert rebuild_two.status_code == 200
+        assert rebuild_two.json()["paper_id"] == paper.paper_id
+
+        graph_resp = client.get(f"/api/v1/research/tasks/{task_json['task_id']}/graph?view=tree&include_papers=true")
+        assert graph_resp.status_code == 200
+        graph_node = next(node for node in graph_resp.json()["nodes"] if node["id"] == paper.paper_id)
+        assert graph_node["preview_kind"] == "visual"
+        assert "kind=visual" in graph_node["preview_url"]
+        assert "disposition=inline" in graph_node["preview_url"]
+        assert graph_node["visual_status"] == "visual_ready"
+    finally:
+        client.close()
+        db_session.close()
+        settings.app_profile = original_profile
+        settings.research_artifact_dir = original_artifact_dir
+
+
 def test_paper_visual_extracts_overall_figure_and_uses_it_for_preview(tmp_path):
     settings = get_settings()
     original_profile = settings.app_profile
@@ -1090,7 +1258,7 @@ def test_paper_visual_extracts_vector_figure_via_caption_clip_fallback(tmp_path)
     try:
         create_resp = client.post(
             "/api/v1/research/tasks",
-            json={"topic": "vector figure task", "mode": "gpt_step", "llm_backend": "gpt", "llm_model": "gpt-test"},
+            json={"topic": "vector overall task", "mode": "gpt_step", "llm_backend": "gpt", "llm_model": "gpt-test"},
         )
         assert create_resp.status_code == 200
         task_json = create_resp.json()
@@ -1099,7 +1267,7 @@ def test_paper_visual_extracts_vector_figure_via_caption_clip_fallback(tmp_path)
 
         direction = ResearchDirectionRepo(db_session).replace_for_task(
             task_row,
-            [{"name": "Direction A", "queries": ["vector"], "exclude_terms": []}],
+            [{"name": "Direction A", "queries": ["vector overall"], "exclude_terms": []}],
         )[0]
         paper = ResearchPaperRepo(db_session).replace_direction_papers(
             direction,
@@ -1164,7 +1332,7 @@ def test_paper_assets_auto_materialize_visual_markdown_and_bib(tmp_path):
     try:
         create_resp = client.post(
             "/api/v1/research/tasks",
-            json={"topic": "auto materialize task", "mode": "gpt_step", "llm_backend": "gpt", "llm_model": "gpt-test"},
+            json={"topic": "asset materialize task", "mode": "gpt_step", "llm_backend": "gpt", "llm_model": "gpt-test"},
         )
         assert create_resp.status_code == 200
         task_json = create_resp.json()
@@ -1173,37 +1341,26 @@ def test_paper_assets_auto_materialize_visual_markdown_and_bib(tmp_path):
 
         direction = ResearchDirectionRepo(db_session).replace_for_task(
             task_row,
-            [{"name": "Direction A", "queries": ["gamma"], "exclude_terms": []}],
+            [{"name": "Direction A", "queries": ["materialize"], "exclude_terms": []}],
         )[0]
         paper = ResearchPaperRepo(db_session).replace_direction_papers(
             direction,
             [
                 {
                     "paper_id": "paper:auto-assets",
-                    "title": "Auto Materialized Assets Paper",
-                    "title_norm": "auto materialized assets paper",
-                    "authors": ["Alice", "Bob"],
-                    "year": 2024,
-                    "venue": "ASE",
+                    "title": "Auto Asset Paper",
+                    "title_norm": "auto asset paper",
+                    "authors": ["Alice"],
+                    "year": 2025,
+                    "venue": "ACL",
                     "doi": "10.1000/auto-assets",
                     "url": "https://example.com/auto-assets",
-                    "abstract": "This paper explains why generated paper assets should not appear as missing before hydration.",
+                    "abstract": "paper without uploaded pdf",
                     "method_summary": "method",
                     "source": "semantic_scholar",
                 }
             ],
         )[0]
-        round_row = ResearchRoundRepo(db_session).create(
-            task_id=task_row.id,
-            direction_index=direction.direction_index,
-            parent_round_id=None,
-            depth=1,
-            action="expand",
-            feedback_text="auto materialize preview",
-            query_terms=["auto assets paper"],
-            status="done",
-        )
-        ResearchRoundPaperRepo(db_session).replace_for_round(round_id=round_row.id, rows=[paper], role="seed")
 
         asset_resp = client.get(f"/api/v1/research/tasks/{task_json['task_id']}/papers/{paper.paper_id}/asset/meta")
         assert asset_resp.status_code == 200
@@ -1232,110 +1389,31 @@ def test_candidate_pdf_urls_include_live_metadata_open_access_links(monkeypatch)
     paper = SimpleNamespace(
         paper_id="abc44cc20885d32046b67aecac1cea0a3e8c4603",
         doi="10.1109/ASE56229.2023.00063",
+        title="OpenClaw Auto",
         url="https://www.semanticscholar.org/paper/abc44cc20885d32046b67aecac1cea0a3e8c4603",
         source="semantic_scholar",
     )
     monkeypatch.setattr(
         service,
         "_semantic_scholar_pdf_candidates",
-        lambda _paper: ["https://arxiv.org/pdf/2309.09308.pdf", "https://arxiv.org/abs/2309.09308"],
+        lambda _paper: ["https://semanticscholar.org/open.pdf"],
     )
     monkeypatch.setattr(
         service,
         "_openalex_pdf_candidates",
-        lambda _paper: ["https://doi.org/10.1109/ASE56229.2023.00063"],
+        lambda _paper: ["https://openalex.org/open.pdf"],
+    )
+    monkeypatch.setattr(
+        service,
+        "_arxiv_pdf_candidates",
+        lambda _paper: ["https://arxiv.org/pdf/1234.5678.pdf"],
     )
 
-    candidates = service._candidate_pdf_urls(paper)
-
-    assert "https://www.semanticscholar.org/paper/abc44cc20885d32046b67aecac1cea0a3e8c4603" in candidates
-    assert "https://doi.org/10.1109/ASE56229.2023.00063" in candidates
-    assert "https://arxiv.org/pdf/2309.09308.pdf" in candidates
-    assert "https://arxiv.org/abs/2309.09308" in candidates
-
-
-def test_paper_visual_falls_back_to_template_and_manual_rebuild_is_idempotent(tmp_path):
-    settings = get_settings()
-    original_profile = settings.app_profile
-    original_artifact_dir = settings.research_artifact_dir
-    settings.app_profile = "research_local"
-    settings.research_artifact_dir = str(tmp_path / "artifacts")
-    client, db_session, _service = build_client()
-    try:
-        create_resp = client.post(
-            "/api/v1/research/tasks",
-            json={"topic": "visual fallback task", "mode": "gpt_step", "llm_backend": "gpt", "llm_model": "gpt-test"},
-        )
-        assert create_resp.status_code == 200
-        task_json = create_resp.json()
-        task_row = ResearchTaskRepo(db_session).get_by_task_id(task_json["task_id"], user_id=1)
-        assert task_row is not None
-
-        direction = ResearchDirectionRepo(db_session).replace_for_task(
-            task_row,
-            [{"name": "Direction A", "queries": ["fallback"], "exclude_terms": []}],
-        )[0]
-        paper = ResearchPaperRepo(db_session).replace_direction_papers(
-            direction,
-            [
-                {
-                    "paper_id": "paper:visual-fallback",
-                    "title": "Text Only Paper",
-                    "title_norm": "text only paper",
-                    "authors": ["Bob"],
-                    "year": 2024,
-                    "venue": "ACL",
-                    "doi": "10.1000/text-only",
-                    "url": "https://example.com/text-only",
-                    "abstract": "paper without image",
-                    "method_summary": "method",
-                    "source": "arxiv",
-                }
-            ],
-        )[0]
-        round_row = ResearchRoundRepo(db_session).create(
-            task_id=task_row.id,
-            direction_index=direction.direction_index,
-            parent_round_id=None,
-            depth=1,
-            action="expand",
-            feedback_text="fallback preview",
-            query_terms=["text only paper"],
-            status="done",
-        )
-        ResearchRoundPaperRepo(db_session).replace_for_round(round_id=round_row.id, rows=[paper], role="seed")
-
-        upload_resp = client.post(
-            f"/api/v1/research/tasks/{task_json['task_id']}/papers/{paper.paper_id}/pdf/upload",
-            files={"file": ("text-only.pdf", _pdf_without_image_bytes(), "application/pdf")},
-        )
-        assert upload_resp.status_code == 200
-
-        asset_resp = client.get(f"/api/v1/research/tasks/{task_json['task_id']}/papers/{paper.paper_id}/asset/meta")
-        assert asset_resp.status_code == 200
-        by_kind = {item["kind"]: item for item in asset_resp.json()["items"]}
-        assert by_kind["figure"]["status"] == "not_extracted"
-        assert by_kind["visual"]["status"] == "available"
-        assert by_kind["visual"]["mime_type"] == "image/svg+xml"
-
-        rebuild_one = client.post(f"/api/v1/research/tasks/{task_json['task_id']}/papers/{paper.paper_id}/visual/build")
-        rebuild_two = client.post(f"/api/v1/research/tasks/{task_json['task_id']}/papers/{paper.paper_id}/visual/build")
-        assert rebuild_one.status_code == 200
-        assert rebuild_two.status_code == 200
-        assert rebuild_two.json()["paper_id"] == paper.paper_id
-
-        graph_resp = client.get(f"/api/v1/research/tasks/{task_json['task_id']}/graph?view=tree&include_papers=true")
-        assert graph_resp.status_code == 200
-        graph_node = next(node for node in graph_resp.json()["nodes"] if node["id"] == paper.paper_id)
-        assert graph_node["preview_kind"] == "visual"
-        assert "kind=visual" in graph_node["preview_url"]
-        assert "disposition=inline" in graph_node["preview_url"]
-        assert graph_node["visual_status"] == "visual_ready"
-    finally:
-        client.close()
-        db_session.close()
-        settings.app_profile = original_profile
-        settings.research_artifact_dir = original_artifact_dir
+    urls = service._candidate_pdf_urls(paper)
+    assert "https://doi.org/10.1109/ASE56229.2023.00063" in urls
+    assert "https://semanticscholar.org/open.pdf" in urls
+    assert "https://openalex.org/open.pdf" in urls
+    assert "https://arxiv.org/pdf/1234.5678.pdf" in urls
 
 
 def test_paper_detail_includes_venue_metrics(tmp_path):
@@ -1348,7 +1426,7 @@ def test_paper_detail_includes_venue_metrics(tmp_path):
     try:
         create_resp = client.post(
             "/api/v1/research/tasks",
-            json={"topic": "venue metrics task", "mode": "gpt_step", "llm_backend": "gpt", "llm_model": "gpt-test"},
+            json={"topic": "venue metric task", "mode": "gpt_step", "llm_backend": "gpt", "llm_model": "gpt-test"},
         )
         assert create_resp.status_code == 200
         task_json = create_resp.json()
@@ -1357,21 +1435,21 @@ def test_paper_detail_includes_venue_metrics(tmp_path):
 
         direction = ResearchDirectionRepo(db_session).replace_for_task(
             task_row,
-            [{"name": "Direction A", "queries": ["venue metrics"], "exclude_terms": []}],
+            [{"name": "Direction A", "queries": ["acl"], "exclude_terms": []}],
         )[0]
         paper = ResearchPaperRepo(db_session).replace_direction_papers(
             direction,
             [
                 {
-                    "paper_id": "paper:venue-metrics",
-                    "title": "Venue Metrics Paper",
-                    "title_norm": "venue metrics paper",
+                    "paper_id": "paper:venue-metric",
+                    "title": "Venue Metric Paper",
+                    "title_norm": "venue metric paper",
                     "authors": ["Alice"],
                     "year": 2025,
                     "venue": "ACL",
-                    "doi": "10.1000/venue-metrics",
-                    "url": "https://example.com/venue-metrics",
-                    "abstract": "paper with venue metrics",
+                    "doi": "10.1000/venue-metric",
+                    "url": "https://example.com/venue-metric",
+                    "abstract": "abstract",
                     "method_summary": "method",
                     "source": "semantic_scholar",
                 }
@@ -1387,9 +1465,8 @@ def test_paper_detail_includes_venue_metrics(tmp_path):
             "sci": {"indexed": False, "source": "test"},
             "ei": {"indexed": True, "source": "test"},
             "impact_factor": {"value": None, "year": None, "source": None},
-            "venue_citation_count": 1234,
             "paper_citation_count": 56,
-            "data_sources": ["test"],
+            "venue_citation_count": 1234,
         }
 
         detail_resp = client.get(f"/api/v1/research/tasks/{task_json['task_id']}/papers/{paper.paper_id}")

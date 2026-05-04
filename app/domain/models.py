@@ -323,6 +323,9 @@ class ResearchTask(Base):
     canvas_states: Mapped[list["ResearchCanvasState"]] = relationship(back_populates="task")
     run_events: Mapped[list["ResearchRunEvent"]] = relationship(back_populates="task")
     node_chats: Mapped[list["ResearchNodeChat"]] = relationship(back_populates="task")
+    chat_threads: Mapped[list["ResearchChatThread"]] = relationship(back_populates="task")
+    chat_messages: Mapped[list["ResearchChatMessage"]] = relationship(back_populates="task")
+    chat_attachments: Mapped[list["ResearchChatAttachment"]] = relationship(back_populates="task")
     export_records: Mapped[list["ResearchExportRecord"]] = relationship(back_populates="task")
     compare_reports: Mapped[list["ResearchCompareReport"]] = relationship(back_populates="task")
 
@@ -576,6 +579,60 @@ class ResearchNodeChat(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
 
     task: Mapped["ResearchTask"] = relationship(back_populates="node_chats")
+
+
+class ResearchChatThread(Base):
+    __tablename__ = "research_chat_threads"
+    __table_args__ = (UniqueConstraint("task_id", "thread_id", name="uq_research_chat_thread_task_thread"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    task_id: Mapped[int] = mapped_column(ForeignKey("research_tasks.id"), nullable=False)
+    thread_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    title: Mapped[str] = mapped_column(String(255), nullable=False, default="新对话")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+    task: Mapped["ResearchTask"] = relationship(back_populates="chat_threads")
+    messages: Mapped[list["ResearchChatMessage"]] = relationship(back_populates="thread")
+
+
+class ResearchChatAttachment(Base):
+    __tablename__ = "research_chat_attachments"
+    __table_args__ = (UniqueConstraint("task_id", "attachment_id", name="uq_research_chat_attachment_task_attachment"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    task_id: Mapped[int] = mapped_column(ForeignKey("research_tasks.id"), nullable=False)
+    attachment_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    filename: Mapped[str] = mapped_column(String(255), nullable=False)
+    mime_type: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    file_ext: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    size_bytes: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    storage_path: Mapped[str] = mapped_column(Text, nullable=False)
+    text_preview: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+    task: Mapped["ResearchTask"] = relationship(back_populates="chat_attachments")
+
+
+class ResearchChatMessage(Base):
+    __tablename__ = "research_chat_messages"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    task_id: Mapped[int] = mapped_column(ForeignKey("research_tasks.id"), nullable=False)
+    thread_id: Mapped[int] = mapped_column(ForeignKey("research_chat_threads.id"), nullable=False)
+    role: Mapped[str] = mapped_column(String(16), nullable=False)
+    content: Mapped[str] = mapped_column(Text, nullable=False)
+    context_node_ids_json: Mapped[str] = mapped_column(Text, nullable=False, default="[]")
+    attachment_ids_json: Mapped[str] = mapped_column(Text, nullable=False, default="[]")
+    provider: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    model: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    status: Mapped[str] = mapped_column(String(16), nullable=False, default="done")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+    task: Mapped["ResearchTask"] = relationship(back_populates="chat_messages")
+    thread: Mapped["ResearchChatThread"] = relationship(back_populates="messages")
 
 
 class ResearchRound(Base):

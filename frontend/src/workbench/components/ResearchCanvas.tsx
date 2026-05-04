@@ -20,7 +20,6 @@ export function ResearchCanvas(props: {
   nodes: Array<Node<FlowNodeData>>;
   edges: Array<Edge>;
   showMiniMap: boolean;
-  miniMapBottomOffset: number;
   flowRef: React.MutableRefObject<ReactFlowInstance<Node<FlowNodeData>, Edge> | null>;
   onNodesChange: OnNodesChange<Node<FlowNodeData>>;
   onEdgesChange: OnEdgesChange<Edge>;
@@ -31,7 +30,7 @@ export function ResearchCanvas(props: {
   onMoveEnd: (viewport: { x: number; y: number; zoom: number }) => void;
   onNodeDragStart: () => void;
   onNodeDragStop: () => void;
-  onSelectionChange: () => void;
+  onSelectionChange: (selection: { nodes: Array<Node<FlowNodeData>>; edges: Array<Edge> }) => void;
   onNodesDelete: (deleted: Array<Node<FlowNodeData>>) => void;
   onEdgesDelete: (deleted: Array<Edge>) => void;
 }) {
@@ -51,18 +50,17 @@ export function ResearchCanvas(props: {
       onPaneClick={props.onPaneClick}
       onMoveStart={props.onMoveStart}
       onMoveEnd={(_, viewport) => props.onMoveEnd(viewport)}
-      onSelectionChange={props.onSelectionChange}
+      onSelectionChange={(selection) => props.onSelectionChange({ nodes: selection.nodes as Array<Node<FlowNodeData>>, edges: selection.edges })}
       onInit={(instance) => {
         props.flowRef.current = instance;
       }}
       defaultEdgeOptions={edgeVisual}
       connectionLineStyle={{ stroke: "#64748b", strokeWidth: 2.5 }}
       onlyRenderVisibleElements
-      selectionOnDrag={false}
-      selectionKeyCode={["Shift"]}
+      selectionOnDrag
       selectionMode={SelectionMode.Partial}
       multiSelectionKeyCode={["Meta", "Control", "Shift"]}
-      panOnDrag
+      panOnDrag={[1, 2]}
       zoomOnScroll
       fitView={false}
       deleteKeyCode={["Backspace", "Delete"]}
@@ -70,8 +68,8 @@ export function ResearchCanvas(props: {
       maxZoom={1.6}
     >
       <Background color="#d8e0ea" gap={28} />
-      {props.showMiniMap ? <MiniMap pannable zoomable style={{ right: 24, bottom: props.miniMapBottomOffset }} /> : null}
-      <Controls />
+      {props.showMiniMap ? <MiniMap pannable zoomable position="bottom-right" style={{ bottom: 24, right: 24, width: 164, height: 112 }} /> : null}
+      <Controls position="bottom-left" style={{ bottom: 24, left: 24 }} />
     </ReactFlow>
   );
 }
