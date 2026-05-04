@@ -9,6 +9,8 @@ import type {
   GraphEdge,
   GraphNode,
   GraphResponse,
+  PaperAssetResponse,
+  PaperDetail,
   RunEvent,
   RunSummary,
   TaskMode,
@@ -123,6 +125,24 @@ export function modeLabel(mode: TaskMode) {
 
 export function backendLabel(backend: Backend) {
   return backend === "openclaw" ? "OpenClaw" : "GPT API";
+}
+
+export function derivePaperPdfUrl(paperAssets?: PaperAssetResponse | null, paperDetail?: Pick<PaperDetail, "url"> | null) {
+  const asset = paperAssets?.items.find((item) => item.kind === "pdf" && (item.open_url || item.download_url));
+  if (asset?.open_url || asset?.download_url) {
+    return String(asset.open_url || asset.download_url || "");
+  }
+  const rawUrl = String(paperDetail?.url || "").trim();
+  if (!rawUrl) return "";
+  const normalized = rawUrl.replace(/^http:\/\/arxiv\.org\//i, "https://arxiv.org/");
+  if (/arxiv\.org\/abs\//i.test(normalized)) {
+    const pdfUrl = normalized.replace(/\/abs\//i, "/pdf/");
+    return pdfUrl.toLowerCase().endsWith(".pdf") ? pdfUrl : `${pdfUrl}.pdf`;
+  }
+  if (/arxiv\.org\/pdf\//i.test(normalized) && !normalized.toLowerCase().endsWith(".pdf")) {
+    return `${normalized}.pdf`;
+  }
+  return normalized.toLowerCase().endsWith(".pdf") ? normalized : "";
 }
 
 export function autoStatusLabel(status: string) {
@@ -647,8 +667,20 @@ export function inferRoundId(nodeId: string, data?: Partial<FlowNodeData> | null
   return null;
 }
 
-export function isPaperNode(nodeId?: string) {
-  return Boolean(nodeId && nodeId.startsWith("paper:"));
+export function isPaperNode(nodeOrId?: string | { id?: string; type?: string | null; data?: { type?: string | null } | null } | null) {
+  if (!nodeOrId) return false;
+  if (typeof nodeOrId === "string") {
+    const raw = nodeOrId.trim();
+    if (!raw) return false;
+    if (raw.startsWith("paper:")) return true;
+    if (/^(topic|direction|round|checkpoint|report|note|question|reference|group):/i.test(raw)) return false;
+    if (/^\d{4}\.\d{4,5}(v\d+)?$/i.test(raw)) return true;
+    if (/^10\.\d{4,9}\//i.test(raw)) return true;
+    return false;
+  }
+  const explicitType = String(nodeOrId.data?.type || nodeOrId.type || "").trim().toLowerCase();
+  if (explicitType) return explicitType === "paper";
+  return String(nodeOrId.id || "").startsWith("paper:");
 }
 
 export function isManualNode(node: Node<FlowNodeData>) {
@@ -656,7 +688,7 @@ export function isManualNode(node: Node<FlowNodeData>) {
 }
 
 export function selectedPaperNodes(nodes: Array<Node<FlowNodeData>>) {
-  return nodes.filter((node) => Boolean(node.selected) && isPaperNode(node.id));
+  return nodes.filter((node) => Boolean(node.selected) && isPaperNode(node));
 }
 
 export function formatDateTime(value?: string | null) {

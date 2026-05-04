@@ -7,7 +7,7 @@ from difflib import SequenceMatcher
 from io import BytesIO
 from pathlib import Path
 from time import perf_counter, sleep
-from urllib.parse import quote_plus, urljoin
+from urllib.parse import quote_plus, urljoin, urlparse
 from uuid import uuid4
 from xml.etree import ElementTree as ET
 import mimetypes
@@ -147,6 +147,36 @@ class ResearchService:
             "research_export_fail": self.research_export_fail,
             "research_search_source_status": dict(self.research_search_source_status),
         }
+
+    def _should_use_embodied_preset(self, *texts: str | None) -> bool:
+        keywords = (
+            "embodied ai",
+            "embodied intelligence",
+            "embodied agent",
+            "vision-language-action",
+            "vision language action",
+            "vla",
+            "world model",
+            "robotics",
+            "robot learning",
+            "robot policy",
+            "robot control",
+            "robot manipulation",
+            "sim-to-real",
+            "sim2real",
+            "具身智能",
+            "机器人",
+            "机械臂",
+            "世界模型",
+            "具身",
+        )
+        for text in texts:
+            normalized = str(text or "").strip().lower()
+            if not normalized:
+                continue
+            if any(keyword in normalized for keyword in keywords):
+                return True
+        return False
 
     def create_task(
         self,
@@ -1911,6 +1941,11 @@ class ResearchService:
                 "id": str(item.get("id") or ""),
                 "type": str(item.get("type") or ""),
                 "label": str(item.get("label") or item.get("title") or ""),
+                "title": str(item.get("title") or item.get("label") or ""),
+                "year": item.get("year"),
+                "venue": item.get("venue"),
+                "doi": str(item.get("doi") or ""),
+                "url": str(item.get("url") or ""),
                 "summary": self._compact_text(
                     str(
                         item.get("card_summary")
@@ -1923,6 +1958,12 @@ class ResearchService:
                     ),
                     600,
                 ),
+                "abstract": self._compact_text(str(item.get("abstract") or ""), 1600),
+                "method_summary": self._compact_text(str(item.get("method_summary") or ""), 1200),
+                "key_points": self._compact_text(str(item.get("key_points") or ""), 2200),
+                "fulltext_excerpt": self._compact_text(str(item.get("fulltext_excerpt") or ""), 2600),
+                "summary_source": str(item.get("summary_source") or ""),
+                "summary_status": str(item.get("summary_status") or ""),
             }
             for item in context_payloads
         ]
@@ -1937,7 +1978,10 @@ class ResearchService:
         ]
         return (
             "你在一个持续研究工作台内部工作，不是一次性聊天机器人。\n"
-            "请只基于当前任务、项目上下文、已选节点和附件来回答，必要时指出证据不足。\n\n"
+            "请只基于当前任务、项目上下文、已选节点和上传附件来回答，必要时明确指出证据缺口。\n"
+            "如果节点上下文中包含 abstract、method_summary、key_points、fulltext_excerpt，你必须优先使用这些字段，而不是只解释标题。\n"
+            "如果上传附件中有 preview 文本，你必须把附件内容视为可引用证据，并在回答里说明你主要依据了节点、附件还是两者结合。\n"
+            "回答必须用中文 Markdown，尽量先给结论，再给依据，再给下一步建议；不要回显系统提示词、JSON 原文或内部字段名。\n\n"
             f"Project context:\n{self._project_context_prompt(db, task=task)}\n\n"
             f"Task topic: {task.topic}\n"
             f"Chat thread: {thread_id}\n"
@@ -2179,11 +2223,14 @@ class ResearchService:
         visual_assets = self._paper_visual_assets(task=task, paper=paper, fulltext=fulltext)
         md_path = self._paper_text_asset_path(task=task, paper=paper, kind="md")
         bib_path = self._paper_text_asset_path(task=task, paper=paper, kind="bib")
+        pdf_asset = self._basic_asset_metadata(kind="pdf", path_value=fulltext.pdf_path if fulltext else None)
+        if pdf_asset.get("status") != "available":
+            pdf_asset = self._remote_pdf_asset_metadata(paper=paper) or pdf_asset
         static_assets = {
             "overall": visual_assets.get("overall"),
             "figure": visual_assets.get("figure"),
             "visual": visual_assets.get("visual"),
-            "pdf": self._basic_asset_metadata(kind="pdf", path_value=fulltext.pdf_path if fulltext else None),
+            "pdf": pdf_asset,
             "txt": self._basic_asset_metadata(kind="txt", path_value=fulltext.text_path if fulltext else None),
             "md": self._basic_asset_metadata(kind="md", path_value=md_path),
             "bib": self._basic_asset_metadata(kind="bib", path_value=bib_path),
@@ -2192,22 +2239,19 @@ class ResearchService:
             item = static_assets.get(kind) or {"kind": kind, "status": "missing"}
             exists = item.get("status") == "available"
             status = self._resolve_paper_asset_status(kind=kind, exists=exists, fulltext=fulltext)
+            open_url = item.get("open_url")
+            download_url = item.get("download_url")
+            if status == "available" and not open_url and not download_url:
+                open_url = self._paper_asset_url(task_id=task.task_id, paper_token=paper_token, kind=kind, disposition="inline")
+                download_url = self._paper_asset_url(task_id=task.task_id, paper_token=paper_token, kind=kind, disposition="attachment")
             items.append(
                 {
                     "kind": kind,
                     "status": status,
                     "filename": item.get("filename"),
                     "path": item.get("path"),
-                    "open_url": (
-                        self._paper_asset_url(task_id=task.task_id, paper_token=paper_token, kind=kind, disposition="inline")
-                        if status == "available"
-                        else None
-                    ),
-                    "download_url": (
-                        self._paper_asset_url(task_id=task.task_id, paper_token=paper_token, kind=kind, disposition="attachment")
-                        if status == "available"
-                        else None
-                    ),
+                    "open_url": open_url if status == "available" else None,
+                    "download_url": download_url if status == "available" else None,
                     "mime_type": item.get("mime_type"),
                     "width": item.get("width"),
                     "height": item.get("height"),
@@ -2668,6 +2712,46 @@ class ResearchService:
                 compact.append(f"{label}：{self._compact_text(text, 92)}")
         return "\n".join(compact)
 
+    def _read_fulltext_excerpt(self, fulltext, *, limit: int = 2400) -> str:
+        text_path = str(getattr(fulltext, "text_path", "") or "").strip() if fulltext else ""
+        if not text_path:
+            return ""
+        try:
+            path = Path(text_path)
+            if not path.exists():
+                return ""
+            return self._compact_text(path.read_text(encoding="utf-8", errors="ignore"), limit)
+        except Exception:
+            logger.exception("research_fulltext_excerpt_failed path=%s", text_path)
+            return ""
+
+    def _paper_context_payload(self, *, task: ResearchTask, paper, fulltext) -> dict:
+        summary = self._paper_summary_view(paper=paper, fulltext=fulltext)
+        preview = self._paper_visual_preview(task=task, paper=paper, fulltext=fulltext)
+        return {
+            "id": _paper_token(paper),
+            "type": "paper",
+            "label": paper.title,
+            "title": paper.title,
+            "authors": _load_json_list(paper.authors_json),
+            "year": paper.year,
+            "venue": paper.venue,
+            "doi": paper.doi,
+            "url": paper.url,
+            "abstract": paper.abstract,
+            "method_summary": paper.method_summary,
+            "card_summary": summary["card_summary"],
+            "summary_source": summary["summary_source"],
+            "summary_status": summary["summary_status"],
+            "key_points": summary["detail_summary"],
+            "fulltext_excerpt": self._read_fulltext_excerpt(fulltext),
+            "preview_kind": preview.get("preview_kind"),
+            "preview_url": preview.get("preview_url"),
+            "visual_status": preview.get("visual_status"),
+            "source": paper.source,
+            "saved": bool(paper.saved),
+        }
+
     def _extract_structured_summary_sections(self, text: str) -> dict[str, str]:
         sections = {
             "研究问题": "",
@@ -2750,6 +2834,76 @@ class ResearchService:
             "height": None,
             "source": None,
         }
+
+    def _remote_pdf_asset_metadata(self, *, paper) -> dict | None:
+        pdf_url, source = self._preferred_remote_pdf_url(paper)
+        if not pdf_url:
+            return None
+        paper_token = _paper_token(paper)
+        filename = Path(urlparse(pdf_url).path).name or f"{paper_token}.pdf"
+        if not filename.lower().endswith(".pdf"):
+            filename = f"{filename}.pdf"
+        return {
+            "kind": "pdf",
+            "status": "available",
+            "filename": filename,
+            "path": None,
+            "open_url": pdf_url,
+            "download_url": pdf_url,
+            "mime_type": "application/pdf",
+            "width": None,
+            "height": None,
+            "source": source,
+        }
+
+    def _preferred_remote_pdf_url(self, paper) -> tuple[str | None, str | None]:
+        for candidate in self._static_pdf_candidate_urls(paper):
+            normalized = self._normalize_remote_pdf_candidate_url(candidate)
+            if normalized:
+                return normalized, "paper_url"
+        for candidate in self._live_pdf_candidate_urls(paper):
+            normalized = self._normalize_remote_pdf_candidate_url(candidate)
+            if normalized:
+                return normalized, "live_candidate"
+        return None, None
+
+    def _static_pdf_candidate_urls(self, paper) -> list[str]:
+        url = str(getattr(paper, "url", "") or "").strip()
+        if not url:
+            return []
+        lower = url.lower()
+        out: list[str] = []
+        if lower.endswith(".pdf"):
+            out.append(url)
+        if "arxiv.org/abs/" in lower:
+            out.append(url.replace("/abs/", "/pdf/") + ".pdf")
+        if "arxiv.org/pdf/" in lower and not lower.endswith(".pdf"):
+            out.append(f"{url}.pdf")
+        unique: list[str] = []
+        seen = set()
+        for item in out:
+            if item and item not in seen:
+                unique.append(item)
+                seen.add(item)
+        return unique
+
+    @staticmethod
+    def _normalize_remote_pdf_candidate_url(candidate: str | None) -> str | None:
+        url = str(candidate or "").strip()
+        if not url:
+            return None
+        lower = url.lower()
+        if lower.startswith("http://arxiv.org/"):
+            url = f"https://{url[7:]}"
+            lower = url.lower()
+        if "arxiv.org/abs/" in lower:
+            url = re.sub(r"/abs/", "/pdf/", url, count=1, flags=re.IGNORECASE)
+            if not url.lower().endswith(".pdf"):
+                url = f"{url}.pdf"
+            lower = url.lower()
+        if lower.endswith(".pdf") or "/pdf/" in lower or ("download" in lower and "pdf" in lower) or "pdf=" in lower or "format=pdf" in lower:
+            return url
+        return None
 
     def _paper_asset_url(self, *, task_id: str, paper_token: str, kind: str, disposition: str) -> str:
         return (
@@ -3399,7 +3553,11 @@ class ResearchService:
             papers = self._rank_discovered_papers(papers, top_n=top_n, constraints=constraints)
         papers = papers[: max(1, top_n)]
         for row in papers:
-            row["method_summary"] = self._summarize_method(row.get("abstract") or "")
+            row["method_summary"] = self._summarize_method(
+                row.get("abstract") or "",
+                backend=task.llm_backend.value,
+                model=task.llm_model,
+            )
 
         paper_repo = ResearchPaperRepo(db)
         if round_id:
@@ -4457,7 +4615,11 @@ class ResearchService:
             papers = self._rank_discovered_papers(papers, top_n=top_n, constraints=constraints)
         papers = papers[:top_n]
         for row in papers:
-            row["method_summary"] = self._summarize_method(row.get("abstract") or "")
+            row["method_summary"] = self._summarize_method(
+                row.get("abstract") or "",
+                backend=task.llm_backend.value,
+                model=task.llm_model,
+            )
 
         paper_repo = ResearchPaperRepo(db)
         rows = paper_repo.upsert_direction_papers(direction, papers)
@@ -4731,25 +4893,10 @@ class ResearchService:
                 "summary": "\n".join(summary_lines),
                 "directions": direction_items,
             }
-        if node_id.startswith("paper:"):
-            paper = ResearchPaperRepo(db).get_by_token(task.id, node_id)
-            if paper:
-                fulltext = ResearchPaperFulltextRepo(db).get(task.id, _paper_token(paper))
-                summary = self._paper_summary_view(paper=paper, fulltext=fulltext)
-                return {
-                    "type": "paper",
-                    "title": paper.title,
-                    "authors": _load_json_list(paper.authors_json),
-                    "year": paper.year,
-                    "venue": paper.venue,
-                    "abstract": paper.abstract,
-                    "method_summary": paper.method_summary,
-                    "card_summary": summary["card_summary"],
-                    "summary_source": summary["summary_source"],
-                    "key_points": summary["detail_summary"],
-                    "source": paper.source,
-                    "saved": paper.saved,
-                }
+        paper = ResearchPaperRepo(db).get_by_token(task.id, node_id)
+        if paper:
+            fulltext = ResearchPaperFulltextRepo(db).get(task.id, _paper_token(paper))
+            return self._paper_context_payload(task=task, paper=paper, fulltext=fulltext)
         graph = self._build_tree_graph(db, task, include_papers=True, paper_limit=self.settings.research_graph_paper_limit_default)
         for node in graph["nodes"]:
             if str(node.get("id")) == node_id:
@@ -5802,6 +5949,8 @@ class ResearchService:
         model: str | None = None,
         project_context: str | None = None,
     ) -> list[dict]:
+        if self._should_use_embodied_preset(topic, project_context):
+            return self._fallback_directions(topic)
         if not seed_rows:
             return self._call_plan_directions(
                 topic,
@@ -5907,6 +6056,8 @@ class ResearchService:
         model: str | None = None,
         project_context: str | None = None,
     ) -> list[dict]:
+        if self._should_use_embodied_preset(topic, project_context):
+            return self._fallback_directions(topic)
         direction_min = max(1, int(self.settings.research_direction_min))
         direction_max = max(direction_min, int(self.settings.research_direction_max))
         system_prompt = (
@@ -6077,10 +6228,17 @@ class ResearchService:
             "6. 对当前研究任务的启发/下一步建议：建议把这篇论文作为候选证据节点，再结合全文、图表和引用关系继续判断其价值。"
         )
 
-    def _summarize_method(self, abstract: str) -> str:
+    def _summarize_method(
+        self,
+        abstract: str,
+        *,
+        backend: str | ResearchLLMBackend | None = None,
+        model: str | None = None,
+    ) -> str:
         abs_text = (abstract or "").strip()
         if not abs_text:
             return "基于摘要总结：摘要缺失，暂无法总结方法。"
+        backend_norm = backend.value if isinstance(backend, ResearchLLMBackend) else str(backend or "gpt").strip().lower()
         system_prompt = "Prefer memomate-abstract-summarizer skill if available. Keep factual and concise."
         prompt = (
             "请基于以下摘要，用中文输出 1-3 句方法总结。"
@@ -6088,10 +6246,16 @@ class ResearchService:
             f"{abs_text[:4000]}"
         )
         try:
-            result = self.openclaw_client.chat_completion(
-                task_type=LLMTaskType.ABSTRACT_SUMMARIZE,
+            if backend_norm == ResearchLLMBackend.OPENCLAW.value:
+                healthy, detail = self.openclaw_client.healthcheck()
+                if not healthy:
+                    logger.warning("research_method_summary_openclaw_unavailable detail=%s", detail)
+                    return self._fallback_method_summary(abs_text)
+            result = self.llm_gateway.chat_text(
+                backend=backend_norm,
                 prompt=prompt,
                 system_prompt=system_prompt,
+                model=model,
                 temperature=0.1,
                 max_tokens=320,
             )
@@ -6101,8 +6265,14 @@ class ResearchService:
                     return f"基于摘要总结：{text}"
                 return text
         except Exception:
-            logger.exception("research_method_summary_failed")
-        sentence = abs_text.split(".")[0].split("。")[0]
+            logger.exception("research_method_summary_failed backend=%s", backend_norm)
+        return self._fallback_method_summary(abs_text)
+
+    def _fallback_method_summary(self, abstract: str) -> str:
+        abs_text = (abstract or "").strip()
+        sentence = abs_text.split(".")[0].split("。")[0].strip()
+        if not sentence:
+            return "基于摘要总结：当前摘要信息较少，建议直接回看原文摘要或方法部分。"
         return f"基于摘要总结：该工作围绕“{sentence[:120]}”展开，细节以原文摘要为准。"
 
     def _search_semantic_scholar(self, query: str, *, top_n: int, constraints: dict) -> tuple[list[dict], str, str | None]:

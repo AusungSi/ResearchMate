@@ -175,6 +175,52 @@ def test_fulltext_build_status_and_upload_endpoint():
         db_session.close()
 
 
+def test_paper_asset_meta_exposes_remote_arxiv_pdf_without_local_fulltext():
+    client, service, user, db_session = _build_test_client()
+    try:
+        task = service.create_task(
+            db_session,
+            user_id=user.id,
+            topic="api arxiv pdf topic",
+            constraints={"top_n": 5},
+        )
+        service.process_one_job(db_session)
+
+        service._search_semantic_scholar = lambda query, *, top_n, constraints: ([], "ok_empty", None)  # noqa: E731
+        service._search_arxiv = lambda query, *, top_n, constraints: (  # noqa: E731
+            [
+                {
+                    "paper_id": "2602.02454v1",
+                    "title": "World-Gymnast",
+                    "title_norm": "world gymnast",
+                    "authors": ["A"],
+                    "year": 2026,
+                    "venue": "arXiv",
+                    "doi": None,
+                    "url": "http://arxiv.org/abs/2602.02454v1",
+                    "abstract": "abstract",
+                    "source": "arxiv",
+                    "relevance_score": None,
+                }
+            ],
+            "ok",
+            None,
+        )
+        service.enqueue_search(db_session, user_id=user.id, direction_index=1)
+        service.process_one_job(db_session)
+
+        resp = client.get(f"/api/v1/research/tasks/{task.task_id}/papers/2602.02454v1/asset/meta")
+        assert resp.status_code == 200
+        by_kind = {item["kind"]: item for item in resp.json()["items"]}
+        assert by_kind["pdf"]["status"] == "available"
+        assert by_kind["pdf"]["open_url"] == "https://arxiv.org/pdf/2602.02454v1.pdf"
+        assert by_kind["pdf"]["download_url"] == "https://arxiv.org/pdf/2602.02454v1.pdf"
+        assert by_kind["pdf"]["source"] == "paper_url"
+    finally:
+        client.close()
+        db_session.close()
+
+
 def test_graph_build_and_view_endpoint():
     client, service, user, db_session = _build_test_client()
     try:

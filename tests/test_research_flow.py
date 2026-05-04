@@ -64,6 +64,40 @@ class FakeWeCom:
         return True, None
 
 
+def test_method_summary_uses_task_backend_instead_of_forcing_openclaw():
+    service = ResearchService(openclaw_client=FakeOpenClawClient(), wecom_client=None)
+
+    class StubGateway:
+        def __init__(self):
+            self.calls: list[dict] = []
+
+        def chat_text(self, **kwargs):
+            self.calls.append(kwargs)
+            return type(
+                "Resp",
+                (),
+                {
+                    "text": "基于摘要总结：这是来自 GPT 链路的摘要。",
+                    "provider": "gpt_api",
+                    "model": "gpt-5.4",
+                    "latency_ms": 1,
+                },
+            )()
+
+    gateway = StubGateway()
+    service.llm_gateway = gateway
+
+    result = service._summarize_method(
+        "We propose a diffusion model with staged denoising and efficient sampling.",
+        backend="gpt",
+        model="gpt-5.4",
+    )
+
+    assert result.startswith("基于摘要总结：")
+    assert gateway.calls
+    assert gateway.calls[0]["backend"] == "gpt"
+
+
 def test_research_planner_contract():
     service = ResearchService(openclaw_client=FakeOpenClawClient(), wecom_client=None)
     directions = service._plan_directions("ultrasound report generation hallucination", {})
@@ -71,6 +105,20 @@ def test_research_planner_contract():
     assert 3 <= len(directions) <= 8
     for item in directions:
         assert 2 <= len(item["queries"]) <= 4
+
+
+def test_embodied_topics_use_preset_directions():
+    service = ResearchService(openclaw_client=FakeOpenClawClient(), wecom_client=None)
+
+    directions = service._plan_directions("embodied ai for household robotics", {})
+
+    assert [item["name"] for item in directions] == [
+        "World models for robotics planning",
+        "Vision-language-action models for robot control",
+        "Robot data efficiency and imitation learning",
+        "Sim-to-real transfer and generalization",
+        "Benchmarks, safety, and deployment",
+    ]
 
 
 def test_research_flow_create_plan_search_and_select(db_session):

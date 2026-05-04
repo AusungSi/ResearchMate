@@ -50,6 +50,7 @@ import {
   canonicalGraphSignature,
   canvasPayloadSignature,
   defaultCanvasUi,
+  derivePaperPdfUrl,
   inferRoundId,
   isPaperNode,
   mergeCanvasWithGraph,
@@ -522,8 +523,15 @@ export function Workbench() {
   }, []);
 
   const selectedNode = nodes.find((node) => node.id === selectedNodeId) || null;
-  const selectedPaperId = selectedNode?.id && isPaperNode(selectedNode.id) ? selectedNode.id : "";
-  const selectedPaperIds = useMemo(() => selectedNodeIds.filter((nodeId) => isPaperNode(nodeId)), [selectedNodeIds]);
+  const selectedPaperId = selectedNode && isPaperNode(selectedNode) ? selectedNode.id : "";
+  const selectedPaperIds = useMemo(
+    () =>
+      selectedNodeIds.filter((nodeId) => {
+        const node = nodes.find((item) => item.id === nodeId);
+        return isPaperNode(node ? node : nodeId);
+      }),
+    [nodes, selectedNodeIds],
+  );
   const selectedPaperCount = selectedPaperIds.length;
 
   useEffect(() => {
@@ -548,6 +556,9 @@ export function Workbench() {
     queryFn: () => apiFetch<PaperAssetResponse>(`/api/v1/research/tasks/${activeTaskId}/papers/${encodeURIComponent(selectedPaperId)}/asset/meta`),
     enabled: Boolean(activeTaskId && selectedPaperId),
   });
+  const resolvedPaperPdfUrl = derivePaperPdfUrl(paperAssetQuery.data, paperDetailQuery.data);
+  const resolvedPaperPdfFilename =
+    paperAssetQuery.data?.items.find((item) => item.kind === "pdf")?.filename || (selectedPaperId ? `${selectedPaperId}.pdf` : "paper.pdf");
 
   function resolveBrowserUrl(url?: string | null) {
     if (!url) return "";
@@ -1660,14 +1671,12 @@ export function Workbench() {
               addNodesToChatContext(ids);
             }}
             onOpenPdf={() => {
-              const pdf = paperAssetQuery.data?.items.find((item) => item.kind === "pdf" && item.status === "available");
-              if (!openExternalUrl(pdf?.open_url || pdf?.download_url)) {
+              if (!openExternalUrl(resolvedPaperPdfUrl)) {
                 setActionStatus({ tone: "warning", text: "当前论文还没有可打开的 PDF。" });
               }
             }}
             onDownloadPdf={() => {
-              const pdf = paperAssetQuery.data?.items.find((item) => item.kind === "pdf" && item.status === "available");
-              if (!downloadExternalUrl(pdf?.download_url || pdf?.open_url, pdf?.filename || "paper.pdf")) {
+              if (!downloadExternalUrl(resolvedPaperPdfUrl, resolvedPaperPdfFilename)) {
                 setActionStatus({ tone: "warning", text: "当前论文还没有可下载的 PDF。" });
               }
             }}
@@ -1706,17 +1715,21 @@ export function Workbench() {
         </main>
       }
       detail={
-        <aside className="flex h-full min-h-0 flex-col bg-slate-50/60 p-5">
-          <div className="rounded-3xl border border-slate-200 bg-white p-2 shadow-sm">
+        <aside className="flex h-full min-h-0 flex-col bg-[radial-gradient(circle_at_top,#f8fafc_0%,#eef2f7_100%)] p-5">
+          <div className="rounded-[28px] border border-slate-200/80 bg-white/85 p-2 shadow-[0_12px_36px_rgba(15,23,42,0.08)] backdrop-blur">
             <div className="flex gap-2">
               <button
-                className={`flex-1 rounded-2xl px-3 py-2 text-sm font-medium transition ${detailTab === "info" ? "bg-slate-900 text-white" : "bg-slate-50 text-slate-600 hover:bg-slate-100"}`}
+                className={`flex-1 rounded-2xl px-3 py-2 text-sm font-medium transition ${
+                  detailTab === "info" ? "bg-slate-900 text-white shadow-sm" : "bg-slate-50 text-slate-600 hover:bg-slate-100"
+                }`}
                 onClick={() => setDetailTab("info")}
               >
                 展示信息
               </button>
               <button
-                className={`flex-1 rounded-2xl px-3 py-2 text-sm font-medium transition ${detailTab === "chat" ? "bg-slate-900 text-white" : "bg-slate-50 text-slate-600 hover:bg-slate-100"}`}
+                className={`flex-1 rounded-2xl px-3 py-2 text-sm font-medium transition ${
+                  detailTab === "chat" ? "bg-slate-900 text-white shadow-sm" : "bg-slate-50 text-slate-600 hover:bg-slate-100"
+                }`}
                 onClick={() => setDetailTab("chat")}
               >
                 对话
@@ -1827,20 +1840,18 @@ export function Workbench() {
                   onToggleHidden={toggleSelectedHidden}
                   onDeleteNode={deleteSelectedNode}
                   onOpenPdf={() => {
-                    const pdf = paperAssetQuery.data?.items.find((item) => item.kind === "pdf" && item.status === "available");
-                    if (!pdf?.open_url && !pdf?.download_url) {
+                    if (!resolvedPaperPdfUrl) {
                       setActionStatus({ tone: "warning", text: "当前论文还没有可打开的 PDF。" });
                       return;
                     }
-                    openExternalUrl(pdf?.open_url || pdf?.download_url);
+                    openExternalUrl(resolvedPaperPdfUrl);
                   }}
                   onDownloadPdf={() => {
-                    const pdf = paperAssetQuery.data?.items.find((item) => item.kind === "pdf" && item.status === "available");
-                    if (!pdf?.download_url && !pdf?.open_url) {
+                    if (!resolvedPaperPdfUrl) {
                       setActionStatus({ tone: "warning", text: "当前论文还没有可下载的 PDF。" });
                       return;
                     }
-                    downloadExternalUrl(pdf?.download_url || pdf?.open_url, pdf?.filename || "paper.pdf");
+                    downloadExternalUrl(resolvedPaperPdfUrl, resolvedPaperPdfFilename);
                   }}
                   onOpenAsset={(url) => {
                     if (!openExternalUrl(url)) {

@@ -99,7 +99,7 @@ export function DetailPanel(props: Props) {
   const nodeData = node?.data || null;
   const directionIndex = typeof nodeData?.direction_index === "number" ? nodeData.direction_index : null;
   const roundId = inferRoundId(node?.id || "", nodeData || undefined);
-  const isPaper = isPaperNode(node?.id);
+  const isPaper = isPaperNode(node ? { id: node.id, type: node.type, data: node.data } : null);
 
   const txtAsset = useMemo(() => assetByKind(props.paperAssets, "txt"), [props.paperAssets]);
   const mdAsset = useMemo(() => assetByKind(props.paperAssets, "md"), [props.paperAssets]);

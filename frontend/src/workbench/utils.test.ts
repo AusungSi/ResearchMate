@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { buildCanvasPayload, defaultCanvasUi, mergeCanvasWithGraph } from "./utils";
+import { buildCanvasPayload, defaultCanvasUi, derivePaperPdfUrl, mergeCanvasWithGraph } from "./utils";
 import type { CanvasResponse, GraphResponse, RunEvent } from "./types";
 
 describe("mergeCanvasWithGraph", () => {
@@ -157,5 +157,26 @@ describe("mergeCanvasWithGraph", () => {
     expect(payload.nodes[1].data).toMatchObject({ isManual: true, label: "Manual note" });
     expect(payload.edges).toHaveLength(1);
     expect(payload.edges[0].id).toBe("manual-edge");
+  });
+});
+
+describe("derivePaperPdfUrl", () => {
+  it("prefers asset meta URLs when available", () => {
+    const url = derivePaperPdfUrl(
+      {
+        task_id: "R-1",
+        paper_id: "paper:1",
+        items: [{ kind: "pdf", status: "available", open_url: "/api/pdf/1" }],
+      },
+      { url: "https://arxiv.org/abs/2501.00001" },
+    );
+
+    expect(url).toBe("/api/pdf/1");
+  });
+
+  it("derives a direct arxiv PDF URL from the paper URL when no asset exists", () => {
+    const url = derivePaperPdfUrl(null, { url: "http://arxiv.org/abs/2501.00001v2" });
+
+    expect(url).toBe("https://arxiv.org/pdf/2501.00001v2.pdf");
   });
 });
