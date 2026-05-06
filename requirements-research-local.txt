@@ -1,10 +1,12 @@
 alembic==1.18.4
 apscheduler==3.11.2
+beautifulsoup4==4.13.4
 fastapi==0.133.1
 httpx==0.28.1
 networkx==3.4.2
 orjson==3.11.7
 pdfminer.six==20250506
+playwright==1.53.0
 pydantic==2.12.5
 pydantic-settings==2.13.1
 pymupdf==1.26.6
