@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from pathlib import Path
 from urllib.parse import quote
 import orjson
 from fastapi import FastAPI
@@ -358,6 +359,83 @@ def test_compare_task_papers_endpoint_returns_structured_items():
         assert len(body["items"]) == 2
         assert body["items"][0]["paper_id"] == "cmp-1"
         assert body["items"][1]["paper_id"] == "cmp-2"
+    finally:
+        client.close()
+        db_session.close()
+
+
+def test_doi_enrich_zotero_identifier_and_fulltext_resolution_endpoints(tmp_path):
+    client, service, user, db_session = _build_test_client()
+    try:
+        service.settings.research_artifact_dir = str(tmp_path)
+        task = service.create_task(
+            db_session,
+            user_id=user.id,
+            topic="api doi topic",
+            constraints={"top_n": 5},
+        )
+        service.process_one_job(db_session)
+        direction = ResearchDirectionRepo(db_session).get_by_index(task.id, 1)
+        assert direction is not None
+        ResearchPaperRepo(db_session).replace_direction_papers(
+            direction,
+            [
+                {
+                    "paper_id": "doi-1",
+                    "title": "A Paper Without DOI",
+                    "title_norm": "a paper without doi",
+                    "authors": ["Ada Lovelace"],
+                    "year": 2024,
+                    "venue": "ICLR",
+                    "doi": None,
+                    "url": "https://example.org/paper",
+                    "abstract": "paper abstract",
+                    "source": "semantic_scholar",
+                    "relevance_score": None,
+                }
+            ],
+        )
+        service._http_get_json = lambda url, *, headers=None, params=None: {  # noqa: E731
+            "message": {
+                "items": [
+                    {
+                        "DOI": "10.1000/doi-1",
+                        "title": ["A Paper Without DOI"],
+                        "URL": "https://example.org/paper",
+                        "author": [{"family": "Lovelace"}],
+                        "issued": {"date-parts": [[2024]]},
+                    }
+                ]
+            }
+        }
+
+        enrich_resp = client.post(
+            f"/api/v1/research/tasks/{task.task_id}/papers/doi/enrich",
+            json={"paper_ids": ["doi-1"]},
+        )
+        assert enrich_resp.status_code == 200
+        enrich_body = enrich_resp.json()
+        assert enrich_body["summary"]["enriched"] == 1
+        assert enrich_body["items"][0]["doi"] == "10.1000/doi-1"
+
+        zotero_resp = client.post(
+            f"/api/v1/research/tasks/{task.task_id}/zotero/identifiers",
+            json={"paper_ids": ["doi-1"], "filename": "zotero-identifiers"},
+        )
+        assert zotero_resp.status_code == 200
+        zotero_body = zotero_resp.json()
+        assert zotero_body["summary"]["ready"] == 1
+        assert zotero_body["identifiers"] == ["10.1000/doi-1"]
+        assert Path(zotero_body["artifact_path"]).exists()
+
+        resolve_resp = client.post(
+            f"/api/v1/research/tasks/{task.task_id}/fulltext/resolve",
+            json={"paper_ids": ["doi-1"], "enrich_doi": True},
+        )
+        assert resolve_resp.status_code == 200
+        resolve_body = resolve_resp.json()
+        assert resolve_body["summary"]["landing_page_found"] == 1
+        assert resolve_body["items"][0]["doi"] == "10.1000/doi-1"
     finally:
         client.close()
         db_session.close()

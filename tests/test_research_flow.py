@@ -7,7 +7,7 @@ from app.domain.enums import ResearchJobStatus, ResearchJobType
 import orjson
 
 from app.domain.models import ResearchJob
-from app.infra.repos import ResearchJobRepo, ResearchTaskRepo, UserRepo
+from app.infra.repos import ResearchDirectionRepo, ResearchJobRepo, ResearchPaperRepo, ResearchTaskRepo, UserRepo
 from app.llm.openclaw_client import LLMCallResult, LLMTaskType
 from app.services.research_command_service import ResearchCommandService
 from app.services.research_service import ResearchService
@@ -330,6 +330,14 @@ def test_research_command_topic_accepts_openalex_source():
     assert constraints["sources"] == ["openalex", "arxiv"]
 
 
+def test_research_command_topic_accepts_dblp_source():
+    parsed = ResearchCommandService._parse_topic_payload("diffusion policy 来源：dblp|arxiv")
+    assert isinstance(parsed, tuple)
+    topic, constraints = parsed
+    assert topic == "diffusion policy"
+    assert constraints["sources"] == ["dblp", "arxiv"]
+
+
 def test_research_cache_hit_and_force_refresh(db_session):
     service = ResearchService(openclaw_client=FakeOpenClawClient(), wecom_client=None)
     user = UserRepo(db_session).get_or_create("research-cache-user", timezone_name="Asia/Shanghai")
@@ -474,6 +482,48 @@ def test_research_search_supports_openalex_provider(db_session):
     assert page["total"] == 1
     assert page["items"][0]["source"] == "openalex"
     assert page["items"][0]["venue"] == "ACL"
+
+
+def test_research_search_supports_dblp_provider(db_session):
+    service = ResearchService(openclaw_client=FakeOpenClawClient(), wecom_client=None)
+    user = UserRepo(db_session).get_or_create("research-dblp-user", timezone_name="Asia/Shanghai")
+    service._build_seed_corpus_for_task = lambda db, task, constraints: []  # noqa: E731
+    service._plan_directions = lambda _topic, _constraints: [  # noqa: E731
+        {"name": "方向A", "queries": ["diffusion policy"], "exclude_terms": []},
+    ]
+    task = service.create_task(
+        db_session,
+        user_id=user.id,
+        topic="dblp topic",
+        constraints={"sources": ["dblp"], "top_n": 5},
+    )
+    service.process_one_job(db_session)
+    service._search_dblp = lambda query, *, top_n, constraints: (  # noqa: E731
+        [
+            {
+                "paper_id": "journals/ijrr/ChiXFCDBTS25",
+                "title": "Diffusion policy: Visuomotor policy learning via action diffusion.",
+                "title_norm": "diffusion policy visuomotor policy learning via action diffusion",
+                "authors": ["Cheng Chi 0001"],
+                "year": 2025,
+                "venue": "Int. J. Robotics Res.",
+                "doi": "10.1177/02783649241273668",
+                "url": "https://doi.org/10.1177/02783649241273668",
+                "abstract": None,
+                "source": "dblp",
+                "relevance_score": None,
+            }
+        ],
+        "ok",
+        None,
+    )
+
+    service.enqueue_search(db_session, user_id=user.id, direction_index=1)
+    service.process_one_job(db_session)
+    page = service.page_direction_papers(db_session, user_id=user.id, direction_index=1, page=1)
+    assert page["total"] == 1
+    assert page["items"][0]["source"] == "dblp"
+    assert page["items"][0]["doi"] == "10.1177/02783649241273668"
 
 
 def test_research_search_prefers_ranked_venue_over_arxiv(db_session):
@@ -840,3 +890,90 @@ def test_research_search_prefers_ranked_venue_over_arxiv_when_rerank_enabled(db_
     finally:
         settings.research_search_openalex_default_enabled = original_openalex_flag
         settings.research_search_quality_rerank_enabled = original_rerank_flag
+
+
+def test_doi_enrichment_does_not_overwrite_existing_doi(db_session):
+    service = ResearchService(openclaw_client=FakeOpenClawClient(), wecom_client=None)
+    user = UserRepo(db_session).get_or_create("research-doi-user", timezone_name="Asia/Shanghai")
+    task = service.create_task(
+        db_session,
+        user_id=user.id,
+        topic="doi topic",
+        constraints={},
+    )
+    service.process_one_job(db_session)
+    direction = ResearchDirectionRepo(db_session).get_by_index(task.id, 1)
+    assert direction is not None
+    ResearchPaperRepo(db_session).replace_direction_papers(
+        direction,
+        [
+            {
+                "paper_id": "doi-existing",
+                "title": "Paper With DOI",
+                "title_norm": "paper with doi",
+                "authors": ["Ada Lovelace"],
+                "year": 2024,
+                "venue": "ICLR",
+                "doi": "10.1000/original-doi",
+                "url": "https://example.org/original",
+                "abstract": "abstract",
+                "source": "semantic_scholar",
+                "relevance_score": None,
+            }
+        ],
+    )
+    service._http_get_json = lambda url, *, headers=None, params=None: {  # noqa: E731
+        "message": {
+            "items": [
+                {
+                    "DOI": "10.1000/replacement-doi",
+                    "title": ["Paper With DOI"],
+                    "URL": "https://example.org/replacement",
+                    "author": [{"family": "Lovelace"}],
+                    "issued": {"date-parts": [[2024]]},
+                }
+            ]
+        }
+    }
+
+    result = service.enrich_task_paper_doi(
+        db_session,
+        user_id=user.id,
+        task_id=task.task_id,
+        paper_ids=["doi-existing"],
+    )
+
+    assert result["summary"]["exists"] == 1
+    paper = ResearchPaperRepo(db_session).get_by_token(task.id, "doi-existing")
+    assert paper is not None
+    assert paper.doi == "10.1000/original-doi"
+
+
+def test_doi_resolution_prefers_formal_publication_over_arxiv_preprint():
+    service = ResearchService(openclaw_client=FakeOpenClawClient(), wecom_client=None)
+    candidates = [
+        {
+            "doi": "10.48550/arxiv.2303.04137",
+            "matched_title": "Diffusion Policy",
+            "url": "https://doi.org/10.48550/arxiv.2303.04137",
+            "source": "arxiv",
+            "match_score": 1.0,
+            "publication_kind": "preprint",
+        },
+        {
+            "doi": "10.15607/rss.2023.xix.026",
+            "matched_title": "Diffusion Policy",
+            "url": "https://doi.org/10.15607/rss.2023.xix.026",
+            "source": "dblp",
+            "match_score": 0.99,
+            "publication_kind": "formal",
+        },
+    ]
+
+    best = service._pick_best_doi_candidate(
+        candidates,
+        current_doi="10.48550/arxiv.2303.04137",
+    )
+
+    assert best is not None
+    assert best["doi"] == "10.15607/rss.2023.xix.026"

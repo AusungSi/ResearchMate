@@ -557,6 +557,79 @@ class ResearchZoteroImportResponse(BaseModel):
     format: str | None = None
 
 
+class ResearchTaskPaperBatchRequest(BaseModel):
+    paper_ids: list[str] = Field(default_factory=list)
+    limit: int | None = Field(default=None, ge=1, le=500)
+
+
+class ResearchTaskDoiEnrichItem(BaseModel):
+    paper_id: str
+    title: str
+    status: str
+    doi: str | None = None
+    previous_doi: str | None = None
+    source: str | None = None
+    match_score: float | None = None
+    matched_title: str | None = None
+    url: str | None = None
+    reason: str | None = None
+
+
+class ResearchTaskDoiEnrichResponse(BaseModel):
+    task_id: str
+    summary: dict[str, int] = Field(default_factory=dict)
+    items: list[ResearchTaskDoiEnrichItem] = Field(default_factory=list)
+
+
+class ResearchFulltextResolveRequest(BaseModel):
+    paper_ids: list[str] = Field(default_factory=list)
+    limit: int | None = Field(default=None, ge=1, le=500)
+    enrich_doi: bool = False
+
+
+class ResearchFulltextResolveItem(BaseModel):
+    paper_id: str
+    title: str
+    doi: str | None = None
+    fulltext_status: str | None = None
+    resolution_status: str
+    landing_page_url: str | None = None
+    pdf_url: str | None = None
+    source_url: str | None = None
+    source: str | None = None
+    reason: str | None = None
+
+
+class ResearchFulltextResolveResponse(BaseModel):
+    task_id: str
+    summary: dict[str, int] = Field(default_factory=dict)
+    items: list[ResearchFulltextResolveItem] = Field(default_factory=list)
+
+
+class ResearchZoteroIdentifierImportRequest(BaseModel):
+    paper_ids: list[str] = Field(default_factory=list)
+    limit: int | None = Field(default=None, ge=1, le=500)
+    enrich_missing_doi: bool = True
+    filename: str | None = None
+
+
+class ResearchZoteroIdentifierImportItem(BaseModel):
+    paper_id: str
+    title: str
+    status: str
+    doi: str | None = None
+    reason: str | None = None
+
+
+class ResearchZoteroIdentifierImportResponse(BaseModel):
+    task_id: str
+    summary: dict[str, int] = Field(default_factory=dict)
+    items: list[ResearchZoteroIdentifierImportItem] = Field(default_factory=list)
+    identifiers: list[str] = Field(default_factory=list)
+    artifact_path: str | None = None
+    filename: str | None = None
+
+
 class ResearchTaskCreateRequest(BaseModel):
     topic: str
     project_id: str | None = None
@@ -903,6 +976,8 @@ class ResearchWorkbenchConfigResponse(BaseModel):
     available_backends: list[str] = Field(default_factory=list)
     discovery_providers: list[str] = Field(default_factory=list)
     citation_providers: list[str] = Field(default_factory=list)
+    doi_resolution_sources: list[str] = Field(default_factory=list)
+    doi_resolution_policy: dict = Field(default_factory=dict)
     provider_status: list[ResearchProviderStatusItem] = Field(default_factory=list)
     layout_defaults: dict = Field(default_factory=dict)
     default_canvas_ui: dict = Field(default_factory=dict)

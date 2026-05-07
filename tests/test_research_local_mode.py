@@ -749,6 +749,9 @@ def test_canvas_ui_and_provider_status_are_available():
         assert config_resp.status_code == 200
         config = config_resp.json()
         assert "openalex" in config["discovery_providers"]
+        assert "dblp" in config["discovery_providers"]
+        assert "dblp" in config["doi_resolution_sources"]
+        assert config["doi_resolution_policy"]["prefer_formal_publication"] is True
         assert any(item["role"] == "citation" for item in config["provider_status"])
     finally:
         client.close()
