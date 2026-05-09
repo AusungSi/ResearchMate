@@ -148,6 +148,52 @@ class ResearchService:
             "research_search_source_status": dict(self.research_search_source_status),
         }
 
+    def _research_request_timeout_seconds(self) -> int:
+        return max(10, int(getattr(self.settings, "research_search_request_timeout_seconds", 60) or 60))
+
+    def _ordered_search_sources(self, allowed_sources: set[str]) -> list[str]:
+        if not allowed_sources:
+            return []
+        search_order = (
+            ("dblp", "openalex", "arxiv", "semantic_scholar")
+            if self.settings.research_search_openalex_default_enabled
+            else ("dblp", "arxiv", "openalex", "semantic_scholar")
+        )
+        ordered = [source for source in search_order if source in allowed_sources]
+        if self.settings.semantic_scholar_api_key.strip():
+            return ordered
+        # Keep Semantic Scholar opt-in and last when no API key is configured,
+        # because repeated 429s make the retrieval path unpredictable.
+        return [source for source in ordered if source != "semantic_scholar"] + (
+            ["semantic_scholar"] if "semantic_scholar" in ordered else []
+        )
+
+    def _should_stop_search_fanout(self, all_papers: list[dict], *, top_n: int) -> bool:
+        if not all_papers:
+            return False
+        unique_papers = self._dedupe_papers(all_papers)
+        unique_count = len(unique_papers)
+        threshold = max(int(top_n), min(120, int(top_n * 1.2)))
+        if unique_count >= threshold:
+            return True
+        if unique_count < int(top_n):
+            return False
+        sample = unique_papers[: max(1, int(top_n))]
+        doi_count = sum(1 for item in sample if self._normalize_doi_value(item.get("doi")))
+        formal_count = sum(
+            1
+            for item in sample
+            if self._candidate_publication_kind(
+                doi=item.get("doi"),
+                venue=item.get("venue"),
+                source=str(item.get("source") or ""),
+            )
+            == "formal"
+        )
+        doi_rate = doi_count / max(1, len(sample))
+        formal_rate = formal_count / max(1, len(sample))
+        return doi_rate >= 0.8 or formal_rate >= 0.75
+
     def _should_use_embodied_preset(self, *texts: str | None) -> bool:
         keywords = (
             "embodied ai",
@@ -1391,8 +1437,12 @@ class ResearchService:
         return self._task_to_dict(db, row)
 
     def get_workbench_config(self) -> dict:
-        discovery_providers = ["semantic_scholar", "arxiv", "openalex"]
+        discovery_providers = ["semantic_scholar", "arxiv", "openalex", "dblp"]
         citation_providers = _resolve_citation_sources(None, self.settings.research_citation_sources_default)
+        doi_resolution_sources = _resolve_doi_sources(
+            None,
+            self.settings.research_doi_resolution_sources_default,
+        )
         if self.settings.openclaw_enabled:
             openclaw_ok, openclaw_detail = self.openclaw_client.healthcheck()
         else:
@@ -1421,6 +1471,13 @@ class ResearchService:
             },
             {
                 "key": "openalex",
+                "role": "discovery",
+                "enabled": True,
+                "configured": True,
+                "detail": "Public API",
+            },
+            {
+                "key": "dblp",
                 "role": "discovery",
                 "enabled": True,
                 "configured": True,
@@ -1479,6 +1536,12 @@ class ResearchService:
             "available_backends": [item.value for item in ResearchLLMBackend],
             "discovery_providers": discovery_providers,
             "citation_providers": citation_providers,
+            "doi_resolution_sources": doi_resolution_sources,
+            "doi_resolution_policy": {
+                "prefer_formal_publication": bool(self.settings.research_doi_prefer_formal_publication),
+                "keep_preprint_candidate": bool(self.settings.research_doi_keep_preprint_candidate),
+                "title_match_threshold": float(self.settings.research_doi_title_match_threshold),
+            },
             "provider_status": provider_status,
             "layout_defaults": {
                 "layout_mode": "elk_layered",
@@ -2454,6 +2517,347 @@ class ResearchService:
             "items": items,
         }
 
+    def enrich_task_paper_doi(
+        self,
+        db: Session,
+        *,
+        user_id: int,
+        task_id: str,
+        paper_ids: list[str] | None = None,
+        limit: int | None = None,
+    ) -> dict:
+        task = self.switch_task(db, user_id=user_id, task_id=task_id)
+        papers = self._select_task_papers(db, task=task, paper_ids=paper_ids, limit=limit)
+        existing_dois = {
+            self._normalize_doi_value(row.doi)
+            for row in ResearchPaperRepo(db).list_for_task(task.id)
+            if self._normalize_doi_value(row.doi)
+        }
+        items: list[dict] = []
+        updated = 0
+        skipped = 0
+        missing = 0
+        duplicates = 0
+        failed = 0
+        for paper in papers:
+            paper_id = _paper_token(paper)
+            title = str(paper.title or "").strip()
+            current_doi = self._normalize_doi_value(paper.doi)
+            if current_doi:
+                items.append(
+                    {
+                        "paper_id": paper_id,
+                        "title": title,
+                        "status": "exists",
+                        "doi": current_doi,
+                        "previous_doi": current_doi,
+                        "source": "local",
+                        "match_score": 1.0,
+                        "matched_title": title,
+                        "url": paper.url,
+                        "reason": None,
+                    }
+                )
+                skipped += 1
+                continue
+            try:
+                candidate = self._resolve_best_doi_for_paper(paper)
+            except Exception as exc:
+                items.append(
+                    {
+                        "paper_id": paper_id,
+                        "title": title,
+                        "status": "failed",
+                        "doi": None,
+                        "previous_doi": None,
+                        "source": "crossref",
+                        "match_score": None,
+                        "matched_title": None,
+                        "url": None,
+                        "reason": str(exc),
+                    }
+                )
+                failed += 1
+                continue
+            if not candidate:
+                items.append(
+                    {
+                        "paper_id": paper_id,
+                        "title": title,
+                        "status": "missing_doi",
+                        "doi": None,
+                        "previous_doi": None,
+                        "source": "crossref",
+                        "match_score": None,
+                        "matched_title": None,
+                        "url": None,
+                        "reason": "no_confident_match",
+                    }
+                )
+                missing += 1
+                continue
+            candidate_doi = self._normalize_doi_value(candidate["doi"])
+            if candidate_doi in existing_dois:
+                items.append(
+                    {
+                        "paper_id": paper_id,
+                        "title": title,
+                        "status": "duplicate_doi",
+                        "doi": candidate_doi,
+                        "previous_doi": None,
+                        "source": candidate.get("source"),
+                        "match_score": candidate.get("match_score"),
+                        "matched_title": candidate.get("matched_title"),
+                        "url": candidate.get("url"),
+                        "reason": "doi already exists in task",
+                    }
+                )
+                duplicates += 1
+                continue
+            paper.doi = candidate_doi
+            if candidate.get("url") and not paper.url:
+                paper.url = str(candidate.get("url") or "").strip() or paper.url
+            paper.updated_at = datetime.now(timezone.utc)
+            db.add(paper)
+            db.flush()
+            existing_dois.add(candidate_doi)
+            items.append(
+                {
+                    "paper_id": paper_id,
+                    "title": title,
+                    "status": "enriched",
+                    "doi": candidate_doi,
+                    "previous_doi": None,
+                    "source": candidate.get("source"),
+                    "match_score": candidate.get("match_score"),
+                    "matched_title": candidate.get("matched_title"),
+                    "url": candidate.get("url"),
+                    "reason": None,
+                }
+            )
+            updated += 1
+        return {
+            "task_id": task.task_id,
+            "summary": {
+                "total": len(items),
+                "enriched": updated,
+                "exists": skipped,
+                "missing_doi": missing,
+                "duplicate_doi": duplicates,
+                "failed": failed,
+            },
+            "items": items,
+        }
+
+    def resolve_task_fulltext_candidates(
+        self,
+        db: Session,
+        *,
+        user_id: int,
+        task_id: str,
+        paper_ids: list[str] | None = None,
+        limit: int | None = None,
+        enrich_doi: bool = False,
+    ) -> dict:
+        task = self.switch_task(db, user_id=user_id, task_id=task_id)
+        papers = self._select_task_papers(db, task=task, paper_ids=paper_ids, limit=limit)
+        fulltext_repo = ResearchPaperFulltextRepo(db)
+        items: list[dict] = []
+        summary: dict[str, int] = {
+            "total": 0,
+            "doi_missing": 0,
+            "doi_resolved": 0,
+            "landing_page_found": 0,
+            "oa_pdf_found": 0,
+            "pdf_downloaded": 0,
+            "access_required": 0,
+            "failed": 0,
+        }
+        for paper in papers:
+            summary["total"] += 1
+            paper_id = _paper_token(paper)
+            title = str(paper.title or "").strip()
+            fulltext = fulltext_repo.get(task.id, paper_id)
+            doi = self._normalize_doi_value(paper.doi)
+            reason = None
+            resolution_status = "access_required"
+            landing_page_url = str(paper.url or "").strip() or None
+            pdf_url = None
+            source_url = landing_page_url
+            source = str(paper.source or "").strip() or None
+            try:
+                if not doi and enrich_doi:
+                    resolved = self._resolve_best_doi_for_paper(paper)
+                    if resolved:
+                        doi = self._normalize_doi_value(resolved["doi"])
+                        if doi and not paper.doi:
+                            paper.doi = doi
+                            if resolved.get("url") and not paper.url:
+                                paper.url = str(resolved.get("url") or "").strip() or paper.url
+                            paper.updated_at = datetime.now(timezone.utc)
+                            db.add(paper)
+                            db.flush()
+                            landing_page_url = str(paper.url or "").strip() or landing_page_url
+                            summary["doi_resolved"] += 1
+                if not doi:
+                    resolution_status = "doi_missing"
+                    summary["doi_missing"] += 1
+                elif fulltext and fulltext.pdf_path and Path(fulltext.pdf_path).exists():
+                    resolution_status = "pdf_downloaded"
+                    pdf_url = fulltext.pdf_path
+                    source_url = fulltext.source_url or source_url
+                    summary["pdf_downloaded"] += 1
+                else:
+                    candidates = self._explicit_pdf_candidate_urls(paper)
+                    pdf_candidate = next((item for item in candidates if self._looks_like_pdf_url(item)), None)
+                    if pdf_candidate:
+                        pdf_url = pdf_candidate
+                        source_url = pdf_candidate
+                        resolution_status = "oa_pdf_found"
+                        summary["oa_pdf_found"] += 1
+                    elif landing_page_url or doi:
+                        resolution_status = "landing_page_found"
+                        source_url = landing_page_url or f"https://doi.org/{doi}"
+                        summary["landing_page_found"] += 1
+                    else:
+                        resolution_status = "access_required"
+                        summary["access_required"] += 1
+            except Exception as exc:
+                resolution_status = "failed"
+                reason = str(exc)
+                summary["failed"] += 1
+            items.append(
+                {
+                    "paper_id": paper_id,
+                    "title": title,
+                    "doi": doi or None,
+                    "fulltext_status": fulltext.status.value if fulltext else None,
+                    "resolution_status": resolution_status,
+                    "landing_page_url": landing_page_url,
+                    "pdf_url": pdf_url,
+                    "source_url": source_url,
+                    "source": source,
+                    "reason": reason,
+                }
+            )
+        return {
+            "task_id": task.task_id,
+            "summary": summary,
+            "items": items,
+        }
+
+    def prepare_zotero_identifier_import(
+        self,
+        db: Session,
+        *,
+        user_id: int,
+        task_id: str,
+        paper_ids: list[str] | None = None,
+        limit: int | None = None,
+        enrich_missing_doi: bool = True,
+        filename: str | None = None,
+    ) -> dict:
+        task = self.switch_task(db, user_id=user_id, task_id=task_id)
+        papers = self._select_task_papers(db, task=task, paper_ids=paper_ids, limit=limit)
+        items: list[dict] = []
+        identifiers: list[str] = []
+        seen: set[str] = set()
+        resolved_count = 0
+        ready_count = 0
+        missing_count = 0
+        duplicate_count = 0
+        failed_count = 0
+        for paper in papers:
+            paper_id = _paper_token(paper)
+            title = str(paper.title or "").strip()
+            doi = self._normalize_doi_value(paper.doi)
+            source = "local"
+            if not doi and enrich_missing_doi:
+                try:
+                    resolved = self._resolve_best_doi_for_paper(paper)
+                except Exception as exc:
+                    items.append(
+                        {
+                            "paper_id": paper_id,
+                            "title": title,
+                            "status": "failed",
+                            "doi": None,
+                            "reason": str(exc),
+                        }
+                    )
+                    failed_count += 1
+                    continue
+                if resolved:
+                    doi = self._normalize_doi_value(resolved["doi"])
+                    source = "crossref"
+                    if doi and not paper.doi:
+                        paper.doi = doi
+                        if resolved.get("url") and not paper.url:
+                            paper.url = str(resolved.get("url") or "").strip() or paper.url
+                        paper.updated_at = datetime.now(timezone.utc)
+                        db.add(paper)
+                        db.flush()
+                    resolved_count += 1
+            if not doi:
+                items.append(
+                    {
+                        "paper_id": paper_id,
+                        "title": title,
+                        "status": "missing_doi",
+                        "doi": None,
+                        "reason": "doi required for zotero identifier import",
+                    }
+                )
+                missing_count += 1
+                continue
+            doi_key = doi.lower()
+            if doi_key in seen:
+                items.append(
+                    {
+                        "paper_id": paper_id,
+                        "title": title,
+                        "status": "duplicate",
+                        "doi": doi,
+                        "reason": "duplicate identifier",
+                    }
+                )
+                duplicate_count += 1
+                continue
+            seen.add(doi_key)
+            identifiers.append(doi)
+            items.append(
+                {
+                    "paper_id": paper_id,
+                    "title": title,
+                    "status": "ready",
+                    "doi": doi,
+                    "reason": source if source == "crossref" else None,
+                }
+            )
+            ready_count += 1
+        base_dir = Path(self.settings.research_artifact_dir).expanduser().resolve() / task.task_id / "zotero"
+        base_dir.mkdir(parents=True, exist_ok=True)
+        safe_name = re.sub(r"[^a-zA-Z0-9._-]+", "_", (filename or f"{task.task_id}_zotero_identifiers").strip()) or f"{task.task_id}_zotero_identifiers"
+        if not safe_name.lower().endswith(".txt"):
+            safe_name = f"{safe_name}.txt"
+        artifact_path = base_dir / safe_name
+        artifact_path.write_text("\n".join(identifiers), encoding="utf-8")
+        return {
+            "task_id": task.task_id,
+            "summary": {
+                "total": len(items),
+                "ready": ready_count,
+                "resolved": resolved_count,
+                "missing_doi": missing_count,
+                "duplicate": duplicate_count,
+                "failed": failed_count,
+            },
+            "items": items,
+            "identifiers": identifiers,
+            "artifact_path": str(artifact_path),
+            "filename": artifact_path.name,
+        }
+
     def upload_pdf_for_paper(
         self,
         db: Session,
@@ -2612,6 +3016,371 @@ class ResearchService:
             "task_id": task.task_id,
             "items": items,
         }
+
+    def _select_task_papers(
+        self,
+        db: Session,
+        *,
+        task: ResearchTask,
+        paper_ids: list[str] | None = None,
+        limit: int | None = None,
+    ) -> list:
+        rows = ResearchPaperRepo(db).list_for_task(task.id)
+        if paper_ids:
+            wanted = [str(item).strip() for item in paper_ids if str(item).strip()]
+            index_map = {_paper_token(row): row for row in rows}
+            selected = [index_map[token] for token in wanted if token in index_map]
+            if not selected:
+                raise ValueError("paper not found")
+            return selected[: max(1, int(limit))] if limit else selected
+        if limit:
+            return rows[: max(1, int(limit))]
+        return rows
+
+    def _resolve_best_doi_for_paper(self, paper) -> dict | None:
+        current_doi = self._normalize_doi_value(getattr(paper, "doi", None))
+        candidates = self._resolve_doi_candidates_for_paper(paper)
+        if not candidates:
+            return None
+        best = self._pick_best_doi_candidate(candidates, current_doi=current_doi)
+        if not best:
+            return None
+        if self.settings.research_doi_keep_preprint_candidate:
+            best["candidates"] = candidates
+        return best
+
+    def _resolve_doi_candidates_for_paper(self, paper) -> list[dict]:
+        title = str(getattr(paper, "title", "") or "").strip()
+        if not title:
+            return []
+        candidates: list[dict] = []
+        sources = _resolve_doi_sources(
+            None,
+            self.settings.research_doi_resolution_sources_default,
+        )
+        for source in sources:
+            try:
+                source_candidates: list[dict] = []
+                if source == "crossref":
+                    candidate = self._resolve_crossref_doi_for_paper(paper)
+                    if candidate:
+                        source_candidates.append(candidate)
+                elif source == "arxiv":
+                    source_candidates.extend(self._resolve_arxiv_doi_candidates_for_paper(paper))
+                else:
+                    source_candidates.extend(self._resolve_search_source_doi_candidates_for_paper(paper, source=source))
+                candidates.extend(source_candidates)
+                if any(self._is_strong_doi_candidate(item) for item in source_candidates):
+                    break
+            except Exception as exc:
+                logger.warning(
+                    "research_doi_resolve_source_failed source=%s title=%s error=%s",
+                    source,
+                    title[:160],
+                    exc,
+                )
+        deduped: list[dict] = []
+        seen: set[str] = set()
+        for candidate in candidates:
+            doi = self._normalize_doi_value(candidate.get("doi"))
+            if not doi or doi in seen:
+                continue
+            seen.add(doi)
+            candidate["doi"] = doi
+            deduped.append(candidate)
+        return deduped
+
+    def _resolve_search_source_doi_candidates_for_paper(self, paper, *, source: str) -> list[dict]:
+        title = str(getattr(paper, "title", "") or "").strip()
+        year = _to_int_or_none(getattr(paper, "year", None))
+        if not title:
+            return []
+        constraints = {"year_from": year, "year_to": year} if year else {}
+        result = self._search_by_source(
+            source=source,
+            query=title,
+            top_n=5,
+            constraints=constraints,
+            allow_semantic_fallback=False,
+        )
+        if result.status.startswith("unsupported") or result.status.startswith("http_") or result.status in {"timeout", "transport_error", "rate_limited"}:
+            return []
+        candidates: list[dict] = []
+        threshold = float(self.settings.research_doi_title_match_threshold)
+        for item in result.papers:
+            doi = self._normalize_doi_value(item.get("doi"))
+            candidate_title = str(item.get("title") or "").strip()
+            if not doi or not candidate_title:
+                continue
+            title_score = SequenceMatcher(a=_normalize_title(title), b=_normalize_title(candidate_title)).ratio()
+            score = title_score
+            candidate_year = _to_int_or_none(item.get("year"))
+            if year and candidate_year:
+                score += 0.05 if year == candidate_year else (-0.1 if abs(year - candidate_year) > 1 else 0.0)
+            if title_score < threshold:
+                continue
+            candidates.append(
+                {
+                    "doi": doi,
+                    "matched_title": candidate_title,
+                    "url": self._first_nonempty_string(item.get("url"), f"https://doi.org/{doi}"),
+                    "source": source,
+                    "match_score": round(score, 4),
+                    "publication_kind": self._candidate_publication_kind(
+                        doi=doi,
+                        venue=item.get("venue"),
+                        source=source,
+                    ),
+                }
+            )
+        return candidates
+
+    def _resolve_arxiv_doi_candidates_for_paper(self, paper) -> list[dict]:
+        candidates: list[dict] = []
+        title = str(getattr(paper, "title", "") or "").strip()
+        url = str(getattr(paper, "url", "") or "").strip()
+        paper_id = str(getattr(paper, "paper_id", "") or "").strip()
+        arxiv_id = self._extract_arxiv_id_from_values(paper_id, url)
+        if not arxiv_id and title:
+            matches = self._search_arxiv(title, top_n=3, constraints={})
+            papers, _status, _error = _normalize_source_response(matches)
+            target_norm = _normalize_title(title)
+            best_score = 0.0
+            for item in papers:
+                candidate_title = str(item.get("title") or "").strip()
+                score = SequenceMatcher(a=target_norm, b=_normalize_title(candidate_title)).ratio()
+                if score > best_score and score >= float(self.settings.research_doi_title_match_threshold):
+                    arxiv_id = self._extract_arxiv_id_from_values(item.get("paper_id"), item.get("url"))
+                    best_score = score
+        if not arxiv_id:
+            return candidates
+        doi = f"10.48550/arxiv.{arxiv_id.lower()}"
+        candidates.append(
+            {
+                "doi": doi,
+                "matched_title": title or arxiv_id,
+                "url": f"https://doi.org/{doi}",
+                "source": "arxiv",
+                "match_score": 1.0,
+                "publication_kind": "preprint",
+            }
+        )
+        return candidates
+
+    def _pick_best_doi_candidate(self, candidates: list[dict], *, current_doi: str | None = None) -> dict | None:
+        if not candidates:
+            return None
+        prefer_formal = bool(self.settings.research_doi_prefer_formal_publication)
+        sorted_candidates = sorted(
+            candidates,
+            key=lambda item: self._doi_candidate_sort_key(item, current_doi=current_doi, prefer_formal=prefer_formal),
+            reverse=True,
+        )
+        return dict(sorted_candidates[0]) if sorted_candidates else None
+
+    def _doi_candidate_sort_key(
+        self,
+        candidate: dict,
+        *,
+        current_doi: str | None,
+        prefer_formal: bool,
+    ) -> tuple[int, float, int, int]:
+        doi = self._normalize_doi_value(candidate.get("doi"))
+        publication_kind = str(candidate.get("publication_kind") or "").strip().lower()
+        source = str(candidate.get("source") or "").strip().lower()
+        score = float(candidate.get("match_score") or 0.0)
+        is_current = int(bool(current_doi and doi == current_doi))
+        formal_score = 0
+        if prefer_formal:
+            formal_score = 1 if publication_kind == "formal" else 0
+        source_score = {
+            "dblp": 4,
+            "openalex": 3,
+            "semantic_scholar": 2,
+            "crossref": 1,
+            "arxiv": 0,
+        }.get(source, 0)
+        return (formal_score, score, is_current, source_score)
+
+    @staticmethod
+    def _candidate_publication_kind(*, doi: str | None, venue: object, source: str) -> str:
+        doi_norm = ResearchService._normalize_doi_value(doi)
+        venue_text = str(venue or "").strip().lower()
+        source_text = str(source or "").strip().lower()
+        if doi_norm and doi_norm.startswith("10.48550/arxiv."):
+            return "preprint"
+        if source_text == "arxiv" or venue_text in {"arxiv", "corr"} or "corr" == venue_text:
+            return "preprint"
+        if "arxiv" in venue_text:
+            return "preprint"
+        return "formal"
+
+    @staticmethod
+    def _extract_arxiv_id_from_values(*values: object) -> str | None:
+        patterns = [
+            r"arxiv\.org/(?:abs|pdf)/([0-9]{4}\.[0-9]{4,5})(?:v\d+)?",
+            r"\b([0-9]{4}\.[0-9]{4,5})(?:v\d+)?\b",
+        ]
+        for value in values:
+            text = str(value or "").strip()
+            if not text:
+                continue
+            for pattern in patterns:
+                match = re.search(pattern, text, flags=re.IGNORECASE)
+                if match:
+                    return str(match.group(1)).strip()
+        return None
+
+    def _resolve_crossref_doi_for_paper(self, paper) -> dict | None:
+        title = str(getattr(paper, "title", "") or "").strip()
+        if not title:
+            return None
+        params: dict[str, str] = {
+            "query.title": title,
+            "rows": "5",
+            "select": "DOI,title,author,URL,issued,published-print,published-online,container-title",
+        }
+        authors = _load_json_list(getattr(paper, "authors_json", "[]"))
+        first_author = self._paper_first_author(authors)
+        if first_author:
+            params["query.author"] = first_author
+        year = _to_int_or_none(getattr(paper, "year", None))
+        if year:
+            params["filter"] = f"from-pub-date:{year}-01-01,until-pub-date:{year}-12-31"
+        headers = {
+            "User-Agent": "ResearchMate/0.1 (research doi enrichment)",
+            "Accept": "application/json",
+        }
+        payload = self._http_get_json(
+            "https://api.crossref.org/works",
+            headers=headers,
+            params=params,
+            timeout=self._research_request_timeout_seconds(),
+        )
+        message = payload.get("message") if isinstance(payload, dict) else {}
+        raw_items = message.get("items") if isinstance(message, dict) else []
+        best: dict | None = None
+        best_score = 0.0
+        title_norm = _normalize_title(title)
+        first_author_norm = self._normalize_author_token(first_author)
+        for raw in raw_items or []:
+            if not isinstance(raw, dict):
+                continue
+            candidate_doi = self._normalize_doi_value(raw.get("DOI"))
+            candidate_title = self._first_nonempty_string(raw.get("title")) or ""
+            if not candidate_doi or not candidate_title:
+                continue
+            candidate_title_norm = _normalize_title(candidate_title)
+            title_score = SequenceMatcher(a=title_norm, b=candidate_title_norm).ratio() if title_norm and candidate_title_norm else 0.0
+            candidate_year = self._crossref_work_year(raw)
+            year_score = 0.0
+            if year and candidate_year:
+                year_score = 0.08 if year == candidate_year else (-0.15 if abs(year - candidate_year) > 1 else 0.0)
+            author_score = 0.0
+            if first_author_norm and self._crossref_author_match(raw, first_author_norm):
+                author_score = 0.08
+            score = title_score + year_score + author_score
+            threshold = max(0.88, float(self.settings.research_doi_title_match_threshold) - 0.03)
+            if title_score < threshold or score < 0.9 or score <= best_score:
+                continue
+            best_score = score
+            best = {
+                "doi": candidate_doi,
+                "matched_title": candidate_title,
+                "url": self._first_nonempty_string(raw.get("URL"), f"https://doi.org/{candidate_doi}"),
+                "source": "crossref",
+                "match_score": round(score, 4),
+                "publication_kind": self._candidate_publication_kind(
+                    doi=candidate_doi,
+                    venue=self._first_nonempty_string(raw.get("container-title")),
+                    source="crossref",
+                ),
+            }
+        return best
+
+    def _is_strong_doi_candidate(self, candidate: dict) -> bool:
+        kind = str(candidate.get("publication_kind") or "").strip().lower()
+        source = str(candidate.get("source") or "").strip().lower()
+        score = float(candidate.get("match_score") or 0.0)
+        threshold = float(self.settings.research_doi_title_match_threshold)
+        return kind == "formal" and source in {"dblp", "openalex", "crossref"} and score >= threshold
+
+    @staticmethod
+    def _crossref_work_year(raw: dict) -> int | None:
+        for key in ("issued", "published-print", "published-online"):
+            value = raw.get(key)
+            if isinstance(value, dict):
+                date_parts = value.get("date-parts")
+                if isinstance(date_parts, list) and date_parts and isinstance(date_parts[0], list) and date_parts[0]:
+                    return _to_int_or_none(date_parts[0][0])
+        return None
+
+    @staticmethod
+    def _paper_first_author(authors: list[object]) -> str | None:
+        for raw in authors:
+            text = str(raw or "").strip()
+            if text:
+                return text
+        return None
+
+    @staticmethod
+    def _normalize_author_token(value: str | None) -> str:
+        text = str(value or "").strip().lower()
+        if not text:
+            return ""
+        parts = re.split(r"[\s,]+", text)
+        return parts[-1] if parts else text
+
+    def _crossref_author_match(self, raw: dict, expected_token: str) -> bool:
+        authors = raw.get("author")
+        if not isinstance(authors, list) or not expected_token:
+            return False
+        for author in authors:
+            if not isinstance(author, dict):
+                continue
+            family = self._normalize_author_token(self._first_nonempty_string(author.get("family"), author.get("name")))
+            if family and family == expected_token:
+                return True
+        return False
+
+    @staticmethod
+    def _normalize_doi_value(value: object) -> str | None:
+        text = str(value or "").strip()
+        if not text:
+            return None
+        text = re.sub(r"^https?://(dx\.)?doi\.org/", "", text, flags=re.IGNORECASE)
+        text = text.replace("doi:", "").strip()
+        text = text.lower()
+        return text or None
+
+    @staticmethod
+    def _looks_like_pdf_url(url: str) -> bool:
+        value = str(url or "").strip().lower()
+        if not value:
+            return False
+        return value.endswith(".pdf") or "/pdf/" in value or "pdf=" in value
+
+    def _explicit_pdf_candidate_urls(self, paper) -> list[str]:
+        candidates: list[str] = []
+        url = str(getattr(paper, "url", "") or "").strip()
+        if self._looks_like_pdf_url(url):
+            candidates.append(url)
+        if "arxiv.org/abs/" in url:
+            candidates.append(url.replace("/abs/", "/pdf/") + ".pdf")
+        elif "arxiv.org/pdf/" in url:
+            candidates.append(url if url.endswith(".pdf") else f"{url}.pdf")
+        for item in self._live_pdf_candidate_urls(paper):
+            if self._looks_like_pdf_url(item):
+                candidates.append(item)
+        unique: list[str] = []
+        seen = set()
+        for item in candidates:
+            value = str(item or "").strip()
+            if not value or value in seen:
+                continue
+            seen.add(value)
+            unique.append(value)
+        return unique
 
     def _paper_summary_view(self, *, paper, fulltext) -> dict[str, str]:
         summary_source = self._paper_summary_source(paper=paper)
@@ -3518,12 +4287,7 @@ class ResearchService:
         cache_repo = ResearchSearchCacheRepo(db)
         for query in query_terms[:4]:
             effective_query = _merge_query_and_excludes(query, exclude_terms)
-            search_order = (
-                ("semantic_scholar", "openalex", "arxiv")
-                if self.settings.research_search_openalex_default_enabled
-                else ("semantic_scholar", "arxiv", "openalex")
-            )
-            ordered_sources = [src for src in search_order if src in allowed_sources]
+            ordered_sources = self._ordered_search_sources(allowed_sources)
             for source in ordered_sources:
                 result = self._search_with_cache(
                     cache_repo=cache_repo,
@@ -3548,6 +4312,10 @@ class ResearchService:
                 all_papers.extend(result.papers)
                 if touch_lease:
                     touch_lease()
+                if self._should_stop_search_fanout(all_papers, top_n=top_n):
+                    break
+            if self._should_stop_search_fanout(all_papers, top_n=top_n):
+                break
         papers = self._dedupe_papers(all_papers)
         if self.settings.research_search_quality_rerank_enabled:
             papers = self._rank_discovered_papers(papers, top_n=top_n, constraints=constraints)
@@ -4561,12 +5329,7 @@ class ResearchService:
         allowed_sources = _resolve_sources(constraints.get("sources"), self.settings.research_sources_default)
         if not allowed_sources:
             allowed_sources = {"semantic_scholar"}
-        search_order = (
-            ("semantic_scholar", "openalex", "arxiv")
-            if self.settings.research_search_openalex_default_enabled
-            else ("semantic_scholar", "arxiv", "openalex")
-        )
-        ordered_sources = [source for source in search_order if source in allowed_sources]
+        ordered_sources = self._ordered_search_sources(allowed_sources)
         cache_repo = ResearchSearchCacheRepo(db)
         all_papers: list[dict] = []
         source_statuses: list[dict] = []
@@ -4609,6 +5372,10 @@ class ResearchService:
                 all_papers.extend(result.papers)
                 if touch_lease:
                     touch_lease()
+                if self._should_stop_search_fanout(all_papers, top_n=top_n):
+                    break
+            if self._should_stop_search_fanout(all_papers, top_n=top_n):
+                break
 
         papers = self._dedupe_papers(all_papers)
         if self.settings.research_search_quality_rerank_enabled:
@@ -5080,6 +5847,11 @@ class ResearchService:
                 self._search_openalex(query, top_n=top_n, constraints=constraints)
             )
             return SearchFetchResult(papers=papers, status=status, error=error)
+        if source_key == "dblp":
+            papers, status, error = _normalize_source_response(
+                self._search_dblp(query, top_n=top_n, constraints=constraints)
+            )
+            return SearchFetchResult(papers=papers, status=status, error=error)
         return SearchFetchResult(papers=[], status="unsupported_source", error=f"unsupported_source:{source_key}")
 
     def _download_pdf_for_paper(self, paper) -> tuple[bytes | None, str | None, str | None]:
@@ -5168,9 +5940,10 @@ class ResearchService:
         params = {"fields": "openAccessPdf,externalIds,url"}
         headers = {"User-Agent": "MemoMate/0.1 (research)"}
         api_key = self.settings.semantic_scholar_api_key.strip()
-        if api_key:
-            headers["x-api-key"] = api_key
-        with httpx.Client(timeout=20, follow_redirects=True, trust_env=False) as client:
+        if not api_key:
+            return []
+        headers["x-api-key"] = api_key
+        with httpx.Client(timeout=self._research_request_timeout_seconds(), follow_redirects=True, trust_env=False) as client:
             resp = client.get(
                 f"https://api.semanticscholar.org/graph/v1/paper/{quote_plus(identifier)}",
                 params=params,
@@ -5200,7 +5973,7 @@ class ResearchService:
         doi = str(getattr(paper, "doi", "") or "").strip().lower()
         if not doi:
             return []
-        with httpx.Client(timeout=20, follow_redirects=True, trust_env=False) as client:
+        with httpx.Client(timeout=self._research_request_timeout_seconds(), follow_redirects=True, trust_env=False) as client:
             resp = client.get(
                 "https://api.openalex.org/works",
                 params={"filter": f"doi:https://doi.org/{doi}", "per-page": "1"},
@@ -5240,7 +6013,7 @@ class ResearchService:
         title = str(getattr(paper, "title", "") or "").strip()
         if not title:
             return []
-        with httpx.Client(timeout=20, follow_redirects=True, trust_env=False) as client:
+        with httpx.Client(timeout=self._research_request_timeout_seconds(), follow_redirects=True, trust_env=False) as client:
             resp = client.get(
                 "https://export.arxiv.org/api/query",
                 params={"search_query": f'ti:"{title}"', "start": "0", "max_results": "3"},
@@ -5436,7 +6209,7 @@ class ResearchService:
         base_id = _paper_token(paper)
         items: list[dict] = []
         try:
-            with httpx.Client(timeout=20, trust_env=False) as client:
+            with httpx.Client(timeout=self._research_request_timeout_seconds(), trust_env=False) as client:
                 work_resp = client.get(
                     f"https://api.openalex.org/works/https://doi.org/{quote_plus(doi)}",
                     params={"select": "id,referenced_works,cited_by_api_url"},
@@ -5497,7 +6270,7 @@ class ResearchService:
         items: list[dict] = []
         url = f"https://api.crossref.org/works/{quote_plus(doi)}"
         try:
-            with httpx.Client(timeout=20, trust_env=False) as client:
+            with httpx.Client(timeout=self._research_request_timeout_seconds(), trust_env=False) as client:
                 resp = client.get(url)
             if resp.status_code >= 400:
                 return [], f"http_{resp.status_code}", f"http_{resp.status_code}"
@@ -5893,12 +6666,7 @@ class ResearchService:
             "sources": constraints.get("sources"),
         }
         sources = _resolve_sources(constraints_seed.get("sources"), self.settings.research_sources_default)
-        search_order = (
-            ("semantic_scholar", "openalex", "arxiv")
-            if self.settings.research_search_openalex_default_enabled
-            else ("semantic_scholar", "arxiv", "openalex")
-        )
-        ordered_sources = [src for src in search_order if src in sources] or list(search_order)
+        ordered_sources = self._ordered_search_sources(sources) or ["dblp", "openalex", "arxiv", "semantic_scholar"]
 
         collected: list[dict] = []
         per_source = max(10, min(100, top_n))
@@ -5913,7 +6681,7 @@ class ResearchService:
             self._record_source_status(source, fetched.status)
             if fetched.papers:
                 collected.extend(fetched.papers)
-            if len(collected) >= top_n * 2:
+            if self._should_stop_search_fanout(collected, top_n=top_n) or len(collected) >= top_n * 2:
                 break
         deduped = self._dedupe_papers(collected)
         if self.settings.research_search_quality_rerank_enabled:
@@ -6295,7 +7063,7 @@ class ResearchService:
         payload: dict | None = None
         for attempt in range(3):
             try:
-                with httpx.Client(timeout=20) as client:
+                with httpx.Client(timeout=self._research_request_timeout_seconds()) as client:
                     resp = client.get(url, params=params, headers=headers)
             except httpx.TimeoutException as exc:
                 if attempt < 2:
@@ -6370,7 +7138,7 @@ class ResearchService:
         q = quote_plus(query)
         url = f"https://export.arxiv.org/api/query?search_query=all:{q}&start={start}&max_results={max_results}"
         try:
-            with httpx.Client(timeout=20) as client:
+            with httpx.Client(timeout=self._research_request_timeout_seconds()) as client:
                 resp = client.get(url)
                 if resp.status_code >= 400:
                     if 500 <= resp.status_code < 600:
@@ -6441,7 +7209,7 @@ class ResearchService:
             upper = year_to or datetime.now().year
             params["filter"] = f"from_publication_date:{lower}-01-01,to_publication_date:{upper}-12-31"
         try:
-            with httpx.Client(timeout=20, trust_env=False) as client:
+            with httpx.Client(timeout=self._research_request_timeout_seconds(), trust_env=False) as client:
                 resp = client.get("https://api.openalex.org/works", params=params)
             if resp.status_code >= 400:
                 if 500 <= resp.status_code < 600:
@@ -6486,6 +7254,66 @@ class ResearchService:
                     "url": str(url or "").strip() or None,
                     "abstract": abstract or None,
                     "source": "openalex",
+                    "relevance_score": None,
+                }
+            )
+        if not papers:
+            return [], "ok_empty", None
+        return papers, "ok", None
+
+    def _search_dblp(self, query: str, *, top_n: int, constraints: dict) -> tuple[list[dict], str, str | None]:
+        params = {
+            "q": query,
+            "h": max(1, min(100, top_n)),
+            "format": "json",
+        }
+        try:
+            with httpx.Client(timeout=self._research_request_timeout_seconds(), trust_env=False, follow_redirects=True) as client:
+                resp = client.get("https://dblp.org/search/publ/api", params=params)
+            if resp.status_code >= 400:
+                if 500 <= resp.status_code < 600:
+                    return [], "http_5xx", f"http_{resp.status_code}"
+                return [], f"http_{resp.status_code}", f"http_{resp.status_code}"
+            payload = resp.json()
+        except httpx.TimeoutException as exc:
+            return [], "timeout", str(exc)
+        except Exception as exc:
+            return [], "transport_error", str(exc)
+
+        result = payload.get("result") if isinstance(payload, dict) else {}
+        hits = result.get("hits") if isinstance(result, dict) else {}
+        raw_hits = hits.get("hit") if isinstance(hits, dict) else []
+        if isinstance(raw_hits, dict):
+            raw_hits = [raw_hits]
+        year_from = _to_int_or_none(constraints.get("year_from"))
+        year_to = _to_int_or_none(constraints.get("year_to"))
+        papers: list[dict] = []
+        for item in raw_hits or []:
+            if not isinstance(item, dict):
+                continue
+            info = item.get("info") if isinstance(item.get("info"), dict) else {}
+            title = str(info.get("title") or "").strip()
+            if not title:
+                continue
+            year = _extract_year_from_text(str(info.get("year") or ""))
+            if year_from and year and year < year_from:
+                continue
+            if year_to and year and year > year_to:
+                continue
+            doi = str(info.get("doi") or "").strip() or None
+            venue = str(info.get("venue") or "").strip() or "DBLP"
+            papers.append(
+                {
+                    "paper_id": str(info.get("key") or item.get("@id") or "").strip() or None,
+                    "title": title,
+                    "title_norm": _normalize_title(title),
+                    "authors": _dblp_authors_to_list(info.get("authors")),
+                    "year": year,
+                    "venue": venue,
+                    "doi": doi,
+                    "url": _dblp_best_url(info),
+                    "abstract": None,
+                    "source": "dblp",
                     "relevance_score": None,
                 }
             )
@@ -7542,8 +8370,15 @@ class ResearchService:
         }
 
     @staticmethod
-    def _http_get_json(url: str, *, headers: dict[str, str] | None = None, params: dict | None = None):
-        with httpx.Client(timeout=30, trust_env=False) as client:
+    def _http_get_json(
+        url: str,
+        *,
+        headers: dict[str, str] | None = None,
+        params: dict | None = None,
+        timeout: float | None = None,
+    ):
+        request_timeout = float(timeout) if timeout is not None else 30.0
+        with httpx.Client(timeout=request_timeout, trust_env=False) as client:
             response = client.get(url, headers=headers or {}, params=params or {})
         if response.status_code >= 400:
             raise ValueError(f"http_{response.status_code}")
@@ -7992,7 +8827,7 @@ def _normalize_cite_key(value: str, *, fallback: str) -> str:
 
 
 def _resolve_sources(sources: object, default_sources: str) -> set[str]:
-    allowed = {"semantic_scholar", "arxiv", "openalex"}
+    allowed = {"semantic_scholar", "arxiv", "openalex", "dblp"}
     values: list[str] = []
     if isinstance(sources, str):
         values = [item.strip().lower() for item in sources.split(",") if item.strip()]
@@ -8041,6 +8876,28 @@ def _resolve_citation_sources(sources: object, default_sources: str) -> list[str
     out = [item for item in values if item in allowed]
     if not out:
         return ["semantic_scholar"]
+    dedup: list[str] = []
+    seen = set()
+    for item in out:
+        if item in seen:
+            continue
+        seen.add(item)
+        dedup.append(item)
+    return dedup
+
+
+def _resolve_doi_sources(sources: object, default_sources: str) -> list[str]:
+    allowed = {"dblp", "openalex", "semantic_scholar", "arxiv", "crossref"}
+    values: list[str] = []
+    if isinstance(sources, str):
+        values = [item.strip().lower() for item in re.split(r"[,\s|]+", sources) if item.strip()]
+    elif isinstance(sources, list):
+        values = [str(item).strip().lower() for item in sources if str(item).strip()]
+    if not values:
+        values = [item.strip().lower() for item in re.split(r"[,\s|]+", default_sources) if item.strip()]
+    out = [item for item in values if item in allowed]
+    if not out:
+        return ["dblp", "openalex", "crossref"]
     dedup: list[str] = []
     seen = set()
     for item in out:
@@ -8188,6 +9045,45 @@ def _normalize_openalex_id(raw: object) -> str:
     if "/" in value:
         value = value.rsplit("/", 1)[-1]
     return value.strip()
+
+
+def _dblp_authors_to_list(raw: object) -> list[str]:
+    if isinstance(raw, dict):
+        author = raw.get("author")
+        if isinstance(author, list):
+            out: list[str] = []
+            for item in author:
+                if isinstance(item, dict):
+                    name = str(item.get("text") or "").strip()
+                else:
+                    name = str(item or "").strip()
+                if name:
+                    out.append(name)
+            return out
+        if isinstance(author, dict):
+            name = str(author.get("text") or "").strip()
+            return [name] if name else []
+        if isinstance(author, str):
+            return [author.strip()] if author.strip() else []
+    if isinstance(raw, list):
+        return [str(item).strip() for item in raw if str(item).strip()]
+    return []
+
+
+def _dblp_best_url(info: dict) -> str | None:
+    ee = info.get("ee")
+    candidates: list[str] = []
+    if isinstance(ee, list):
+        candidates.extend(str(item or "").strip() for item in ee)
+    elif isinstance(ee, str):
+        candidates.append(ee.strip())
+    url = str(info.get("url") or "").strip()
+    if url:
+        candidates.append(url)
+    for item in candidates:
+        if item:
+            return item
+    return None
 
 
 def _citation_neighbor_id(*, title: str, doi: str, fallback_seed: str) -> str:

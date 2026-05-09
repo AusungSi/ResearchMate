@@ -110,7 +110,7 @@ class Settings(BaseSettings):
     research_seed_max_abstract_chars: int = 600
     research_round_topn_default: int = 12
     research_page_size: int = 10
-    research_sources_default: str = "semantic_scholar,arxiv"
+    research_sources_default: str = "dblp,openalex,arxiv"
     research_artifact_dir: str = "./artifacts/research"
     research_save_base_dir: str = "./artifacts/research/saved"
     research_cache_enabled: bool = True
@@ -138,8 +138,13 @@ class Settings(BaseSettings):
     research_graph_paper_limit_default: int = 8
     research_summary_enabled: bool = True
     research_summary_max_chars: int = 8000
-    research_search_openalex_default_enabled: bool = False
+    research_search_openalex_default_enabled: bool = True
     research_search_quality_rerank_enabled: bool = False
+    research_search_request_timeout_seconds: int = 60
+    research_doi_resolution_sources_default: str = "dblp,openalex,arxiv,crossref"
+    research_doi_prefer_formal_publication: bool = True
+    research_doi_keep_preprint_candidate: bool = True
+    research_doi_title_match_threshold: float = 0.93
     research_openclaw_auto_retrieve_enabled: bool = True
     research_openclaw_auto_topn_default: int = 6
     research_venue_metrics_enabled: bool = True

@@ -18,6 +18,8 @@ from app.domain.schemas import (
     ResearchCollectionStudyRequest,
     ResearchCompareRequest,
     ResearchCompareResponse,
+    ResearchTaskDoiEnrichResponse,
+    ResearchTaskPaperBatchRequest,
     ResearchPaperDetailResponse,
     ResearchPaperAssetResponse,
     ResearchVenueMetricsResponse,
@@ -51,6 +53,8 @@ from app.domain.schemas import (
     ResearchGraphBuildResponse,
     ResearchGraphResponse,
     ResearchGraphSnapshotListResponse,
+    ResearchFulltextResolveRequest,
+    ResearchFulltextResolveResponse,
     ResearchRoundProposeRequest,
     ResearchRoundProposeResponse,
     ResearchRoundSelectRequest,
@@ -71,6 +75,8 @@ from app.domain.schemas import (
     ResearchVenueMetricsResponse,
     ResearchWorkbenchConfigResponse,
     ResearchZoteroConfigResponse,
+    ResearchZoteroIdentifierImportRequest,
+    ResearchZoteroIdentifierImportResponse,
     ResearchZoteroImportRequest,
     ResearchZoteroImportResponse,
 )
@@ -444,6 +450,29 @@ async def import_zotero_local_file(
         linked_existing_papers=data["linked_existing_papers"],
         format=data["format"],
     )
+
+
+@router.post("/tasks/{task_id}/zotero/identifiers", response_model=ResearchZoteroIdentifierImportResponse)
+def prepare_task_zotero_identifiers(
+    task_id: str,
+    payload: ResearchZoteroIdentifierImportRequest,
+    user_id: int = Depends(get_current_user_id),
+    db: Session = Depends(get_db),
+    research_service: ResearchService = Depends(get_research_service),
+) -> ResearchZoteroIdentifierImportResponse:
+    try:
+        data = research_service.prepare_zotero_identifier_import(
+            db,
+            user_id=user_id,
+            task_id=task_id,
+            paper_ids=payload.paper_ids,
+            limit=payload.limit,
+            enrich_missing_doi=payload.enrich_missing_doi,
+            filename=payload.filename,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return ResearchZoteroIdentifierImportResponse(**data)
 
 
 @router.get("/tasks/{task_id}", response_model=ResearchTaskResponse)
@@ -835,6 +864,27 @@ def compare_task_papers(
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     return ResearchCompareResponse(**data)
+
+
+@router.post("/tasks/{task_id}/papers/doi/enrich", response_model=ResearchTaskDoiEnrichResponse)
+def enrich_task_paper_doi(
+    task_id: str,
+    payload: ResearchTaskPaperBatchRequest,
+    user_id: int = Depends(get_current_user_id),
+    db: Session = Depends(get_db),
+    research_service: ResearchService = Depends(get_research_service),
+) -> ResearchTaskDoiEnrichResponse:
+    try:
+        data = research_service.enrich_task_paper_doi(
+            db,
+            user_id=user_id,
+            task_id=task_id,
+            paper_ids=payload.paper_ids,
+            limit=payload.limit,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return ResearchTaskDoiEnrichResponse(**data)
 
 
 @router.get("/tasks/{task_id}/venues/metrics", response_model=ResearchVenueMetricsResponse)
@@ -1332,6 +1382,28 @@ def fulltext_status(
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     return ResearchFulltextStatusResponse(**data)
+
+
+@router.post("/tasks/{task_id}/fulltext/resolve", response_model=ResearchFulltextResolveResponse)
+def resolve_fulltext_candidates(
+    task_id: str,
+    payload: ResearchFulltextResolveRequest,
+    user_id: int = Depends(get_current_user_id),
+    db: Session = Depends(get_db),
+    research_service: ResearchService = Depends(get_research_service),
+) -> ResearchFulltextResolveResponse:
+    try:
+        data = research_service.resolve_task_fulltext_candidates(
+            db,
+            user_id=user_id,
+            task_id=task_id,
+            paper_ids=payload.paper_ids,
+            limit=payload.limit,
+            enrich_doi=payload.enrich_doi,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return ResearchFulltextResolveResponse(**data)
 
 
 @router.post("/tasks/{task_id}/papers/{paper_id:path}/pdf/upload")

@@ -14,6 +14,7 @@ import { RunTimeline } from "./components/RunTimeline";
 import { SectionTitle, SmallButton } from "./components/shared";
 import { edgeCountLabel } from "./display";
 import { useRunEvents } from "./hooks/useRunEvents";
+import { buildCollectionItems, getSelectedPaperIds } from "./selection";
 import type {
   ActionResponse,
   ActionStatus,
@@ -524,14 +525,7 @@ export function Workbench() {
 
   const selectedNode = nodes.find((node) => node.id === selectedNodeId) || null;
   const selectedPaperId = selectedNode && isPaperNode(selectedNode) ? selectedNode.id : "";
-  const selectedPaperIds = useMemo(
-    () =>
-      selectedNodeIds.filter((nodeId) => {
-        const node = nodes.find((item) => item.id === nodeId);
-        return isPaperNode(node ? node : nodeId);
-      }),
-    [nodes, selectedNodeIds],
-  );
+  const selectedPaperIds = useMemo(() => getSelectedPaperIds(nodes, selectedNodeIds), [nodes, selectedNodeIds]);
   const selectedPaperCount = selectedPaperIds.length;
 
   useEffect(() => {
@@ -1379,7 +1373,7 @@ export function Workbench() {
     if (pendingCollectionPaperIds.length && activeTaskId) {
       await addItemsToCollection.mutateAsync({
         collectionId: created.collection_id,
-        items: pendingCollectionPaperIds.map((paperId) => ({ task_id: activeTaskId, paper_id: paperId })),
+        items: buildCollectionItems(activeTaskId, pendingCollectionPaperIds),
       });
     }
     setCollectionDraft({ name: "", description: "" });
@@ -1400,7 +1394,7 @@ export function Workbench() {
     if (!activeTaskId || !pendingCollectionPaperIds.length) return;
     await addItemsToCollection.mutateAsync({
       collectionId,
-      items: pendingCollectionPaperIds.map((paperId) => ({ task_id: activeTaskId, paper_id: paperId })),
+      items: buildCollectionItems(activeTaskId, pendingCollectionPaperIds),
     });
     closeCenterSheet();
   }

@@ -749,6 +749,9 @@ def test_canvas_ui_and_provider_status_are_available():
         assert config_resp.status_code == 200
         config = config_resp.json()
         assert "openalex" in config["discovery_providers"]
+        assert "dblp" in config["discovery_providers"]
+        assert "dblp" in config["doi_resolution_sources"]
+        assert config["doi_resolution_policy"]["prefer_formal_publication"] is True
         assert any(item["role"] == "citation" for item in config["provider_status"])
     finally:
         client.close()
@@ -764,7 +767,7 @@ def test_zotero_import_creates_collection(monkeypatch):
     try:
         settings.zotero_library_id = "12345"
 
-        def fake_http_get_json(url, *, headers=None, params=None):
+        def fake_http_get_json(url, *, headers=None, params=None, timeout=None):
             if url.endswith("/collections/ABCD"):
                 return {"data": {"name": "Zotero Demo"}}
             return [
