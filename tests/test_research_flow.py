@@ -894,6 +894,8 @@ def test_research_search_prefers_ranked_venue_over_arxiv_when_rerank_enabled(db_
 
 def test_doi_enrichment_does_not_overwrite_existing_doi(db_session):
     service = ResearchService(openclaw_client=FakeOpenClawClient(), wecom_client=None)
+    service.settings.research_doi_resolution_sources_default = "crossref"
+    service._build_seed_corpus_for_task = lambda db, task, constraints: []  # noqa: E731
     user = UserRepo(db_session).get_or_create("research-doi-user", timezone_name="Asia/Shanghai")
     task = service.create_task(
         db_session,

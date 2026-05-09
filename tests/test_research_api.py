@@ -368,6 +368,8 @@ def test_doi_enrich_zotero_identifier_and_fulltext_resolution_endpoints(tmp_path
     client, service, user, db_session = _build_test_client()
     try:
         service.settings.research_artifact_dir = str(tmp_path)
+        service.settings.research_doi_resolution_sources_default = "crossref"
+        service._build_seed_corpus_for_task = lambda db, task, constraints: []  # noqa: E731
         task = service.create_task(
             db_session,
             user_id=user.id,
