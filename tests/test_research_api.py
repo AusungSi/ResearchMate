@@ -395,7 +395,7 @@ def test_doi_enrich_zotero_identifier_and_fulltext_resolution_endpoints(tmp_path
                 }
             ],
         )
-        service._http_get_json = lambda url, *, headers=None, params=None: {  # noqa: E731
+        service._http_get_json = lambda url, *, headers=None, params=None, timeout=None: {  # noqa: E731
             "message": {
                 "items": [
                     {

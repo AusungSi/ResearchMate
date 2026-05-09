@@ -148,6 +148,52 @@ class ResearchService:
             "research_search_source_status": dict(self.research_search_source_status),
         }
 
+    def _research_request_timeout_seconds(self) -> int:
+        return max(10, int(getattr(self.settings, "research_search_request_timeout_seconds", 60) or 60))
+
+    def _ordered_search_sources(self, allowed_sources: set[str]) -> list[str]:
+        if not allowed_sources:
+            return []
+        search_order = (
+            ("dblp", "openalex", "arxiv", "semantic_scholar")
+            if self.settings.research_search_openalex_default_enabled
+            else ("dblp", "arxiv", "openalex", "semantic_scholar")
+        )
+        ordered = [source for source in search_order if source in allowed_sources]
+        if self.settings.semantic_scholar_api_key.strip():
+            return ordered
+        # Keep Semantic Scholar opt-in and last when no API key is configured,
+        # because repeated 429s make the retrieval path unpredictable.
+        return [source for source in ordered if source != "semantic_scholar"] + (
+            ["semantic_scholar"] if "semantic_scholar" in ordered else []
+        )
+
+    def _should_stop_search_fanout(self, all_papers: list[dict], *, top_n: int) -> bool:
+        if not all_papers:
+            return False
+        unique_papers = self._dedupe_papers(all_papers)
+        unique_count = len(unique_papers)
+        threshold = max(int(top_n), min(120, int(top_n * 1.2)))
+        if unique_count >= threshold:
+            return True
+        if unique_count < int(top_n):
+            return False
+        sample = unique_papers[: max(1, int(top_n))]
+        doi_count = sum(1 for item in sample if self._normalize_doi_value(item.get("doi")))
+        formal_count = sum(
+            1
+            for item in sample
+            if self._candidate_publication_kind(
+                doi=item.get("doi"),
+                venue=item.get("venue"),
+                source=str(item.get("source") or ""),
+            )
+            == "formal"
+        )
+        doi_rate = doi_count / max(1, len(sample))
+        formal_rate = formal_count / max(1, len(sample))
+        return doi_rate >= 0.8 or formal_rate >= 0.75
+
     def _should_use_embodied_preset(self, *texts: str | None) -> bool:
         keywords = (
             "embodied ai",
@@ -3014,15 +3060,18 @@ class ResearchService:
         )
         for source in sources:
             try:
+                source_candidates: list[dict] = []
                 if source == "crossref":
                     candidate = self._resolve_crossref_doi_for_paper(paper)
                     if candidate:
-                        candidates.append(candidate)
-                    continue
-                if source == "arxiv":
-                    candidates.extend(self._resolve_arxiv_doi_candidates_for_paper(paper))
-                    continue
-                candidates.extend(self._resolve_search_source_doi_candidates_for_paper(paper, source=source))
+                        source_candidates.append(candidate)
+                elif source == "arxiv":
+                    source_candidates.extend(self._resolve_arxiv_doi_candidates_for_paper(paper))
+                else:
+                    source_candidates.extend(self._resolve_search_source_doi_candidates_for_paper(paper, source=source))
+                candidates.extend(source_candidates)
+                if any(self._is_strong_doi_candidate(item) for item in source_candidates):
+                    break
             except Exception as exc:
                 logger.warning(
                     "research_doi_resolve_source_failed source=%s title=%s error=%s",
@@ -3202,7 +3251,12 @@ class ResearchService:
             "User-Agent": "ResearchMate/0.1 (research doi enrichment)",
             "Accept": "application/json",
         }
-        payload = self._http_get_json("https://api.crossref.org/works", headers=headers, params=params)
+        payload = self._http_get_json(
+            "https://api.crossref.org/works",
+            headers=headers,
+            params=params,
+            timeout=self._research_request_timeout_seconds(),
+        )
         message = payload.get("message") if isinstance(payload, dict) else {}
         raw_items = message.get("items") if isinstance(message, dict) else []
         best: dict | None = None
@@ -3243,6 +3297,13 @@ class ResearchService:
                 ),
             }
         return best
+
+    def _is_strong_doi_candidate(self, candidate: dict) -> bool:
+        kind = str(candidate.get("publication_kind") or "").strip().lower()
+        source = str(candidate.get("source") or "").strip().lower()
+        score = float(candidate.get("match_score") or 0.0)
+        threshold = float(self.settings.research_doi_title_match_threshold)
+        return kind == "formal" and source in {"dblp", "openalex", "crossref"} and score >= threshold
 
     @staticmethod
     def _crossref_work_year(raw: dict) -> int | None:
@@ -4226,12 +4287,7 @@ class ResearchService:
         cache_repo = ResearchSearchCacheRepo(db)
         for query in query_terms[:4]:
             effective_query = _merge_query_and_excludes(query, exclude_terms)
-            search_order = (
-                ("semantic_scholar", "openalex", "arxiv", "dblp")
-                if self.settings.research_search_openalex_default_enabled
-                else ("semantic_scholar", "arxiv", "openalex", "dblp")
-            )
-            ordered_sources = [src for src in search_order if src in allowed_sources]
+            ordered_sources = self._ordered_search_sources(allowed_sources)
             for source in ordered_sources:
                 result = self._search_with_cache(
                     cache_repo=cache_repo,
@@ -4256,6 +4312,10 @@ class ResearchService:
                 all_papers.extend(result.papers)
                 if touch_lease:
                     touch_lease()
+                if self._should_stop_search_fanout(all_papers, top_n=top_n):
+                    break
+            if self._should_stop_search_fanout(all_papers, top_n=top_n):
+                break
         papers = self._dedupe_papers(all_papers)
         if self.settings.research_search_quality_rerank_enabled:
             papers = self._rank_discovered_papers(papers, top_n=top_n, constraints=constraints)
@@ -5269,12 +5329,7 @@ class ResearchService:
         allowed_sources = _resolve_sources(constraints.get("sources"), self.settings.research_sources_default)
         if not allowed_sources:
             allowed_sources = {"semantic_scholar"}
-        search_order = (
-            ("semantic_scholar", "openalex", "arxiv", "dblp")
-            if self.settings.research_search_openalex_default_enabled
-            else ("semantic_scholar", "arxiv", "openalex", "dblp")
-        )
-        ordered_sources = [source for source in search_order if source in allowed_sources]
+        ordered_sources = self._ordered_search_sources(allowed_sources)
         cache_repo = ResearchSearchCacheRepo(db)
         all_papers: list[dict] = []
         source_statuses: list[dict] = []
@@ -5317,6 +5372,10 @@ class ResearchService:
                 all_papers.extend(result.papers)
                 if touch_lease:
                     touch_lease()
+                if self._should_stop_search_fanout(all_papers, top_n=top_n):
+                    break
+            if self._should_stop_search_fanout(all_papers, top_n=top_n):
+                break
 
         papers = self._dedupe_papers(all_papers)
         if self.settings.research_search_quality_rerank_enabled:
@@ -5881,9 +5940,10 @@ class ResearchService:
         params = {"fields": "openAccessPdf,externalIds,url"}
         headers = {"User-Agent": "MemoMate/0.1 (research)"}
         api_key = self.settings.semantic_scholar_api_key.strip()
-        if api_key:
-            headers["x-api-key"] = api_key
-        with httpx.Client(timeout=20, follow_redirects=True, trust_env=False) as client:
+        if not api_key:
+            return []
+        headers["x-api-key"] = api_key
+        with httpx.Client(timeout=self._research_request_timeout_seconds(), follow_redirects=True, trust_env=False) as client:
             resp = client.get(
                 f"https://api.semanticscholar.org/graph/v1/paper/{quote_plus(identifier)}",
                 params=params,
@@ -5913,7 +5973,7 @@ class ResearchService:
         doi = str(getattr(paper, "doi", "") or "").strip().lower()
         if not doi:
             return []
-        with httpx.Client(timeout=20, follow_redirects=True, trust_env=False) as client:
+        with httpx.Client(timeout=self._research_request_timeout_seconds(), follow_redirects=True, trust_env=False) as client:
             resp = client.get(
                 "https://api.openalex.org/works",
                 params={"filter": f"doi:https://doi.org/{doi}", "per-page": "1"},
@@ -5953,7 +6013,7 @@ class ResearchService:
         title = str(getattr(paper, "title", "") or "").strip()
         if not title:
             return []
-        with httpx.Client(timeout=20, follow_redirects=True, trust_env=False) as client:
+        with httpx.Client(timeout=self._research_request_timeout_seconds(), follow_redirects=True, trust_env=False) as client:
             resp = client.get(
                 "https://export.arxiv.org/api/query",
                 params={"search_query": f'ti:"{title}"', "start": "0", "max_results": "3"},
@@ -6149,7 +6209,7 @@ class ResearchService:
         base_id = _paper_token(paper)
         items: list[dict] = []
         try:
-            with httpx.Client(timeout=20, trust_env=False) as client:
+            with httpx.Client(timeout=self._research_request_timeout_seconds(), trust_env=False) as client:
                 work_resp = client.get(
                     f"https://api.openalex.org/works/https://doi.org/{quote_plus(doi)}",
                     params={"select": "id,referenced_works,cited_by_api_url"},
@@ -6210,7 +6270,7 @@ class ResearchService:
         items: list[dict] = []
         url = f"https://api.crossref.org/works/{quote_plus(doi)}"
         try:
-            with httpx.Client(timeout=20, trust_env=False) as client:
+            with httpx.Client(timeout=self._research_request_timeout_seconds(), trust_env=False) as client:
                 resp = client.get(url)
             if resp.status_code >= 400:
                 return [], f"http_{resp.status_code}", f"http_{resp.status_code}"
@@ -6606,12 +6666,7 @@ class ResearchService:
             "sources": constraints.get("sources"),
         }
         sources = _resolve_sources(constraints_seed.get("sources"), self.settings.research_sources_default)
-        search_order = (
-            ("semantic_scholar", "openalex", "arxiv", "dblp")
-            if self.settings.research_search_openalex_default_enabled
-            else ("semantic_scholar", "arxiv", "openalex", "dblp")
-        )
-        ordered_sources = [src for src in search_order if src in sources] or list(search_order)
+        ordered_sources = self._ordered_search_sources(sources) or ["dblp", "openalex", "arxiv", "semantic_scholar"]
 
         collected: list[dict] = []
         per_source = max(10, min(100, top_n))
@@ -6626,7 +6681,7 @@ class ResearchService:
             self._record_source_status(source, fetched.status)
             if fetched.papers:
                 collected.extend(fetched.papers)
-            if len(collected) >= top_n * 2:
+            if self._should_stop_search_fanout(collected, top_n=top_n) or len(collected) >= top_n * 2:
                 break
         deduped = self._dedupe_papers(collected)
         if self.settings.research_search_quality_rerank_enabled:
@@ -7008,7 +7063,7 @@ class ResearchService:
         payload: dict | None = None
         for attempt in range(3):
             try:
-                with httpx.Client(timeout=20) as client:
+                with httpx.Client(timeout=self._research_request_timeout_seconds()) as client:
                     resp = client.get(url, params=params, headers=headers)
             except httpx.TimeoutException as exc:
                 if attempt < 2:
@@ -7083,7 +7138,7 @@ class ResearchService:
         q = quote_plus(query)
         url = f"https://export.arxiv.org/api/query?search_query=all:{q}&start={start}&max_results={max_results}"
         try:
-            with httpx.Client(timeout=20) as client:
+            with httpx.Client(timeout=self._research_request_timeout_seconds()) as client:
                 resp = client.get(url)
                 if resp.status_code >= 400:
                     if 500 <= resp.status_code < 600:
@@ -7154,7 +7209,7 @@ class ResearchService:
             upper = year_to or datetime.now().year
             params["filter"] = f"from_publication_date:{lower}-01-01,to_publication_date:{upper}-12-31"
         try:
-            with httpx.Client(timeout=20, trust_env=False) as client:
+            with httpx.Client(timeout=self._research_request_timeout_seconds(), trust_env=False) as client:
                 resp = client.get("https://api.openalex.org/works", params=params)
             if resp.status_code >= 400:
                 if 500 <= resp.status_code < 600:
@@ -7213,7 +7268,7 @@ class ResearchService:
             "format": "json",
         }
         try:
-            with httpx.Client(timeout=20, trust_env=False, follow_redirects=True) as client:
+            with httpx.Client(timeout=self._research_request_timeout_seconds(), trust_env=False, follow_redirects=True) as client:
                 resp = client.get("https://dblp.org/search/publ/api", params=params)
             if resp.status_code >= 400:
                 if 500 <= resp.status_code < 600:
@@ -8315,8 +8370,15 @@ class ResearchService:
         }
 
     @staticmethod
-    def _http_get_json(url: str, *, headers: dict[str, str] | None = None, params: dict | None = None):
-        with httpx.Client(timeout=30, trust_env=False) as client:
+    def _http_get_json(
+        url: str,
+        *,
+        headers: dict[str, str] | None = None,
+        params: dict | None = None,
+        timeout: float | None = None,
+    ):
+        request_timeout = float(timeout) if timeout is not None else 30.0
+        with httpx.Client(timeout=request_timeout, trust_env=False) as client:
             response = client.get(url, headers=headers or {}, params=params or {})
         if response.status_code >= 400:
             raise ValueError(f"http_{response.status_code}")

@@ -767,7 +767,7 @@ def test_zotero_import_creates_collection(monkeypatch):
     try:
         settings.zotero_library_id = "12345"
 
-        def fake_http_get_json(url, *, headers=None, params=None):
+        def fake_http_get_json(url, *, headers=None, params=None, timeout=None):
             if url.endswith("/collections/ABCD"):
                 return {"data": {"name": "Zotero Demo"}}
             return [

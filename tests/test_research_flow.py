@@ -922,7 +922,7 @@ def test_doi_enrichment_does_not_overwrite_existing_doi(db_session):
             }
         ],
     )
-    service._http_get_json = lambda url, *, headers=None, params=None: {  # noqa: E731
+    service._http_get_json = lambda url, *, headers=None, params=None, timeout=None: {  # noqa: E731
         "message": {
             "items": [
                 {

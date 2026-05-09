@@ -53,6 +53,7 @@ cloudflared
 .wsl-tools/
 
 # Frontend local artifacts
+node_modules/
 frontend/node_modules/
 frontend/dist/
 frontend/*.tsbuildinfo
@@ -60,6 +61,10 @@ frontend/vite.config.js
 frontend/vite.config.d.ts
 frontend/tailwind.config.js
 frontend/tailwind.config.d.ts
+
+# Local browser/session experiments
+tmp/
+tmp-*.md
 
 # OS
 .DS_Store
