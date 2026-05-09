@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 from contextlib import contextmanager
+from pathlib import Path
 
 from sqlalchemy import create_engine, event, inspect, text
+from sqlalchemy.engine import make_url
 from sqlalchemy.orm import Session, sessionmaker
 
 from app.core.config import get_settings
@@ -16,6 +18,7 @@ def _build_engine():
     db_url = settings.db_url
     connect_args: dict[str, object] = {}
     if db_url.startswith("sqlite"):
+        _ensure_sqlite_parent_dir(db_url)
         # WSL research_local runs backend + worker against the same SQLite file.
         # A longer timeout plus WAL mode makes concurrent reads/writes much less fragile.
         connect_args = {
@@ -37,6 +40,16 @@ def _build_engine():
             finally:
                 cursor.close()
     return built
+
+
+def _ensure_sqlite_parent_dir(db_url: str) -> None:
+    database = make_url(db_url).database
+    if not database or database == ":memory:":
+        return
+    parent = Path(database).expanduser().parent
+    if str(parent) in {"", "."}:
+        return
+    parent.mkdir(parents=True, exist_ok=True)
 
 
 engine = _build_engine()
