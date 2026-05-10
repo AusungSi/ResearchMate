@@ -321,17 +321,6 @@ class BrowserPaperFetcher:
         self._wait_for_source_ready(page, source="semantic_scholar")
         return page.content()
 
-    def init_semantic_scholar_session(self) -> None:
-        context = self._ensure_semantic_scholar_context()
-        page = context.new_page()
-        try:
-            page.goto("https://www.semanticscholar.org/", wait_until="domcontentloaded", timeout=max(self.page_timeout_ms, 60000))
-            self._dismiss_cookie_overlays(page)
-            print("Semantic Scholar session initialized. Complete cookie/login/verification in the opened browser, then close the browser window.")
-            page.wait_for_timeout(120000)
-        finally:
-            context.close()
-
     def _wait_for_source_ready(self, page, *, source: str) -> None:
         selectors = {
             "arxiv": "li.arxiv-result",
